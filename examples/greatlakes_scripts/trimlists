@@ -1,0 +1,85 @@
+#!/bin/bash
+
+# Remove duplicates from one list that appear in another list
+# 
+# Usage: $0 <output_file> <primary_file> <secondary_file>
+#
+# Removes lines from PRIMARY_FILE that also appear in SECONDARY_FILE,
+# and saves the result to OUTPUT_FILE
+#
+# Example: ./dedup_lists.sh modeling_run_02_trimmed modeling_run_02_orig modeling_run_01
+#   This will remove from modeling_run_02_orig any lines that appear in modeling_run_01
+#   and save the deduplicated result as modeling_run_02_trimmed
+
+if [ $# -ne 3 ]; then
+    echo "Usage: $0 <output_file> <primary_file> <secondary_file>" >&2
+    echo ""
+    echo "Remove lines from PRIMARY_FILE that appear in SECONDARY_FILE"
+    echo "and save the result to OUTPUT_FILE"
+    echo ""
+    echo "Example: $0 modeling_run_02_trimmed modeling_run_02_orig modeling_run_01"
+    exit 1
+fi
+
+output_file=$1
+primary_file=$2
+secondary_file=$3
+
+# Verify input files exist
+if [ ! -f "$primary_file" ]; then
+    echo "Error: File not found: $primary_file" >&2
+    exit 1
+fi
+
+if [ ! -f "$secondary_file" ]; then
+    echo "Error: File not found: $secondary_file" >&2
+    exit 1
+fi
+
+echo "=== Removing duplicates ==="
+echo ""
+
+# Count original lines
+original_lines=$(wc -l < "$primary_file")
+compare_lines=$(wc -l < "$secondary_file")
+
+echo "Input files:"
+echo "  Primary (to deduplicate): $primary_file ($original_lines lines)"
+echo "  Secondary (to compare against): $secondary_file ($compare_lines lines)"
+echo ""
+
+# Create sorted temporary files
+sort "$primary_file" > /tmp/dedup_main_$$
+sort "$secondary_file" > /tmp/dedup_compare_$$
+
+# Find lines in primary_file that are NOT in secondary_file
+comm -23 /tmp/dedup_main_$$ /tmp/dedup_compare_$$ > "$output_file"
+
+# Find duplicates (lines that appear in both files)
+comm -12 /tmp/dedup_main_$$ /tmp/dedup_compare_$$ > /tmp/dedup_duplicates_$$
+
+# Count results
+unique_lines=$(wc -l < "$output_file")
+duplicates=$(wc -l < /tmp/dedup_duplicates_$$)
+
+echo "Results:"
+echo "  Lines in output: $unique_lines"
+echo "  Duplicates removed: $duplicates"
+echo "  Duplicate percentage: $(awk "BEGIN {printf \"%.1f%%\", ($duplicates/$original_lines)*100}")  "
+echo ""
+
+echo "Output file: $output_file"
+echo ""
+
+# Show some duplicates if there are any
+if [ $duplicates -gt 0 ] && [ $duplicates -le 10 ]; then
+    echo "Duplicates found (first few):"
+    head -5 /tmp/dedup_duplicates_$$
+    echo ""
+fi
+
+# Cleanup
+rm -f /tmp/dedup_main_$$ /tmp/dedup_compare_$$ /tmp/dedup_duplicates_$$
+
+echo "Done!"
+

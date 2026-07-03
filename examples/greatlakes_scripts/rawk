@@ -1,0 +1,13 @@
+name=$1
+awk '{s+=1; if(s==4) print $4}' ${name} > t1
+awk '{s+=1; if(s==3) print $1}' ${name} > t1b
+paste t1 t1b | awk '{print $1,$2}' > t3
+echo ${name} > t1
+paste t1 t3 > t2
+sed s/"res.m"/" "/ t2 \
+	| sed s/"b"/" "/ \
+	| sed s/"r"/" "/ \
+	| sed s/"v"/" "/ \
+	| sed s/"i"/" "/ \
+	| sed s/"x"/" "/ > t1
+mv t1 "c"${name}

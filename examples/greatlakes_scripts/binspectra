@@ -1,0 +1,209 @@
+#!/bin/bash
+set +o noclobber
+
+# Source the SCO environment configuration
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${script_dir}/sco_env.sh"
+
+# Get the current directory where the script is being run
+current_dir=$(pwd)
+turbodir="${SCO_GALAXY_DATA_ROOT}"
+
+# Infer galaxy name from directory structure when possible.
+# Expected run location: <analysis_root>/<galaxy>/kinematics
+inferred_galaxy=""
+if [ "$(basename "$current_dir")" == "kinematics" ]; then
+    inferred_galaxy="$(basename "$(dirname "$current_dir")")"
+fi
+
+# Config file to store last inputs
+config_file="${current_dir}/.lastinput_binspectra"
+
+# Prompt Function for user inputs
+prompt_with_default() {
+    local prompt_message=$1
+    local default_value=$2
+    read -p "$prompt_message [${default_value}]: " input_value
+    if [ -z "$input_value" ]; then
+        input_value=$default_value
+    fi
+    echo $input_value
+}
+
+# Load previous script inputs if the config file exists
+if [[ -f $config_file ]]; then
+    source $config_file
+else
+    last_galaxy=""
+    last_spectrograph=""
+    last_rotation_axis=""
+    last_rotation_axis_muse=""
+    last_rotation_axis_stis=""
+fi
+
+# Prompt the user for galaxy, spectrograph, and rotation axis
+default_galaxy="$last_galaxy"
+if [ -n "$inferred_galaxy" ]; then
+    default_galaxy="$inferred_galaxy"
+fi
+
+galaxy=$(prompt_with_default "Enter the galaxy directory" "$default_galaxy")
+if [ -z "$galaxy" ]; then
+    echo "Galaxy must be provided."
+    exit 1
+fi
+
+if [ -n "$inferred_galaxy" ] && [ "$galaxy" != "$inferred_galaxy" ]; then
+    echo "Warning: Entered galaxy '$galaxy' does not match current directory galaxy '$inferred_galaxy'."
+    read -p "Use inferred galaxy '$inferred_galaxy' instead? (Y/N): " use_inferred
+    if [[ "${use_inferred:-Y}" =~ ^[Yy]$ ]]; then
+        galaxy="$inferred_galaxy"
+    fi
+fi
+
+spectrograph=$(prompt_with_default "Enter the spectrograph (muse/stis/both)" "$last_spectrograph")
+if [ -z "$spectrograph" ]; then
+    echo "Spectrograph must be provided."
+    exit 1
+fi
+
+case "$spectrograph" in
+    muse|stis|both)
+        ;;
+    *)
+        echo "Invalid spectrograph '$spectrograph'. Use muse, stis, or both."
+        exit 1
+        ;;
+esac
+
+if [ "$spectrograph" == "both" ]; then
+    rotation_axis_muse=$(prompt_with_default "Enter the rotation axis for muse" "$last_rotation_axis_muse")
+    rotation_axis_stis=$(prompt_with_default "Enter the rotation axis for stis" "$last_rotation_axis_stis")
+else
+    rotation_axis=$(prompt_with_default "Enter the rotation axis" "$last_rotation_axis")
+fi
+
+# Save the inputs for future use
+if [ "$spectrograph" == "both" ]; then
+cat <<EOL > $config_file
+last_galaxy=$galaxy
+last_spectrograph=$spectrograph
+last_rotation_axis_muse=$rotation_axis_muse
+last_rotation_axis_stis=$rotation_axis_stis
+EOL
+else
+cat <<EOL > $config_file
+last_galaxy=$galaxy
+last_spectrograph=$spectrograph
+last_rotation_axis=$rotation_axis
+EOL
+fi
+
+# Determine which spectrographs to process
+if [ "$spectrograph" == "both" ]; then
+    spectrograph_list=("muse" "stis")
+else
+    spectrograph_list=("$spectrograph")
+fi
+
+for sg in "${spectrograph_list[@]}"; do
+    echo "Processing $sg data..."
+
+    # Set working directory for each spectrograph
+    work_dir="${current_dir}/${sg}/spectral_binning"
+    if [ ! -d "$work_dir" ]; then
+        echo "Directory $work_dir does not exist, skipping $sg."
+        continue
+    fi
+    cd "$work_dir"
+
+    # Create a directory to store problematic bins
+    bad_spec_dir="./bad_spec"
+    mkdir -p $bad_spec_dir
+
+    # Select correct rotation axis
+    if [ "$spectrograph" == "both" ]; then
+        if [ "$sg" == "muse" ]; then
+            this_rotation_axis="$rotation_axis_muse"
+        else
+            this_rotation_axis="$rotation_axis_stis"
+        fi
+    else
+        this_rotation_axis="$rotation_axis"
+    fi
+
+    # Validate required inputs and update working files
+    rm -f vels.dat bin_r.out bin_v.out
+    spec_table_path="${turbodir}/${galaxy}/olm_data/${sg}/spec_table.dat"
+    sb_out_dir="$(sco_get_sb_analysis_path "$galaxy")/binning/binning.outputs"
+    bin_r_path="${sb_out_dir}/bin_r.out"
+    bin_v_path="${sb_out_dir}/bin_v.out"
+
+    if [ ! -f "$spec_table_path" ]; then
+        echo "Missing spec_table.dat for $sg: $spec_table_path"
+        echo "Skipping $sg."
+        continue
+    fi
+    if [ ! -f "$bin_r_path" ] || [ ! -f "$bin_v_path" ]; then
+        echo "Missing SB binning outputs for galaxy '$galaxy'."
+        echo "Expected: $bin_r_path"
+        echo "Expected: $bin_v_path"
+        echo "Run sbanalysis first (and confirm galaxy name) before binspectra. Skipping $sg."
+        continue
+    fi
+
+    cp "$spec_table_path" vels.dat
+    cp "$bin_r_path" .
+    cp "$bin_v_path" .
+
+    # Create a temporary file to hold input for plotbin3
+    temp_input_file=$(mktemp)
+    echo "$this_rotation_axis" > $temp_input_file
+    echo "/NULL" >> $temp_input_file
+
+    # bin the spectra
+    rm -f b??????
+    echo "rplotbin3" ${this_rotation_axis} > plotbin3_list
+    chmod +x plotbin3_list
+    plotbin3_list >> plotbin3.output
+#    rm -f $temp_input_file
+
+    # Cleanup: remove the temporary files
+    rm -f out plotbin3_list
+
+    # Ensure we only handle b?????? files in the directory
+    bfiles=$(ls b?????? 2> /dev/null)
+
+    if [ -z "$bfiles" ]; then
+        echo "No b?????? files found in $work_dir"
+        continue
+    fi
+
+    # Get rid of known bad spec files
+    if [ -f "${work_dir}/known_bad_spectra" ]; then 
+       echo "Removing known bad spectra..."
+         rm -f ${work_dir}/bad_spec/*
+       "${work_dir}/known_bad_spectra"
+    fi
+
+
+    # Run rcomb on each b?????? file
+    rm -f rcomb.output
+
+    for file in $bfiles; do
+        if [ -f "$file" ]; then
+            echo "Processing $file..."
+            rcomb "$file" "$galaxy" "$sg" >> rcomb.output
+        else
+            echo "File $file does not exist, skipping..." >> rcomb.output
+        fi
+    done
+
+    rm -f imcmb.def
+
+    echo "Spectra combination for $sg completed."
+    echo "Combined spectra and output files for $sg moved to the $sg kinematic_extraction directory"
+done
+
+cd "${current_dir}"
+

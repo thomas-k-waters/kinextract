@@ -1,0 +1,25 @@
+cff-version: 1.2.0
+title: "kinextract: Non-parametric binned-LOSVD spectral fitter for galaxy kinematics"
+message: "If you use this software in your research, please cite it as below."
+type: software
+authors:
+  - family-names: Waters
+    given-names: Thomas, K.
+    affiliation: University of Michigan
+version: 0.1.0
+date-released: "2026-06-25"
+url: "https://github.com/gultekingroup/kinextract"
+abstract: >
+  kinextract fits galaxy spectra using a non-parametric line-of-sight velocity
+  distribution (LOSVD) represented directly on a velocity grid.  An
+  asymmetric-least-squares (ALS) baseline is co-fitted with the LOSVD,
+  and regularization strength is selected automatically via a roughness
+  criterion.  The package targets integral-field-spectroscopy data (MUSE,
+  STIS) for black-hole mass measurements through Schwarzschild orbit modelling.
+keywords:
+  - astronomy
+  - spectroscopy
+  - galaxy kinematics
+  - LOSVD
+  - Schwarzschild modelling
+license: MIT

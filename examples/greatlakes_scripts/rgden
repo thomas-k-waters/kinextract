@@ -1,0 +1,19 @@
+#!/bin/bash
+set +o noclobber
+
+current_dir=$(pwd)
+
+inclination=$1
+Upsilon=$2
+
+
+gden << eof
+gden.use
+0.005
+$inclination
+0.
+$Upsilon 1
+3
+150 1.
+eof
+

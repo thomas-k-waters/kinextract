@@ -1,0 +1,37 @@
+#!/bin/bash
+set +o noclobber
+
+# Source the SCO environment configuration
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${script_dir}/sco_env.sh"
+
+name=$1
+galaxy=$2
+spectrograph=$3
+
+# Ensure we are in the directory containing the spectrum files
+current_dir=$(pwd)
+
+# Remove any existing files
+rm -f ${current_dir}/../kinematic_extraction/names.out
+rm -f ${current_dir}/../kinematic_extraction/imcmb.def
+
+
+# Construct the new path dynamically
+path="${SCO_GALAXY_DATA_ROOT}/${galaxy}/olm_data/${spectrograph}/spec_files"
+
+# Generate the list input file for imcmb
+awk -v path="$path" '{print "\"" path "/" $1 ".fits\""}' "$name" > ${current_dir}/l1
+
+# Run the imcmb application
+"${SCO_FRAMEWORK_BIN}/imcmb" << eof
+l1
+eof
+
+# Move the generated imcmb.spec to the original directory with the desired name
+mv ${current_dir}/imcmb.spec "${current_dir}/../kinematic_extraction/${name}sp.spec"
+rm ${current_dir}/l1
+
+# Set NaN or negative fluxes to zero, keep all lines
+awk '{if($2 == "NaN" || $2+0 < 0) $2=sprintf("%.8f",0); else $2=sprintf("%.8f",$2); printf("%5d %15s %15.8f\n", $1, $2, $3)}' "${current_dir}/../kinematic_extraction/${name}sp.spec" > "${current_dir}/../kinematic_extraction/${name}sp.fixed.spec"
+mv "${current_dir}/../kinematic_extraction/${name}sp.fixed.spec" "${current_dir}/../kinematic_extraction/${name}sp.spec"

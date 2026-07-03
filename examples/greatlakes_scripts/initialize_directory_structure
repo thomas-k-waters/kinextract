@@ -1,0 +1,462 @@
+#!/bin/bash
+
+# Function to initialize the directory structure for a galaxy analysis project
+# Usage: initialize_directory_structure 'galaxy_name' 'galaxy_data_root'
+
+# Get the directory where this script is located (framework bin directory)
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+framework_root="$(dirname "$script_dir")"
+
+# Source the SCO environment configuration
+source "${script_dir}/sco_env.sh"
+
+current_dir=$(pwd)
+
+galaxy_name=$1
+galaxy_data_root=$2
+
+if [ "$#" -ne 2 ] || [ -z "$galaxy_name" ] || [ -z "$galaxy_data_root" ]; then
+    echo "Error: two arguments are required."
+    echo "Usage: initialize_directory_structure 'galaxy_name' 'galaxy_data_root'"
+    echo "Example: initialize_directory_structure 'N5102' /home/ether/sco_modeling/sco_workdir/galaxy_data"
+    exit 1
+fi
+
+# Prompt helper for optional interactive parameters
+prompt_with_default() {
+    local prompt_message=$1
+    local default_value=$2
+    read -rp "$prompt_message [${default_value}]: " input_value
+    if [ -z "$input_value" ]; then
+        input_value=$default_value
+    fi
+    echo "$input_value"
+}
+
+# Assume the script is run from the analysis root.
+# The project root is the parent directory that contains analysis/.
+project_root="$(dirname "$current_dir")"
+
+# Job logs should live in the galaxy base directory: analysis/{GALAXY}/joblogs
+job_logs_dir="${current_dir}/${galaxy_name}/joblogs"
+
+# Seed defaults for galaxy.params from existing model_files/galaxy.params if present.
+default_distance="10.0"
+default_vmin="-300."
+default_vmax="300."
+global_galaxy_params="${project_root}/model_files/galaxy.params"
+if [ -f "$global_galaxy_params" ]; then
+    parsed_distance=$(awk '$1=="distanceMpc" {print $2; exit}' "$global_galaxy_params")
+    parsed_vmin=$(awk '$1=="vmin" {print $2; exit}' "$global_galaxy_params")
+    parsed_vmax=$(awk '$1=="vmax" {print $2; exit}' "$global_galaxy_params")
+    [ -n "$parsed_distance" ] && default_distance="$parsed_distance"
+    [ -n "$parsed_vmin" ] && default_vmin="$parsed_vmin"
+    [ -n "$parsed_vmax" ] && default_vmax="$parsed_vmax"
+fi
+
+distance_mpc=$(prompt_with_default "Enter distanceMpc for galaxy.params" "$default_distance")
+vmin_value=$(prompt_with_default "Enter vmin for galaxy.params" "$default_vmin")
+vmax_value=$(prompt_with_default "Enter vmax for galaxy.params" "$default_vmax")
+
+mkdir -p "$galaxy_data_root"
+mkdir -p "$galaxy_data_root/$galaxy_name"
+mkdir -p "$galaxy_data_root/$galaxy_name/olm_data/"
+mkdir -p "$galaxy_data_root/$galaxy_name/olm_data/muse"
+mkdir -p "$galaxy_data_root/$galaxy_name/olm_data/muse/spec_files"
+mkdir -p "$galaxy_data_root/$galaxy_name/olm_data/stis"
+mkdir -p "$galaxy_data_root/$galaxy_name/olm_data/stis/spec_files"
+mkdir -p "$job_logs_dir"
+
+# Shared template directories under the analysis root (sco_workdir)
+mkdir -p "$current_dir/muse_templates"
+mkdir -p "$current_dir/stis_templates"
+
+# Shared PSF directories under the analysis root (sco_workdir)
+mkdir -p "$current_dir/muse_psf"
+mkdir -p "$current_dir/stis_psf"
+
+# Create root directory
+mkdir -p "$current_dir/$galaxy_name"
+
+# Create kinematics subdirectories
+mkdir -p "$current_dir/$galaxy_name/kinematics/muse/kinematic_extraction"/{bad_spec,output_logs,output_ps,slurm_files}
+mkdir -p "$current_dir/$galaxy_name/kinematics/muse/spectral_binning/bad_spec"
+mkdir -p "$current_dir/$galaxy_name/kinematics/stis/kinematic_extraction"/{bad_spec,output_logs,output_ps,slurm_files}
+mkdir -p "$current_dir/$galaxy_name/kinematics/stis/spectral_binning/bad_spec"
+
+# Create modeling subdirectories
+mkdir -p "$current_dir/$galaxy_name/modeling/base"
+mkdir -p "$current_dir/$galaxy_name/modeling/gridrecords"
+mkdir -p "$current_dir/$galaxy_name/modeling/mods/vlookdir"
+mkdir -p "$current_dir/$galaxy_name/modeling/res"
+
+# Create sb_analysis subdirectories
+mkdir -p "$current_dir/$galaxy_name/sb_analysis/binning/binning.outputs"
+mkdir -p "$current_dir/$galaxy_name/sb_analysis/deprojection/deprojection.outputs"
+
+# Create helper hidden input files used by wrapper scripts.
+# We place them in both galaxy-level kinematics and per-spectrograph
+# kinematic_extraction directories to support existing wrapper behavior.
+create_wrapper_input_files() {
+    local target_dir=$1
+    cat > "$target_dir/.pallmc_in" << 'EOF'
+pallmc_inlist
+/VCPS
+EOF
+
+    cat > "$target_dir/.pfitlov_in" << 'EOF'
+ll
+/VCPS
+EOF
+
+    cat > "$target_dir/.pfitlove_in" << 'EOF'
+pfitlove_inlist
+/VCPS
+EOF
+}
+
+create_wrapper_input_files "$current_dir/$galaxy_name/kinematics"
+create_wrapper_input_files "$current_dir/$galaxy_name/kinematics/muse/kinematic_extraction"
+create_wrapper_input_files "$current_dir/$galaxy_name/kinematics/stis/kinematic_extraction"
+
+# Initialize per-galaxy modeling parameters used by sbanalysis/finalizeextraction.
+cat > "$current_dir/$galaxy_name/sb_analysis/binning/galaxy.params" << EOF
+${galaxy_name}
+distanceMpc  ${distance_mpc}
+angleRmax     90
+vmin         ${vmin_value}
+vmax          ${vmax_value}
+slope_0       -1.0
+MtoL          10.
+islitsize     0  (0=nothing; 1=0.1"x0.2"; 2=0.1"x0.1" (HST))
+EOF
+
+# Initialize iteration and seeing files consumed by modeling/finalize scripts.
+cat > "$current_dir/$galaxy_name/sb_analysis/binning/iter.params" << 'EOF'
+Niter         15
+apfac          0.7
+apfacmu        0.
+ifit           2
+alphainc       1.1
+alphastop      1e5
+fracrv         0.02
+EOF
+
+cat > "$current_dir/$galaxy_name/sb_analysis/binning/see_muse.dat" << 'EOF'
+Bin Seeing
+1    0.42
+2    0.09
+EOF
+
+cat > "$current_dir/$galaxy_name/sb_analysis/binning/see_stis.dat" << 'EOF'
+Bin Seeing
+1    0.42
+2    0.09
+EOF
+
+# Keep a generic see.dat for convenience; pipelines may overwrite this by instrument.
+cp "$current_dir/$galaxy_name/sb_analysis/binning/see_muse.dat" \
+    "$current_dir/$galaxy_name/sb_analysis/binning/see.dat"
+
+# finalizeextraction expects these defaults in shared PSF folders.
+cp "$current_dir/$galaxy_name/sb_analysis/binning/see_muse.dat" \
+    "$current_dir/muse_psf/see_both.dat"
+cp "$current_dir/$galaxy_name/sb_analysis/binning/see_stis.dat" \
+    "$current_dir/stis_psf/see_stis.dat"
+
+echo "Directory structure for '$galaxy_name' created successfully!"
+
+# Update or create the SCO framework configuration file
+config_file="${framework_root}/.sco_config"
+cat > "$config_file" << EOF
+# SCO Framework Configuration
+# Auto-generated by initialize_directory_structure
+
+# Root analysis directory (where galaxy workspaces are created)
+export SCO_ANALYSIS_ROOT="${current_dir}"
+
+# Project root (contains analysis, model_files, templates, psf directories)
+export SCO_PROJECT_ROOT="${project_root}"
+
+# External galaxy data directory (optional, for spectral data lookups)
+# Update this if you have external galaxy data stored elsewhere
+export SCO_GALAXY_DATA_ROOT="${galaxy_data_root}"
+
+# Job output logs directory for SLURM submissions
+export JOB_OUTPUT_LOGS="${job_logs_dir}"
+
+# Framework bin directory (automatically set)
+export SCO_FRAMEWORK_BIN="${script_dir}"
+export SCO_FRAMEWORK_ROOT="${framework_root}"
+EOF
+
+echo "SCO Framework configuration created/updated at: $config_file"
+echo "Analysis root directory set to: $current_dir"
+echo "Project root set to: $project_root"
+echo "Galaxy data root set to: $galaxy_data_root"
+echo "Job logs directory set to: $job_logs_dir"
+echo "Initialized galaxy params at: $current_dir/$galaxy_name/sb_analysis/binning/galaxy.params"
+echo "Initialized iter params at: $current_dir/$galaxy_name/sb_analysis/binning/iter.params"
+echo "Initialized seeing files at: $current_dir/$galaxy_name/sb_analysis/binning/see_muse.dat and see_stis.dat"
+echo "Initialized PSF defaults at: $current_dir/muse_psf/see_both.dat and $current_dir/stis_psf/see_stis.dat"
+echo "IMPORTANT: update PSF FWHM values in see_muse.dat/see_stis.dat (and related PSF files) before running modeling."
+
+bashrc_file="$HOME/.bashrc"
+
+if [ -f "$bashrc_file" ]; then
+    backup_file="$HOME/.bashrc.sco_init.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$bashrc_file" "$backup_file"
+
+    # Portable in-place sed helper for Linux/macOS.
+    sedi() {
+        if sed --version >/dev/null 2>&1; then
+            sed -i "$@"
+        else
+            sed -i '' "$@"
+        fi
+    }
+
+    upsert_alias() {
+        local alias_name="$1"
+        local target_path="$2"
+        local alias_line
+        local escaped_line
+
+        alias_line="alias ${alias_name}='cd \"${target_path}\"'"
+        escaped_line=${alias_line//&/\\&}
+
+        if grep -qE "^alias ${alias_name}=" "$bashrc_file"; then
+            sedi "s|^alias ${alias_name}=.*$|${escaped_line}|" "$bashrc_file"
+        else
+            printf "%s\n" "$alias_line" >> "$bashrc_file"
+        fi
+    }
+
+    upsert_alias "cdw" "$project_root"
+    upsert_alias "modprogs" "$framework_root/modprogs"
+    upsert_alias "bin" "$framework_root/bin"
+    upsert_alias "galdata" "$galaxy_data_root/$galaxy_name"
+    upsert_alias "joblogs" "$job_logs_dir"
+    upsert_alias "kinm" "$current_dir/$galaxy_name/kinematics/muse/kinematic_extraction"
+    upsert_alias "kins" "$current_dir/$galaxy_name/kinematics/stis/kinematic_extraction"
+    upsert_alias "musedata" "$galaxy_data_root/$galaxy_name/olm_data/muse"
+    upsert_alias "stisdata" "$galaxy_data_root/$galaxy_name/olm_data/stis"
+    upsert_alias "sb" "$current_dir/$galaxy_name/sb_analysis"
+    upsert_alias "mods" "$current_dir/$galaxy_name/modeling"
+    upsert_alias "kindir" "$current_dir/$galaxy_name/kinematics"
+
+    echo "Updated SCO aliases in ~/.bashrc for galaxy: $galaxy_name"
+    echo "Backup saved to: $backup_file"
+    echo "Run 'source ~/.bashrc' to load aliases into your current shell."
+else
+    echo "Warning: ~/.bashrc not found; skipped alias updates."
+fi
+
+# Create a default kinextract.config in the framework root if one does not exist.
+kin_cfg_path="${script_dir}/kinextract.config"
+if [ ! -f "$kin_cfg_path" ]; then
+    cat > "$kin_cfg_path" << EOF
+###############################################################################
+# kinextract.config (auto-generated)
+#
+# Spectrum file is passed on the command line:
+#
+#   python -m kinextract /path/to/bin0105sp.spec /path/to/kinextract.config
+#
+# Update [paths] before running.  All other defaults are production-ready.
+###############################################################################
+
+
+[paths]
+
+template_list_file = "${current_dir}/muse_templates/Tlist"
+template_dir = "${current_dir}/muse_templates/"
+regions_bad_path = ""
+outdir = "${current_dir}/kinematic_fit_outputs"
+galaxy_params_path = "${current_dir}/sb_analysis/binning/"
+use_galaxy_params_velocity_bounds = true
+
+[wavelength]
+
+wavemin_full = 4750.0
+step = 1.25
+wavefitmin = 8300.0
+wavefitmax = 8900.0
+zgal = 0.0
+norm_wave_frame = "auto"
+spec_col3_is_variance = false
+# Set false to ignore per-pixel input errors and use the median error uniformly
+# (equal pixel weighting).  Error column is still read; only fit weights change.
+use_spectrum_errors = true
+
+[kinematics]
+
+sigl = 100.0
+smoothing = 5000.0
+
+[continuum]
+
+fit_als_continuum = true
+
+[als]
+
+als_lam = 1.0e2
+als_p = 0.5
+als_niter = 25
+als_outer_iter = 15
+als_outer_tol = 1.0e-10
+als_eps = 1.0e-10
+als_clip = [0.0, "inf"]
+
+[als_optimization]
+
+als_optimize = true
+als_optimize_init_only = false
+als_lam_grid = [
+    1.0e0,
+    1.0e1,
+    1.0e2,
+    1.0e3,
+    1.0e4,
+]
+als_p_grid = [
+    0.01,
+    0.05,
+    0.1,
+    0.3,
+    0.5,
+]
+als_lam_grid_fine_n = 15
+als_p_grid_fine_n = 1
+als_lambda_floor = 0.1
+als_opt_verbose = false
+als_template_selection = "nnls"
+als_bic_include_templates = true
+als_bic_dof_penalty = 1.0
+als_use_bic = true
+als_chisq_floor = 0.9
+als_hutchinson_probes = 25
+
+[als_masks]
+
+als_mask_ca = true
+als_ca_centers = [
+    8498.02,
+    8542.09,
+    8662.14,
+]
+als_ca_half_widths = [
+    10.0,
+    10.0,
+    10.0,
+]
+als_ca_frame = "rest"
+als_mask_velocity_pad_kms = 0.0
+als_mask_center_shift_A = 0.0
+
+# Auto-refine mask center shift using the Ca II triplet as a reference.
+# Corrects for slight zgal errors so mask windows track the actual features.
+# Masking-only: no effect on velocity/LOSVD measurements.
+als_auto_caii_shift = true
+als_auto_caii_search_hw_A = 12.0
+
+als_use_default_caii_region_lines = false
+als_default_abs_half_width = 5.0
+als_default_pas_half_width = 3.0
+als_default_em_half_width = 1.75
+als_extra_mask_frame = "rest"
+als_extra_mask_windows = []
+als_extra_mask_line_frame = "rest"
+als_extra_mask_lines = []
+
+[als_auto_masking]
+
+# S/N-gated auto-detection of absorption lines for ALS continuum masking only.
+# Disabled by default: raw S/N in a fixed context window produces false positives
+# near the Ca II triplet.  als_abs_clean below is the preferred replacement.
+als_auto_mask_abs_lines = false
+als_auto_mask_paschen = false
+als_auto_mask_snr_threshold = 5.0
+als_auto_mask_half_width_A = 5.0
+als_auto_mask_snr_context_A = 20.0
+
+[als_absorption_cleaning]
+
+# Primary mechanism for masking absorption features from the ALS continuum fit.
+# Fits the continuum, rejects pixels below -sigma * robust_sigma(residuals),
+# grows the mask by grow_A angstroms, and refits.  No line list required.
+als_abs_clean = true
+als_abs_clean_iter = 25
+als_abs_clean_sigma = 2.5
+als_abs_clean_grow_A = 3.0
+als_abs_clean_two_sided = false
+als_abs_clean_minpix = 50
+
+[spectral_masking]
+
+# Emission lines are absent from stellar templates; pre-mask them so they
+# cannot bias the LOSVD fit.  Set snr_threshold = 0 to mask unconditionally.
+mask_emission_lines_in_fit = true
+mask_emission_line_half_width_A = 5.0
+mask_emission_line_snr_threshold = 100.0
+mask_emission_line_snr_context_A = 20.0
+
+# Foreground absorption NOT in the templates (e.g. ISM Ca II H&K, telluric).
+# Format: [[center_A, half_width_A], ...]
+extra_absorption_lines = []
+
+[losvd]
+
+icoff = 1
+coff = 0.0
+coff2 = 0.0
+fortran_nlosvd_full_x = true
+fortran_template_mixture = true
+fortran_mask_template_outside = true
+fit_global_amp = false
+
+[optimizer]
+
+map_maxiter = 10000
+map_maxfun = 500000
+# 1e-10/1e-8 are the current kinextract package defaults: validated for a
+# large speedup over tighter values with no measurable LOSVD-shape change,
+# and avoid a fit that's technically "converged" by function-value alone
+# but not by gradient, which can otherwise break Laplace error estimation.
+map_ftol = 1.0e-10
+map_gtol = 1.0e-8
+map_maxls = 50
+use_scaled_optimizer = true
+print_every = 100000
+
+[cleaning]
+
+clean = true
+clean_sigma = 3.0
+clean_maxiter = 25
+clean_minpix = 50
+clean_protect_ca_triplet = true
+clean_ca_centers = [
+    8498.02,
+    8542.09,
+    8662.14,
+]
+clean_ca_half_width = 8.0
+clean_protect_absorption_only = false
+clean_protect_ca_frame = "rest"
+clean_protect_windows_frame = "rest"
+clean_protect_windows = []
+
+[errors]
+
+run_errors_default = true
+run_bootstrap_default = true
+n_bootstrap = 200
+n_jobs = -1
+
+[jax]
+use_jax_objective = true
+jax_enable_x64 = true
+EOF
+    echo "Wrote default kinextract.config to: $kin_cfg_path"
+fi

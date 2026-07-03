@@ -1,0 +1,393 @@
+#!/bin/bash
+set +o noclobber
+
+# Source the SCO environment configuration
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${script_dir}/sco_env.sh"
+
+# Get the current directory where the script is being run
+current_dir=$(pwd)
+combine="" # Variable to store user input for combining WFM bins
+rootdir="${SCO_PROJECT_ROOT}"
+
+if [ -z "$rootdir" ] || [ ! -d "$rootdir" ]; then
+    echo "Error: SCO_PROJECT_ROOT is not set or does not exist: '$rootdir'"
+    echo "Re-run initialize_directory_structure or update .sco_config."
+    exit 1
+fi
+
+# Prompt Function for user inputs
+prompt_with_default() {
+    local prompt_message=$1
+    local default_value=$2
+    read -rp "$prompt_message [${default_value}]: " input_value
+    if [ -z "$input_value" ]; then
+        input_value=$default_value
+    fi
+    echo "$input_value"
+}
+
+# Load previous script inputs if the config file exists
+config_file="${current_dir}/.lastinputfe"
+if [[ -f $config_file ]]; then
+    source $config_file
+else
+    last_galaxy=""
+    last_spectrograph=""
+fi
+
+# Prompt for user input for galaxy
+galaxy=$(prompt_with_default "Enter the galaxy directory" $last_galaxy)
+if [ -z "$galaxy" ]; then
+    echo "Galaxy must be provided."
+    exit 1
+fi
+
+spectrograph=$(prompt_with_default "Enter the spectrograph (muse/stis)" $last_spectrograph)
+if [ -z "$spectrograph" ]; then
+    echo "Spectrograph must be provided."
+    exit 1
+fi
+
+# Store the current input to config file
+cat <<EOL > $config_file
+last_galaxy=$galaxy
+last_spectrograph=$spectrograph
+EOL
+
+# Helper to check if muse bins exist
+muse_bins_exist() {
+    local kinm_dir="$(sco_get_kinematics_path "$galaxy" "muse")"
+    ls ${kinm_dir}/bin????spmc_in 1>/dev/null 2>&1
+}
+
+exit_function() {
+    echo "The kinematic extraction for ${galaxy} is done!"
+    exit 0
+}
+
+finalize_losvds() {
+    # remove all old *_inlist and slurm tracker files
+    rm -f *_inlist .submit_jobs_daemon* > /dev/null 2>&1
+
+    # Prepare simlist for rtransvd
+    rtransvd_simlist=()
+
+    # Fetch bin radius data from bin_r.out
+    cp -f ${current_dir}/../spectral_binning/bin_r.out ${current_dir}/
+    ls *.sim > simlist
+
+    # Copy stellar template files to current directory
+    cp ${rootdir}/${spectrograph}_templates/*.txt "${current_dir}/"
+    cp ${rootdir}/${spectrograph}_templates/Tlist "${current_dir}/"
+
+    # Populate sim_radius using the properly formatted bin_r.out and bin numbers
+    while read -r simfile; do
+        bin_number=$(echo "$simfile" | grep -oP '\d{4}')
+        irc_number=$((10#$(echo "$bin_number" | cut -c 1-2)))
+        sign=$(echo "$simfile" | grep -oP '^bnn')
+        sim_radius=$(awk '$1 == '"${irc_number}"' {print $3}' bin_r.out)
+
+        if [[ $sign == "bnn" ]]; then
+            sim_radius=$(echo "-$sim_radius" | bc)
+        fi
+
+        rtransvd_simlist+=("$simfile $sim_radius")
+    done < simlist
+
+    # Creating a list for pallmc
+    for sim_file in "${rtransvd_simlist[@]}"; do
+        echo "$sim_file" >> pallmc_inlist
+    done
+
+    cp -f ${rootdir}/analysis/${galaxy}/kinematics/.*_in ${current_dir}
+
+    # Run pallmc with the list
+    pallmc < .pallmc_in >> out
+    mv pallmc.out pallmc.output
+    mv pallmc2.out pallmc2.output
+
+    if ls pgplot.ps 1> /dev/null 2>&1; then
+        mv ${current_dir}/pgplot.ps ${current_dir}/output_ps/${galaxy}_pallmc.ps
+    fi
+
+    # Creating simlist for rtransvd separately
+    ls *.sim > rtransvd_simlist_file
+    while read -r simfile; do
+        base_name=$(basename "$simfile" .sim)
+        if [[ "$base_name" == bnn* ]]; then
+            echo "rtransvd $base_name -1" >> rtransvd_inlist
+        else
+            echo "rtransvd $base_name 1" >> rtransvd_inlist
+        fi
+    done < rtransvd_simlist_file
+
+    chmod +x ./rtransvd_inlist
+    ./rtransvd_inlist >> out
+    mv transvd.out transvd.output
+
+    ls b*_in > pfitlove_inlist
+
+    # Run pallmc with the list
+    pfitlove < .pfitlove_in >> out
+    mv pfitlov.out pfitlove.output
+
+    if ls pgplot.ps 1> /dev/null 2>&1; then
+        mv ${current_dir}/pgplot.ps ${current_dir}/output_ps/${galaxy}_fitlove.ps
+    fi
+
+    rm -f ${current_dir}/bin_r.out ${current_dir}/out ${current_dir}/v.out ${current_dir}/rtransvd_inlist 
+    rm -f ${current_dir}/rtransvd_simlist_file ${current_dir}/simlist ${current_dir}/*.def ${current_dir}/*.txt 
+    rm -f ${current_dir}/Tlist ${current_dir}/*.output ${current_dir}/*.slurm ${current_dir}/*.run ${current_dir}/*.temp
+    rm -f ${current_dir}/*_joblist
+    
+}
+
+combine_wfm_bins() {
+    read -rp "Do you want to combine WFM bins? (Y/N) " combine
+    if [[ "$combine" != "${combine#[Yy]}" ]]; then
+        echo "Combining WFM bins..."
+
+        # Loop over all files starting with bin and pair with corresponding bnn
+        for binfile in bin????spmc_in; do
+            bnnfile="bnn${binfile:3}"
+            if [ "$binfile" == "bin0105spmc_in" ]; then
+                cp bin0105spmc_in bcn0105spmc_in
+            fi
+
+            if [ -e "$binfile" -a -e "$bnnfile" ]; then
+                out_file="bcn${binfile:3}" # change the prefix of the first file to be the output file
+
+                # Run the paste and awk commands
+                paste $binfile $bnnfile | \
+                awk 'function max(x, y) { return (x > y) ? x : y }
+                    function abs(x) { return (x < 0) ? -x : x }
+                {
+                    if ($4==0) $4=2.32683215E-03;
+                    if ($8==0) $8=2.32683215E-03;
+
+                    sig_bin=max($4-$2, $2-$3)
+                    sig_bnn=max($8-$6, $6-$7)
+
+                    w_bin=1/sig_bin**2
+                    w_bnn=1/sig_bnn**2
+
+                    mean=($2*w_bin+$6*w_bnn)/(w_bin+w_bnn)
+                    sigma=sqrt(1/(w_bin+w_bnn))
+                    losvd_diff=abs($2-$6)/2
+
+                    if (losvd_diff>sigma) {
+                        err_low=mean-losvd_diff
+                        err_up=mean+losvd_diff
+
+                    } else {
+                        err_low=mean-sigma
+                        err_up=mean+sigma
+                    }
+
+                    if (err_low<0.0) err_low=0.0;
+                    print $1, mean, err_low, err_up
+                }' > $out_file
+                echo "Successfully created $out_file"
+            else
+                echo "$binfile and/or $bnnfile does not exist"
+            fi
+        done
+        ls bcn* > pfitlove_bcn_inlist
+    fi
+}
+
+prep_models() {
+    galaxy_dir="$(sco_get_galaxy_path "$galaxy")"
+
+    model_dir="${galaxy_dir}/modeling/base"
+    sbb_dir="${galaxy_dir}/sb_analysis/binning/"
+    sbd_dir="${galaxy_dir}/sb_analysis/deprojection/"
+    mod_files="${rootdir}/model_files"
+    kinm_dir="${galaxy_dir}/kinematics/muse/kinematic_extraction"
+    kins_dir="${galaxy_dir}/kinematics/stis/kinematic_extraction"
+    binm_dir="${galaxy_dir}/kinematics/muse/spectral_binning"
+    bins_dir="${galaxy_dir}/kinematics/stis/spectral_binning"
+
+    if [ "$(ls ${model_dir} 2>/dev/null)" ]; then
+        rm -f ${model_dir}/*
+    fi
+    if [[ "$spectrograph" == "muse" ]]; then
+        echo "Preparing modeling inputs..."
+
+        if [[ "$combine" == "${combine#[Yy]}" ]]; then
+
+            if [ "$(ls ${kinm_dir}/bcn* 2>/dev/null)" ]; then
+                rm -f ${kinm_dir}/bcn*
+            fi
+            shopt -s nullglob
+            for file in ${kinm_dir}/b??????spmc_in; do
+                new_file=$(basename "$file" | sed 's/^b/mwb/')
+                cp "$file" "${model_dir}/${new_file}"
+            done
+            shopt -u nullglob
+
+        else
+            shopt -s nullglob
+            for file in ${kinm_dir}/bcn????spmc_in; do
+                cp "$file" "$model_dir"
+            done
+            shopt -u nullglob
+        fi
+
+        for file in ${kins_dir}/b??????spmc_in; do
+            cp "$file" "$model_dir"
+        done
+    fi
+
+    if [[ "$spectrograph" == "stis" ]]; then
+        echo "Preparing modeling inputs..."
+        for file in ${kins_dir}/b??????spmc_in; do
+            cp "$file" "$model_dir"
+        done
+        if [ -z "$(ls ${kinm_dir}/b??????spmc_in 2>/dev/null)" ]; then
+            echo "No muse files to copy."
+        else
+            if [[ "$combine" == "${combine#[Yy]}" ]]; then
+
+                if [ "$(ls ${kinm_dir}/bcn* 2>/dev/null)" ]; then
+                    rm -f ${kinm_dir}/bcn*
+                fi
+
+                for file in ${kinm_dir}/b??????spmc_in; do
+                    new_file=$(basename "$file" | sed 's/^b/mwb/')
+                    cp "$file" "${model_dir}/${new_file}"
+                done
+
+            else
+                for file in ${kinm_dir}/bcn????spmc_in; do
+                    cp "$file" "$model_dir"
+                done
+            fi
+        fi
+    fi
+
+    cp "${rootdir}/muse_psf"/psf*.dat "$model_dir" 2>/dev/null
+    cd "$model_dir"
+    ls psf*.dat > psflist.dat 2>/dev/null
+
+    if [ -f "psflist.dat" ]; then
+        cp "${rootdir}/muse_psf/see_both.dat" "$model_dir/see.dat"
+    else
+        cp "${rootdir}/stis_psf/see_stis.dat" "$model_dir/see.dat"
+    fi
+
+    #cp "${sbb_dir}/binning.outputs"/*.out "${model_dir}"
+    #cp "${sbb_dir}/binning.outputs"/*.dat "${model_dir}"
+    #cp "${sbb_dir}/binning.outputs/gden.norm" "${model_dir}"
+    cp "${sbb_dir}/galaxy.params" "${model_dir}"
+    #cp "${sbb_dir}/gden.use" "${model_dir}/gden.use"
+    #cp "${sbd_dir}/deprojection.outputs"/*.out "${model_dir}"
+    ##### new #####
+    cp "${sbd_dir}/deprojection.outputs/npdyn.out" "${model_dir}"
+    cp "${sbd_dir}/sb.use" "${model_dir}"
+
+    cp "${sbd_dir}/deprojection.outputs/mass.out" "${model_dir}"
+    cp "${sbd_dir}/deprojection.outputs/npdyn.out" "${model_dir}"
+    cp "${sbd_dir}/deprojection.outputs/r2min.out" "${model_dir}"
+    cp "${sbd_dir}/deprojection.outputs/sigma.out" "${model_dir}"
+    cp "${sbd_dir}/deprojection.outputs/slope.out" "${model_dir}"
+
+    ################
+    cp "${mod_files}/iter.params" "${model_dir}"
+
+    cp "${binm_dir}/names.out" "${model_dir}/namesm.out" 2>/dev/null
+    cp "${bins_dir}/names.out" "${model_dir}/namess.out" 2>/dev/null
+
+    if ls velbin.sav* 1> /dev/null 2>&1; then
+        rm -f velbin.sav*
+    fi
+    if ls velbin.dat 1> /dev/null 2>&1; then
+        rm -f velbin.dat
+    fi
+
+    # bin* bins
+    for f in bin*_in; do
+        bin_name=$(basename "$f" | sed 's/spmc_in$//')
+        result=$(grep "^${bin_name} " namess.out | head -1)
+        values=$(echo "$result" | awk '{print $2, $3}')
+        echo "${bin_name}spmc_in ${values} 2 1 0 -1 0"
+    done >> velbin.sav
+
+    # bnn* bins
+    for f in bnn*_in; do
+        bnn_name=$(basename "$f" | sed 's/spmc_in$//')
+        result=$(grep "^${bnn_name} " namess.out | head -1)
+        values=$(echo "$result" | awk '{print $2, $3}')
+        if [ "${bnn_name}spmc_in" == "bnn0105spmc_in" ]; then
+            continue
+        fi
+        echo "${bnn_name}spmc_in ${values} 2 1 0 -1 0"
+    done >> velbin.sav
+
+    # MW bins (muse wide field mode)
+    if [[ "$combine" == "${combine#[Yy]}" ]]; then
+        # User does NOT want to combine bins: add mwbin* and mwbnn* to velbin.sav
+        shopt -s nullglob
+        for f in ${kinm_dir}/bin*_in; do
+            [ -e "$f" ] || continue
+            bin_name=$(basename "$f" | sed 's/spmc_in$//')
+            result=$(grep "^${bin_name} " namesm.out | head -1)
+            values=$(echo "$result" | awk '{print $2, $3}')
+            echo "mw${bin_name}spmc_in ${values} 1 1 0 -1 0"
+        done >> velbin.sav
+    
+        for f in ${kinm_dir}/bnn*_in; do
+            [ -e "$f" ] || continue
+            bnn_name=$(basename "$f" | sed 's/spmc_in$//')
+            result=$(grep "^${bnn_name} " namesm.out | head -1)
+            values=$(echo "$result" | awk '{print $2, $3}')
+            echo "mw${bnn_name}spmc_in ${values} 1 1 0 -1 0"
+        done >> velbin.sav
+        shopt -u nullglob
+    else
+        # User DOES want to combine bins: add only bcn* to velbin.sav
+        shopt -s nullglob
+        for f in ${kinm_dir}/bcn*_in; do
+            [ -e "$f" ] || continue
+            bcn_name=$(basename "$f" | sed 's/spmc_in$//')
+            id=${bcn_name:3}  # Extract the 4-digit ID
+            result=$(grep "^bin${id} " namesm.out | head -1)
+            if [ -z "$result" ]; then
+                result=$(grep "^bnn${id} " namesm.out | head -1)
+            fi
+            if [ -z "$result" ]; then
+                echo "Warning: No entry for bin${id} or bnn${id} in namesm.out, skipping $f"
+                continue
+            fi
+            values=$(echo "$result" | awk '{print $2, $3}')
+            echo "bcn${id}spmc_in ${values} 1 1 0 -1 0"
+        done >> velbin.sav
+        shopt -u nullglob
+    fi
+}
+
+# Run the functions
+if [[ "$spectrograph" == "muse" ]]; then
+    finalize_losvds
+    #combine_wfm_bins
+    read -rp "Are you prepared to begin the modeling? (Y/N) " answer
+    if [[ "$answer" != "${answer#[Yy]}" ]]; then
+        prep_models
+        exit_function
+    else
+        exit_function
+    fi
+elif [[ "$spectrograph" == "stis" ]]; then
+    finalize_losvds
+    read -rp "Are you prepared to begin the modeling? (Y/N) " answer
+    if [[ "$answer" != "${answer#[Yy]}" ]]; then
+    #    if muse_bins_exist; then
+    #        combine_wfm_bins
+    #    fi
+        prep_models
+        exit_function
+    else
+        exit_function
+    fi
+fi

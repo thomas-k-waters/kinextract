@@ -1,0 +1,418 @@
+#!/bin/bash
+set +o noclobber
+shopt -s nullglob
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${script_dir}/sco_env.sh"
+
+current_dir=$(pwd)
+rootdir="${SCO_PROJECT_ROOT}"
+
+if [ -z "$rootdir" ] || [ ! -d "$rootdir" ]; then
+    echo "Error: SCO_PROJECT_ROOT is not set or does not exist: '$rootdir'"
+    echo "Re-run initialize_directory_structure or update .sco_config."
+    exit 1
+fi
+
+if [[ -f "${current_dir}/kinextract.config" ]]; then
+    kinextract_config="${current_dir}/kinextract.config"
+elif [[ -f "${script_dir}/kinextract.config" ]]; then
+    kinextract_config="${script_dir}/kinextract.config"
+    echo "WARNING: no kinextract.config in current directory; using default from ${script_dir}"
+    echo "  Copy ${script_dir}/kinextract.config here and edit it before running."
+else
+    echo "Error: no kinextract.config found in ${current_dir} or ${script_dir}"
+    exit 1
+fi
+
+bad_spec_dir="${current_dir}/bad_spec"
+output_ps_dir="${current_dir}/output_ps"
+logs_dir="${current_dir}/output_logs"
+slurm_dir="${current_dir}/slurm_files"
+# Output files (.fit .rms .ascii .sim etc.) go directly to current_dir so that
+# finalizeextraction can find them with the same ls *.sim / ls *.fit patterns
+# used by the original framework.
+outdir="${current_dir}"
+mkdir -p "$bad_spec_dir" "$output_ps_dir" "$logs_dir" "$slurm_dir"
+
+config_file="${current_dir}/.lastinput"
+
+prompt_with_default() {
+    local prompt_message=$1
+    local default_value=$2
+    read -r -p "$prompt_message [${default_value}]: " input_value
+    if [ -z "$input_value" ]; then
+        input_value=$default_value
+    fi
+    echo "$input_value"
+}
+
+if [[ -f $config_file ]]; then
+    # shellcheck disable=SC1090
+    source "$config_file"
+fi
+
+: "${last_galaxy:=}"
+: "${last_spectrograph:=muse}"
+: "${last_line_choice:=1}"
+
+read_toml_value() {
+    local section=$1
+    local key=$2
+    local fallback=$3
+    python3 - "$kinextract_config" "$section" "$key" "$fallback" <<'PY'
+import sys
+from pathlib import Path
+
+cfg_path = Path(sys.argv[1])
+section = sys.argv[2]
+key = sys.argv[3]
+fallback = sys.argv[4]
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    print(fallback)
+    raise SystemExit(0)
+
+try:
+    data = tomllib.loads(cfg_path.read_text())
+except Exception:
+    print(fallback)
+    raise SystemExit(0)
+
+val = data.get(section, {}).get(key, fallback)
+if isinstance(val, bool):
+    print("Y" if val else "N")
+else:
+    print(val)
+PY
+}
+
+RUN_ERRORS_DEFAULT="$(read_toml_value errors run_errors_default Y)"
+RUN_BOOTSTRAP_DEFAULT="$(read_toml_value errors run_bootstrap_default Y)"
+BOOTSTRAP_SAMPLES_DEFAULT="$(read_toml_value errors n_bootstrap 200)"
+N_JOBS_DEFAULT="$(read_toml_value errors n_jobs 1)"
+ZGAL_DEFAULT="$(read_toml_value wavelength zgal 0.0)"
+# Optional: uniform gal_errors = flux / snr_override override (see kinextract.config).
+# Empty string means "not set" -- use the file-provided error column as usual.
+SNR_OVERRIDE="$(read_toml_value wavelength snr_override "")"
+
+: "${last_run_errors:=${RUN_ERRORS_DEFAULT}}"
+: "${last_run_bootstrap:=${RUN_BOOTSTRAP_DEFAULT}}"
+: "${last_bootstrap_samples:=${BOOTSTRAP_SAMPLES_DEFAULT}}"
+: "${last_n_jobs:=${N_JOBS_DEFAULT}}"
+# First-run default: use zgal from the config rather than 0.0 so the redshift
+# prompt is pre-filled with the correct value for this galaxy.
+: "${last_redshift:=${ZGAL_DEFAULT}}"
+
+galaxy=$(prompt_with_default "Enter the galaxy directory" "$last_galaxy")
+if [ -z "$galaxy" ]; then
+    echo "Galaxy must be provided."
+    exit 1
+fi
+
+spectrograph=$(prompt_with_default "Enter the spectrograph (muse/stis)" "$last_spectrograph")
+case "$spectrograph" in
+    muse)
+        wavemin_full=4750.0
+        step=1.25
+        ;;
+    stis)
+        wavemin_full=8275.0
+        step=0.55859375
+        ;;
+    *)
+        echo "Invalid spectrograph. Please enter 'muse' or 'stis'."
+        exit 1
+        ;;
+esac
+
+line_choice=$(prompt_with_default "Choose the spectral line region (1: CaII Triplet; 2: Mgb Line)" "$last_line_choice")
+case "$line_choice" in
+    1)
+        wavefitmin=8400.0
+        wavefitmax=8800.0
+        ;;
+    2)
+        wavefitmin=4900.0
+        wavefitmax=5500.0
+        ;;
+    *)
+        echo "Invalid choice. Enter either '1' or '2'."
+        exit 1
+        ;;
+esac
+
+redshift=$(prompt_with_default "Enter the redshift" "$last_redshift")
+
+run_errors=$(prompt_with_default "Estimate LOSVD errors? (Y/N)" "$last_run_errors")
+if [[ ! "$run_errors" =~ ^[YyNn]$ ]]; then
+    echo "Invalid input for error estimation choice. Enter Y or N."
+    exit 1
+fi
+
+run_bootstrap="N"
+bootstrap_samples="$last_bootstrap_samples"
+n_jobs="$last_n_jobs"
+if [[ "$run_errors" =~ ^[Yy]$ ]]; then
+    run_bootstrap=$(prompt_with_default "Use bootstrap error estimation? (Y/N)" "$last_run_bootstrap")
+    if [[ ! "$run_bootstrap" =~ ^[YyNn]$ ]]; then
+        echo "Invalid input for bootstrap choice. Enter Y or N."
+        exit 1
+    fi
+    if [[ "$run_bootstrap" =~ ^[Yy]$ ]]; then
+        bootstrap_samples=$(prompt_with_default "Bootstrap samples" "$last_bootstrap_samples")
+        n_jobs=$(prompt_with_default "Bootstrap parallel jobs" "$last_n_jobs")
+    fi
+fi
+
+cat <<EOL > "$config_file"
+last_galaxy=$galaxy
+last_spectrograph=$spectrograph
+last_line_choice=$line_choice
+last_redshift=$redshift
+last_run_errors=$run_errors
+last_run_bootstrap=$run_bootstrap
+last_bootstrap_samples=$bootstrap_samples
+last_n_jobs=$n_jobs
+EOL
+
+find_templates_for_spectrograph() {
+    local sg=$1
+    local candidates=(
+        "${current_dir}/${sg}_templates"
+        "${rootdir}/${sg}_templates"
+        "${rootdir}/analysis/${sg}_templates"
+        "${rootdir}/sco_workdir_example/analysis/${sg}_templates"
+    )
+
+    local d
+    for d in "${candidates[@]}"; do
+        if [[ -d "$d" && -f "$d/Tlist" ]]; then
+            echo "$d"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+template_dir="$(find_templates_for_spectrograph "$spectrograph" || true)"
+if [[ -z "$template_dir" ]]; then
+    echo "Error: could not find template directory for $spectrograph"
+    echo "Looked in current dir, project root, analysis/, and sco_workdir_example/analysis/."
+    exit 1
+fi
+
+template_list_file="${template_dir}/Tlist"
+
+files=(b*.spec)
+if [ ${#files[@]} -eq 0 ]; then
+    echo "Missing inputs (need b*.spec in ${current_dir})."
+    exit 1
+fi
+
+# Create the reusable helper that can run MAP and optionally errors.
+# Accepts two positional arguments: <run_config.json> <spectrum_path>
+#
+# This just uses the real `kinextract` package (pip-installed, or found via
+# PYTHONPATH/sys.path) rather than dynamically loading loose script files --
+# the previous version of this helper predates kinextract being a proper,
+# importable package.
+helper_py="${current_dir}/.run_kinextract_with_errors.py"
+cat > "$helper_py" <<'PY'
+#!/usr/bin/env python3
+import json
+import sys
+from pathlib import Path
+
+
+def _ensure_kinextract_importable(framework_root: str) -> None:
+    """Make `import kinextract` work.
+
+    If kinextract isn't already installed in this Python environment (e.g.
+    via `pip install -e lib/kinextract` on the cluster), fall back to the
+    bundled copy shipped at lib/kinextract/src alongside this framework, so
+    a fresh checkout works without a separate install step.
+    """
+    try:
+        import kinextract  # noqa: F401
+        return
+    except ImportError:
+        pass
+    bundled_src = Path(framework_root) / "lib" / "kinextract" / "src"
+    if bundled_src.is_dir():
+        sys.path.insert(0, str(bundled_src))
+    import kinextract  # noqa: F401  (raises with a clear error if still missing)
+
+
+def _ensure_scofit_importable(framework_root: str) -> None:
+    """Make `import lib.scofit.core` work, if lib/scofit is present.
+
+    Separate from _ensure_kinextract_importable: kinextract itself may come
+    from a real pip install (nothing added to sys.path in that case), but
+    `lib.scofit.core` is only ever the bundled copy alongside this framework,
+    so it needs framework_root itself on sys.path regardless of how
+    kinextract was resolved. Optional -- estimate_losvd_errors already
+    degrades gracefully (a logged note, not an error) if this isn't done.
+    """
+    if (Path(framework_root) / "lib" / "scofit").is_dir():
+        fw_root_str = str(framework_root)
+        if fw_root_str not in sys.path:
+            sys.path.insert(0, fw_root_str)
+
+
+def main() -> int:
+    if len(sys.argv) != 3:
+        print(f"Usage: {sys.argv[0]} <run_config.json> <spectrum_path>")
+        return 2
+
+    run_cfg = json.loads(Path(sys.argv[1]).read_text())
+    spectrum_path = sys.argv[2]
+
+    _ensure_kinextract_importable(run_cfg["framework_root"])
+    _ensure_scofit_importable(run_cfg["framework_root"])
+    from kinextract import load_config_from_toml, run_spectral_fit, estimate_losvd_errors
+
+    cfg = load_config_from_toml(run_cfg["config_path"])
+    cfg.template_list_file = run_cfg["template_list_file"]
+    cfg.template_dir = run_cfg["template_dir"]
+    cfg.outdir = run_cfg["outdir"]
+    cfg.wavefitmin = float(run_cfg["wavefitmin"])
+    cfg.wavefitmax = float(run_cfg["wavefitmax"])
+    cfg.zgal = float(run_cfg["zgal"])
+    cfg.wavemin_full = float(run_cfg["wavemin_full"])
+    cfg.step = float(run_cfg["step"])
+
+    # Optional uniform gal_errors = flux / snr_override override, matching
+    # the MUSE example notebook's approach when the file's own per-pixel
+    # error column isn't trusted (see kinextract.config: use_spectrum_errors
+    # still gates whether this or the file column is actually used).
+    gal_errors = None
+    snr_override = run_cfg.get("snr_override")
+    if snr_override:
+        import numpy as np
+        flux = np.loadtxt(spectrum_path)[:, 1]
+        gal_errors = flux / float(snr_override)
+
+    fit = run_spectral_fit(cfg, gal_file=spectrum_path, gal_errors=gal_errors)
+
+    if run_cfg.get("run_errors", False):
+        prefix = Path(spectrum_path).stem
+        estimate_losvd_errors(
+            fit,
+            cfg,
+            run_laplace=True,
+            run_bootstrap=run_cfg.get("run_bootstrap", False),
+            run_bias=True,
+            n_bootstrap=int(run_cfg.get("n_bootstrap", 200)),
+            n_jobs=int(run_cfg.get("n_jobs", 1)),
+            plot=False,
+            write_to_files=True,
+            prefix=prefix,
+            outdir=run_cfg["outdir"],
+        )
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+PY
+chmod +x "$helper_py"
+
+# remove old output files to avoid confusion with new runs, if they exist
+rm -f "${current_dir}"/*.fit "${current_dir}"/*.rms "${current_dir}"/*.ascii "${current_dir}"/*.sim 
+rm -f "${current_dir}"/*.mcfit "${current_dir}"/*.mcfit2 "${current_dir}"/*_in "${current_dir}"/*.run
+rm -f "${current_dir}"/*out "${current_dir}"/*.dat "${current_dir}"/*.temp "${current_dir}"/*.slurm
+rm -f "${current_dir}"/*_joblist "${current_dir}"/*.def
+
+# Build run config with all final settings (MAP fit + optional errors).
+# Each cluster job runs both phases for its spectrum, so no login-node fitting.
+# framework_root lets the helper script fall back to the bundled
+# lib/kinextract/src copy if kinextract isn't pip-installed in this
+# environment (see _ensure_kinextract_importable in the helper above).
+run_config_json="${current_dir}/.kinextract_run_config.json"
+python3 - "$run_config_json" <<PYJSON
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+run_errors_flag = "$run_errors" in ("Y", "y")
+run_bootstrap_flag = "$run_bootstrap" in ("Y", "y")
+snr_override_raw = "$SNR_OVERRIDE".strip()
+cfg = {
+    "framework_root":     "${SCO_FRAMEWORK_ROOT}",
+    "config_path":        "${kinextract_config}",
+    "template_list_file": "${template_list_file}",
+    "template_dir":       "${template_dir}",
+    "outdir":             "${outdir}",
+    "wavefitmin":         ${wavefitmin},
+    "wavefitmax":         ${wavefitmax},
+    "zgal":               ${redshift},
+    "wavemin_full":       ${wavemin_full},
+    "step":               ${step},
+    "run_errors":         run_errors_flag,
+    "run_bootstrap":      run_bootstrap_flag,
+    "n_bootstrap":        ${bootstrap_samples},
+    "n_jobs":             ${n_jobs},
+    "snr_override":       float(snr_override_raw) if snr_override_raw else None,
+}
+path.write_text(json.dumps(cfg, indent=2))
+PYJSON
+
+# Write one cluster command per spectrum.
+cmdfile="${current_dir}/kinematic_extraction.run"
+: > "$cmdfile"
+for spec in b*.spec; do
+    echo "cd '${current_dir}' && ${SCO_PYTHON_BIN:-python3} '${helper_py}' '${run_config_json}' '${spec}'" >> "$cmdfile"
+done
+
+echo "Submitting ${#files[@]} jobs to cluster via jobsplitter..."
+rm -rf "${current_dir}"/*.slurm "${current_dir}"/jobsplitter.output 2>/dev/null || true
+command -v jobsplitter >/dev/null || { echo "ERROR: jobsplitter not found in PATH"; exit 1; }
+
+if [[ "$run_bootstrap" =~ ^[Yy]$ ]]; then
+    # n_jobs may be "-1" (kinextract.config's "use all CPUs" convention, used
+    # by the in-process worker pool) which is not a valid --cpus-per-task
+    # value -- SLURM needs a concrete count. Fall back to 1 (serial, but
+    # submittable) and warn, rather than passing -1 through to SLURM.
+    if [[ "$n_jobs" =~ ^[1-9][0-9]*$ ]]; then
+        export CPUS_PER_TASK="$n_jobs"
+    else
+        echo "WARNING: n_jobs='$n_jobs' is not a positive integer; SLURM needs an explicit --cpus-per-task. Using CPUS_PER_TASK=1 (bootstrap will run serially within each array task)."
+        export CPUS_PER_TASK=1
+    fi
+    job_time_limit="04:00:00"
+elif [[ "$run_errors" =~ ^[Yy]$ ]]; then
+    export CPUS_PER_TASK=1
+    job_time_limit="02:00:00"
+else
+    export CPUS_PER_TASK=1
+    job_time_limit="01:00:00"
+fi
+
+export JOB_OUTPUT_LOGS="${logs_dir}"
+export AUTO_SUBMIT=1
+# Tell JAX to use CPU only: suppresses the "CUDA-enabled jaxlib not installed"
+# stderr message that appears on GPU nodes when JAX falls back to CPU.
+export JAX_PLATFORMS=cpu
+
+# Use the kinextract-specific SLURM template (conda activation, thread-pool
+# env vars, JAX/XLA thread cap) via jobsplitter's local-override rule, rather
+# than overwriting the shared templates.slurm used by the rest of the
+# modeling framework. Cleaned up right after submission.
+cp "${script_dir}/kinextract.templates.slurm" "${current_dir}/template.slurm"
+jobsplitter "$cmdfile" "$job_time_limit"
+rm -f "${current_dir}/template.slurm"
+
+echo ""
+echo "============================================================"
+echo "Kinematic extraction submitted for ${galaxy} (${spectrograph})"
+echo "============================================================"
+echo "Fit output directory: ${outdir}"
+if [[ "$run_errors" =~ ^[Yy]$ ]]; then
+    echo "Error estimation: bootstrap=${run_bootstrap}  n_bootstrap=${bootstrap_samples}  n_jobs=${n_jobs}"
+fi
+echo "Monitor with: squeue -u $USER"
+echo ""

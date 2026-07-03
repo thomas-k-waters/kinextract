@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Combine multiple modeling run files, remove duplicates, then trim completed runs
+
+if [ $# -lt 2 ]; then
+    echo "Usage: $0 <output_file> <input_file1> <input_file2> ..." >&2
+    echo "Example: $0 modeling_run_combined modeling_run_01 modeling_run_02" >&2
+    exit 1
+fi
+
+output_file=$1
+shift  # Remove first argument, rest are input files
+
+echo "Combining and deduplicating input files..."
+echo "Output will be: ${output_file}"
+echo ""
+
+# Concatenate all input files and remove duplicates
+cat "$@" | sort | uniq > "${output_file}"
+
+total_input=0
+for file in "$@"; do
+    lines=$(wc -l < "$file")
+    echo "  ${file}: ${lines} lines"
+    total_input=$((total_input + lines))
+done
+
+output_lines=$(wc -l < "${output_file}")
+duplicates=$((total_input - output_lines))
+
+echo ""
+echo "Total input lines: ${total_input}"
+echo "Unique lines: ${output_lines}"
+echo "Duplicates removed: ${duplicates}"
+echo ""
+echo "Combined file saved as: ${output_file}"
+echo ""
+echo "Now you can run: ./trimlist ${output_file}"
+

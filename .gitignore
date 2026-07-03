@@ -1,0 +1,32 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+.hypothesis/
+
+# Packaging
+*.egg-info/
+build/
+_build/
+docs/_build/
+dist/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Virtual environments
+.venv/
+venv/
+
+# Validation suite output (benchmarks/results/)
+benchmarks/results/
+benchmarks/results_*/
+
+# Claude Code internal state
+.claude/

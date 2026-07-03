@@ -1,0 +1,23 @@
+name=$1
+# data and model velocity bin size. Ask Karl how to get 133.3
+
+x1=$(awk 'NR==2 {prev=$1} NR==3 {print $1 - prev}' ${name}.mcfit2)
+x2=133.3
+
+# Source the SCO environment configuration if not already sourced
+if [ -z "$SCO_FRAMEWORK_BIN" ]; then
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    source "${script_dir}/sco_env.sh"
+fi
+ 
+#rm -f transvd.out
+"${SCO_FRAMEWORK_BIN}/transvd" << eof
+$x1 $x2
+${name}.mcfit2
+0
+0
+$2
+eof
+#awk '{if($1<-170||$1>170) print $1,$2,0.00000000,$4; else print $0}' transvd.out > ${name}_in
+python "${SCO_FRAMEWORK_BIN}/fix_losvd_errs.py" transvd.out ${name}_in
+

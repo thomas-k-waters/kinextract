@@ -1,0 +1,27 @@
+#!/bin/bash
+set +o noclobber
+
+# Remove all .slurm, .run, and *_joblist files into a new directory based on the joblist basename
+current_dir="$(pwd)"
+# slurm_dir="${current_dir}/slurm_file_archive"
+# mkdir -p $slurm_dir
+
+# Find the first *_joblist file in the current directory
+joblist=$(ls *_joblist 2>/dev/null | head -n 1)
+
+if [ -z "$joblist" ]; then
+  echo "No *_joblist file found."
+  exit 1
+fi
+
+# Get the base name (remove _joblist)
+base="${joblist%_joblist}"
+# dest="${base}_slurmfiles"
+
+# mkdir -p "${slurm_dir}/${dest}"
+
+# Move files
+rm -f ./*.slurm ./*.run ./*_joblist .submit_jobs_daemon_*.sh .submit_jobs_daemon_*.log .submit_jobs_tracker_*.txt 2>/dev/null
+
+
+echo "Removed *.slurm, *.run, and *_joblist files"
