@@ -11,11 +11,13 @@ rounding function used to keep pixel-index arithmetic bit-for-bit
 consistent with the legacy code.
 """
 from __future__ import annotations
+
 from pathlib import Path
 from typing import Optional
-import numpy as np
-from ._utils import BIG, log
 
+import numpy as np
+
+from ._utils import BIG, log
 
 # =============================================================================
 # Section 4 - I/O helpers
@@ -475,7 +477,7 @@ def write_fitlov_outputs(
         ``"nrms"``), the continuum array, and a ``"paths"`` dict giving the
         four output file paths.
     """
-    from .numerics import evaluate_model_gp, compute_weighted_template_spectrum
+    from .numerics import compute_weighted_template_spectrum, evaluate_model_gp
 
     outdir = Path("." if outdir is None else outdir)
     outdir.mkdir(parents=True, exist_ok=True)

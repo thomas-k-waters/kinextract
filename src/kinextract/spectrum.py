@@ -24,23 +24,31 @@ templates has the sharper resolution down to match the coarser one.
 """
 
 from __future__ import annotations
-from typing import Optional
-import numpy as np
-from ._utils import CEE, BIG, log
-from .config import FitConfig
-from .state import FitState, precompute_losvd_interp, precompute_ip_map
-from .templates import (
-    build_template_matrix_fortran, resolution_mismatch_sigma_A, convolve_gaussian_pixels,
-)
-from .io import (
-    read_galaxy_index_flux_err, read_norm_spectrum,
-    read_template_list, setbadreg,
-    build_wavelength_from_index, select_region_with_errors,
-    estimate_step_from_wavelength, count_in_window,
-)
-from .masking import build_emission_line_mask, _segment_emission_mask
-from .continuum import init_als_continuum, grow_boolean_mask_A
 
+from typing import Optional
+
+import numpy as np
+
+from ._utils import BIG, CEE, log
+from .config import FitConfig
+from .continuum import grow_boolean_mask_A, init_als_continuum
+from .io import (
+    build_wavelength_from_index,
+    count_in_window,
+    estimate_step_from_wavelength,
+    read_galaxy_index_flux_err,
+    read_norm_spectrum,
+    read_template_list,
+    select_region_with_errors,
+    setbadreg,
+)
+from .masking import _segment_emission_mask, build_emission_line_mask
+from .state import FitState, precompute_ip_map, precompute_losvd_interp
+from .templates import (
+    build_template_matrix_fortran,
+    convolve_gaussian_pixels,
+    resolution_mismatch_sigma_A,
+)
 
 # =============================================================================
 # Section 10 - Spectrum loading

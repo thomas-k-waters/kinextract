@@ -14,6 +14,7 @@ purely for visual inspection and do not modify any fit results.
 """
 
 from __future__ import annotations
+
 import numpy as np
 
 try:
@@ -22,9 +23,8 @@ except ImportError:
     plt = None  # type: ignore
 
 from ._utils import BIG
-from .losvd import fit_losvd_gauss_hermite
 from .continuum import _STELLAR_ABSORPTION_LINE_TABLES, _center_to_fit_frame
-
+from .losvd import fit_losvd_gauss_hermite
 
 # =============================================================================
 # Shared plot style
@@ -443,11 +443,6 @@ def plot_losvd_posterior(fit: dict, confidence: float = 0.68, max_gh_draws: int 
     )
     return summary
 
-    print(
-        f"vherm={gh['vherm']:.4f}  sherm={gh['sherm']:.4f}  "
-        f"h3={gh['h3']:.4f}  h4={gh['h4']:.4f}  success={gh['fit_success']}"
-    )
-
 
 def plot_als_continuum(
     fit: dict,
@@ -663,8 +658,8 @@ def plot_als_continuum(
     ax.plot(st.x, gp, color="C0", lw=1.5, label="model")
     ax.plot(st.x, cont, color="tab:orange", lw=1.2, ls="--", label="ALS continuum")
 
-    from matplotlib.patches import Patch
     from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
     legend_patches = []
     if em_mask_bool.any():
         legend_patches.append(Patch(color="tab:red", alpha=0.4, label="Detected Emission"))
@@ -678,9 +673,9 @@ def plot_als_continuum(
     if ref_lines:
         legend_patches.append(Line2D([0], [0], color="0.65", lw=0.7, ls="--",
                                      label="prominent lines (ref)"))
-    h, l = ax.get_legend_handles_labels()
-    ax.legend(handles=h + legend_patches,
-              labels=l + [p.get_label() for p in legend_patches],
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles=handles + legend_patches,
+              labels=labels + [p.get_label() for p in legend_patches],
               fontsize=8, loc="lower right", frameon=True, fancybox=True, framealpha=0.85)
     ax.set_ylabel("Flux")
     ax.grid(alpha=0.25)

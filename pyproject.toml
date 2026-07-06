@@ -82,4 +82,10 @@ src = ["src"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
-ignore = ["E501"]
+# E501 (line too long): line-length is enforced at 99 above, long lines are
+# usually URLs/long strings not worth wrapping.
+# E702 (multiple statements on one line via ';'): used deliberately in the
+# numerics-heavy modules (continuum.py, errors.py, losvd.py, numerics.py) to
+# keep tightly-related paired assignments (e.g. "value = ...; index += n")
+# visually grouped on one line.
+ignore = ["E501", "E702"]

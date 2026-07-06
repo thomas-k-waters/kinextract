@@ -80,8 +80,8 @@ import copy
 import dataclasses
 import time
 import warnings
-from typing import Optional
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -105,15 +105,17 @@ except ImportError:
 # These are imported at use-time inside functions so this module can be
 # imported even if spectral_fitting is not on the path yet.
 # ---------------------------------------------------------------------------
-from .state import FitState
 from .continuum import init_als_continuum
 from .fitting import fit_state_map_with_optional_clean
-from .numerics import (
-    evaluate_model_gp, _build_jax_objective_value_and_grad, objective_map, jax,
-)
 from .losvd import fit_losvd_gauss_hermite, fit_losvd_gauss_hermite_higher
+from .numerics import (
+    _build_jax_objective_value_and_grad,
+    evaluate_model_gp,
+    jax,
+    objective_map,
+)
 from .spectrum import build_initial_guess_nonparam
-
+from .state import FitState
 
 # =============================================================================
 # Helpers
@@ -2009,7 +2011,7 @@ class LOSVDErrorEstimator:
         gerr = np.asarray(st.gerr, float)
         good = np.isfinite(data) & np.isfinite(gp) & np.isfinite(gerr) & (gerr < 1e8)
         resid = data - gp
-        
+
         # Model uncertainty band: prefer bootstrap samples if available,
         # otherwise approximate by sampling b from recommended errors (diag only).
         gp_lo = gp_hi = None
@@ -2231,10 +2233,10 @@ def write_losvd_errors_to_files(
 ) -> dict:
     """
     Write LOSVD vector with error bars to file.
-    
+
     Produces {prefix}.losvd_errs.out with columns:
         bin_index  velocity_km/s  amplitude_map  amplitude_err  amplitude_lo  amplitude_hi
-    
+
     Parameters
     ----------
     summary : dict
@@ -2243,7 +2245,7 @@ def write_losvd_errors_to_files(
         Output file prefix (e.g., "bin0105sp")
     outdir : str or Path
         Output directory
-    
+
     Returns
     -------
     dict
@@ -2251,21 +2253,21 @@ def write_losvd_errors_to_files(
     """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    
+
     xl = summary["xl"]
     b_map = summary["b_map"]
     b_err = summary.get("b_err_recommended", np.zeros_like(b_map))
     b_lo = summary.get("b_lo_recommended", b_map - b_err)
     b_hi = summary.get("b_hi_recommended", b_map + b_err)
     method = summary.get("method_recommended", "unknown")
-    
+
     outfile = outdir / f"{prefix}.losvd_errs.out"
     with open(outfile, "w") as f:
         f.write(f"# LOSVD error estimates (method: {method})\n")
         f.write("# bin_index  velocity_km/s  amplitude_map  amplitude_err  amplitude_lo  amplitude_hi\n")
         for i, (vel, amp, err, lo, hi) in enumerate(zip(xl, b_map, b_err, b_lo, b_hi)):
             f.write(f"{i+1:10d} {vel:15.6f} {amp:20.11E} {err:20.11E} {lo:20.11E} {hi:20.11E}\n")
-    
+
     print(f"[losvd_errs] Wrote {outfile}")
     # If a bootstrap median center is available in the summary, write it to a separate file
     if "b_center_recommended" in summary:
@@ -2357,12 +2359,12 @@ def write_gh_errors_to_files(
 ) -> dict:
     """
     Write Gauss-Hermite moment errors to file.
-    
+
     Produces {prefix}.gh_errs.out with columns:
         parameter  value  error  error_lo  error_hi
-    
+
     Moments: V (velocity), sigma (dispersion), h3, h4
-    
+
     Parameters
     ----------
     summary : dict
@@ -2371,7 +2373,7 @@ def write_gh_errors_to_files(
         Output file prefix (e.g., "bin0105sp")
     outdir : str or Path
         Output directory
-    
+
     Returns
     -------
     dict
@@ -2379,16 +2381,16 @@ def write_gh_errors_to_files(
     """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    
+
     gh_map = summary.get("gh_map", {})
     gh_err = summary.get("gh_err_recommended", {})
     gh_lo = summary.get("gh_lo_recommended", {})
     gh_hi = summary.get("gh_hi_recommended", {})
     method = summary.get("method_recommended", "unknown")
-    
+
     params = ["V", "sigma", "h3", "h4"]
     keys = ["vherm", "sherm", "h3", "h4"]
-    
+
     outfile = outdir / f"{prefix}.gh_errs.out"
     with open(outfile, "w") as f:
         f.write(f"# Gauss-Hermite moment errors (method: {method})\n")
@@ -2400,7 +2402,7 @@ def write_gh_errors_to_files(
             lo = gh_lo.get(err_key, np.nan)
             hi = gh_hi.get(err_key, np.nan)
             f.write(f"{param:10s} {val:15.6f} {err:15.6f} {lo:15.6f} {hi:15.6f}\n")
-    
+
     print(f"[losvd_errs] Wrote {outfile}")
     return {"gh_errs_file": str(outfile)}
 
@@ -2454,9 +2456,9 @@ def write_bootstrap_diagnostics_to_file(
 ) -> dict:
     """
     Write bootstrap convergence and diagnostic statistics.
-    
+
     Produces {prefix}.bootstrap_diag.txt with summary statistics.
-    
+
     Parameters
     ----------
     bootstrap_result : dict
@@ -2465,7 +2467,7 @@ def write_bootstrap_diagnostics_to_file(
         Output file prefix (e.g., "bin0105sp")
     outdir : str or Path
         Output directory
-    
+
     Returns
     -------
     dict
@@ -2473,7 +2475,7 @@ def write_bootstrap_diagnostics_to_file(
     """
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    
+
     n_success = bootstrap_result.get("n_success", 0)
     n_failed = bootstrap_result.get("n_failed", 0)
     n_total = n_success + n_failed
@@ -2489,7 +2491,7 @@ def write_bootstrap_diagnostics_to_file(
         f.write(f"Convergence rate: {convergence_rate:.1f}%\n")
         if convergence_rate < 95.0:
             f.write("\nWARNING: Low convergence rate (<95%). Error bars may be unreliable.\n")
-    
+
     print(f"[losvd_errs] Wrote {outfile}")
     return {"bootstrap_diag_file": str(outfile)}
 

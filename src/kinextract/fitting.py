@@ -18,24 +18,30 @@ public API for fitting a single galaxy spectrum end-to-end, given a
 :class:`~kinextract.config.FitConfig`.
 """
 from __future__ import annotations
+
 from typing import Optional
+
 import numpy as np
 from scipy.optimize import minimize
-from ._utils import BIG, log, Timer
+
+from ._utils import BIG, Timer, log
 from .config import FitConfig
-from .state import FitState
-from .numerics import objective_map, _get_or_build_jax_vg, evaluate_model_gp
-from .numerics import jax  # module-level jax reference (may be None)
-from .masking import build_clean_protect_mask, _bloom_rejected, _update_clean_mask
 from .continuum import update_als_continuum
-from .io import write_fitlov_outputs, infer_output_prefix
+from .io import infer_output_prefix, write_fitlov_outputs
+
 # fit_losvd_gauss_hermite is not used inside this module, but is re-exported
 # here because several example notebooks/scripts import it via
 # `from kinextract.fitting import fit_losvd_gauss_hermite`; the canonical
 # definition is in .losvd.
-from .losvd import fit_losvd_gauss_hermite
-from .spectrum import make_fit_state, build_initial_guess_nonparam
-
+from .masking import _bloom_rejected, _update_clean_mask, build_clean_protect_mask
+from .numerics import (
+    _get_or_build_jax_vg,
+    evaluate_model_gp,
+    jax,  # module-level jax reference (may be None)
+    objective_map,
+)
+from .spectrum import build_initial_guess_nonparam, make_fit_state
+from .state import FitState
 
 # =============================================================================
 # Section 9 fitting functions
@@ -1028,7 +1034,7 @@ def run_spectral_fit(
     else:
         # In-memory equivalent of the most useful pieces from write_fitlov_outputs(),
         # without touching the filesystem.
-        from .numerics import evaluate_model_gp, compute_weighted_template_spectrum
+        from .numerics import compute_weighted_template_spectrum, evaluate_model_gp
         gp, b, w, coff, coff2, A = evaluate_model_gp(a_map, st)
         sw = float(np.sum(w))
         wfrac = w / sw if sw else w

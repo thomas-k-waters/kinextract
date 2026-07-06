@@ -20,6 +20,7 @@ broadening rather than a resolution difference baked in as spurious extra
 by default kinextract assumes the two are already matched.
 """
 from __future__ import annotations
+
 import numpy as np
 
 # Gaussian FWHM = 2*sqrt(2*ln(2)) * sigma

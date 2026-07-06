@@ -23,10 +23,13 @@ the LOSVD chi-squared fit itself rather than the continuum baseline.
 """
 
 from __future__ import annotations
+
 import warnings
 from typing import Optional
+
 import numpy as np
 from scipy.linalg import solve_banded
+
 try:
     from numba import njit
 except Exception:
@@ -38,9 +41,8 @@ except Exception:
         "10-50x slower. Install with: pip install numba",
         RuntimeWarning, stacklevel=1,
     )
-from ._utils import CEE, BIG, log
+from ._utils import BIG, CEE, log
 from .config import FitConfig
-
 
 # =============================================================================
 # Section 1 - ALS continuum utilities
@@ -1784,8 +1786,8 @@ def query_nist_lines(
 
     # ------------------------------------------------------------------ astroquery path
     try:
-        from astroquery.nist import Nist  # type: ignore
         import astropy.units as u  # type: ignore
+        from astroquery.nist import Nist  # type: ignore
 
         _logged_cols: bool = False
         for species in elements:
@@ -1864,8 +1866,8 @@ def query_nist_lines(
 
     # ------------------------------------------------------------------ HTTP fallback
     try:
-        import urllib.request
         import urllib.parse
+        import urllib.request
 
         for species in elements:
             try:

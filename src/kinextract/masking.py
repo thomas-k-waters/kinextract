@@ -20,12 +20,14 @@ sigma-clipping and is documented in place; it is not modified here.
 """
 
 from __future__ import annotations
+
 from typing import Optional
+
 import numpy as np
-from ._utils import CEE, BIG, log
+
+from ._utils import BIG, CEE, log
 from .config import FitConfig
 from .state import FitState
-
 
 # =============================================================================
 # Section 9 - Sigma-clipping / cleaning (masking functions)
@@ -418,8 +420,8 @@ def _update_clean_mask(
       ``protect_mask`` with no practical effect and is kept only for
       backward compatibility; new code should leave the default in place.
     """
-    from .numerics import evaluate_model_gp
     from .continuum import robust_sigma
+    from .numerics import evaluate_model_gp
     gp, *_ = evaluate_model_gp(a_best, st)
     resid = (st.g - gp) / np.where(base_gerr > 0, base_gerr, 1.0)
     sigma = robust_sigma(resid[good_mask])

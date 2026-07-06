@@ -33,14 +33,14 @@ from scipy.interpolate import griddata
 
 from ._utils import log
 from .config import FitConfig
-from .state import FitState
-from .fitting import fit_state_map_with_optional_clean
-from .spectrum import build_initial_guess_nonparam
-from .losvd import fit_losvd_gauss_hermite
-from .numerics import evaluate_model_gp
 from .continuum import init_als_continuum
-from .mocks import build_matched_mock
 from .errors import _fit_state_to_fields
+from .fitting import fit_state_map_with_optional_clean
+from .losvd import fit_losvd_gauss_hermite
+from .mocks import build_matched_mock
+from .numerics import evaluate_model_gp
+from .spectrum import build_initial_guess_nonparam
+from .state import FitState
 
 
 def assess_recovery_bias(

@@ -27,8 +27,9 @@ See Also
 load_config_from_toml : Build a FitConfig from a TOML file on disk.
 """
 from __future__ import annotations
+
 import warnings
-from dataclasses import dataclass, fields, MISSING
+from dataclasses import MISSING, dataclass, fields
 from pathlib import Path
 from typing import Optional
 
@@ -36,10 +37,10 @@ import numpy as np
 
 # ── TOML parsing (stdlib on 3.11+, falls back to third-party tomli) ──────────
 try:
-    import tomllib                # Python >= 3.11
+    import tomllib  # Python >= 3.11
 except ModuleNotFoundError:
     try:
-        import tomli as tomllib   # pip install tomli
+        import tomli as tomllib  # pip install tomli
     except ModuleNotFoundError:
         tomllib = None            # type: ignore[assignment]
         warnings.warn(
@@ -291,9 +292,11 @@ class _HybridDescribe:
         def describe(pattern: Optional[str] = None) -> None:
             """See FitConfig class docstring / describe() usage examples."""
             if instance is None:
-                value_of = lambda f: (f.default if f.default is not MISSING else "(no default)")
+                def value_of(f):
+                    return f.default if f.default is not MISSING else "(no default)"
             else:
-                value_of = lambda f: getattr(instance, f.name)
+                def value_of(f):
+                    return getattr(instance, f.name)
             _print_field_table(fields(owner), pattern, value_of)
 
         describe.__doc__ = (
@@ -314,7 +317,7 @@ class _HybridDescribe:
 class FitConfig:
     """
     All tunable parameters controlling a single LOSVD spectral fit.
-    Run FitConfig.describe() to see a grouped, filterable table of all 
+    Run FitConfig.describe() to see a grouped, filterable table of all
     fields and their one-line descriptions.
 
     ``FitConfig`` is the single configuration object passed to

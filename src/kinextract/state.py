@@ -12,10 +12,11 @@ optimizer's inner loop (in :mod:`kinextract.numerics`) can avoid recomputing
 this geometry on every objective-function evaluation.
 """
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 from typing import Optional
-import numpy as np
 
+import numpy as np
 
 # =============================================================================
 # Section 7 - FitState dataclass and precomputation

@@ -25,10 +25,11 @@ shape, so they must not be mixed.
 """
 
 from __future__ import annotations
+
 import math
+
 import numpy as np
 from scipy.optimize import least_squares
-
 
 # =============================================================================
 # Section 15 - LOSVD analysis

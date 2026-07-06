@@ -21,9 +21,9 @@ from typing import Optional
 
 import numpy as np
 
-from .state import FitState
 from .losvd import gauss_hermite_losvd_model
 from .numerics import evaluate_model_gp
+from .state import FitState
 
 
 def true_losvd_on_grid(

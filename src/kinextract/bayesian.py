@@ -34,18 +34,18 @@ from __future__ import annotations
 
 import time
 
-import numpy as np
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS
 
-from ._utils import CEE, BIG, log
-from .state import FitState
+from ._utils import log
 from .config import FitConfig
 from .continuum import update_als_continuum
-from .numerics import estimate_velocity_xcorr, _wing_taper_lam_vec
+from .numerics import _wing_taper_lam_vec, estimate_velocity_xcorr
+from .state import FitState
 
 _WING_TAPER_SFAC = 1.8  # matches the legacy Fortran convention (see numerics.py)
 
@@ -520,6 +520,7 @@ def fit_state_bayesian(st: FitState, cfg: FitConfig, a0: np.ndarray, bounds: lis
         includes the retry time if a budget escalation happened).
     """
     from types import SimpleNamespace
+
     from .fitting import _auto_select_xlam, _fit_map_once, run_iterative_clean_map
     from .masking import build_clean_protect_mask
 

@@ -45,10 +45,13 @@ tied to the pre-fix locking bug's pathological process state, not a
 general reproducibility risk.
 """
 from __future__ import annotations
-import warnings
-import time
+
 import threading as _threading
+import time
+import warnings
+
 import numpy as np
+
 try:
     import jax
     import jax.numpy as jnp
@@ -66,9 +69,8 @@ try:
 except Exception:
     def njit(*a, **k):
         return a[0] if a and callable(a[0]) else lambda f: f
-from ._utils import CEE, BIG
+from ._utils import BIG, CEE
 from .state import FitState, getnlosvd_fast_from_b
-
 
 # =============================================================================
 # JAX cache (from preamble)

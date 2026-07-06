@@ -8,6 +8,7 @@ and small logging/timing helpers used throughout the LOSVD-fitting pipeline
 to report progress on long-running fits.
 """
 from __future__ import annotations
+
 import time
 
 # ─────────────────────────────────────────────────────────────────────────────

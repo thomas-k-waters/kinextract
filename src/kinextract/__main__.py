@@ -9,12 +9,13 @@ batch processing or notebook use, call :func:`~kinextract.run_spectral_fit`
 directly with a :class:`~kinextract.FitConfig` instead.
 """
 from __future__ import annotations
+
 import sys
 from pathlib import Path
-from .fitting import run_spectral_fit
-from .config import load_config_from_toml
-from ._utils import log
 
+from ._utils import log
+from .config import load_config_from_toml
+from .fitting import run_spectral_fit
 
 # =============================================================================
 # Section 17 - Entry point
