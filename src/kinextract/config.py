@@ -67,7 +67,7 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
     "template_dir": ("Paths", "Directory the template list's relative paths are resolved against (defaults to the list file's directory)."),
     "regions_bad_path": ("Paths", "Path to a 'regions.bad' file of wavelength intervals to exclude from the fit."),
     "outdir": ("Paths", "Directory where .fit/.temp/.ascii/.rms output files are written. Only used if write_outputs is True."),
-    "write_outputs": ("Paths", "Write {prefix}.fit/.temp/.ascii/.rms files to outdir after each run_spectral_fit() call. Set False to keep results in memory only (e.g. for scripted/notebook use or batch-fitting many spectra); can still be overridden per call via run_spectral_fit(..., write_outputs=...)."),
+    "write_outputs": ("Paths", "Write {prefix}.fit/.temp/.ascii/.rms files to outdir after each run_spectral_fit() call. Defaults to False, so results stay in memory only (e.g. for scripted/notebook use or batch-fitting many spectra); set True (or pass run_spectral_fit(..., write_outputs=True)) to write files to disk."),
 
     # ── Wavelength / redshift ────────────────────────────────────────────
     "wavemin_full": ("Wavelength/redshift", "Wavelength (A) of pixel 1 of the FULL spectrum. Required for raw index-format .spec files."),
@@ -99,7 +99,8 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
     "n_losvd_bins": ("Kinematic grid", "Number of bins in the non-parametric LOSVD histogram."),
 
     # ── Continuum mode ───────────────────────────────────────────────────
-    "fit_als_continuum": ("Continuum mode", "False: input is already continuum-normalised. True: co-fit an ALS continuum baseline with the LOSVD."),
+    "fit_als_continuum": ("Continuum mode", "False: input is already continuum-normalised. True: co-fit a full-scale continuum baseline with the LOSVD (method set by continuum_method)."),
+    "continuum_method": ("Continuum mode", "'als' (default) or 'polynomial' -- which full-scale continuum model to co-fit when fit_als_continuum=True."),
 
     # ── Pre-normalised mode ───────────────────────────────────────────────
     "norm_error_mode": ("Pre-normalised mode", "'unit': use uniform errors on normalised flux. 'file': use the .norm file's own error column."),
@@ -115,15 +116,15 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
     "als_outer_iter": ("ALS continuum", "Max outer-loop iterations alternating the LOSVD fit and the ALS continuum re-estimate."),
     "als_outer_tol": ("ALS continuum", "Outer-loop convergence tolerance on the median fractional continuum change."),
     "als_eps": ("ALS continuum", "Minimum ALS weight floor, avoids a singular banded system."),
-    "als_optimize_init_only": ("ALS continuum", "If True, optimize ALS (lam, p) only once at initialization and reuse them on later outer iterations."),
+    "als_optimize_init_only": ("ALS continuum", "If True (default), optimize ALS (lam, p) only once at initialization and reuse them on later outer iterations -- validated to give the same accuracy as re-optimizing every iteration at lower cost."),
     "als_clip": ("ALS continuum", "(lo, hi) clamp applied to the fitted ALS continuum values."),
     "spec_col3_is_variance": ("ALS continuum", "Whether column 3 of a raw .spec file holds variance (True) rather than sigma (False)."),
     "use_spectrum_errors": ("ALS continuum", "If False, replace per-pixel errors with their median (equal weighting) while still reading the error column."),
 
     # ── ALS hyperparameter optimization ──────────────────────────────────
-    "als_optimize": ("ALS hyperparameter search", "If True, grid-search (als_lam, als_p) instead of using the fixed values."),
+    "als_optimize": ("ALS hyperparameter search", "If True (default), grid-search (als_lam, als_p) instead of using the fixed als_lam/als_p values. A fixed als_lam is tuned for one instrument's own pixel scale and can be badly mismatched for others (e.g. it under-fits a narrower/finer-sampled spectrograph's continuum) -- searching per-target removes that mismatch at little to no extra cost (als_optimize_init_only limits the search to once per fit)."),
     "als_lam_grid": ("ALS hyperparameter search", "Coarse als_lam grid searched when als_optimize=True."),
-    "als_p_grid": ("ALS hyperparameter search", "Coarse als_p grid searched when als_optimize=True."),
+    "als_p_grid": ("ALS hyperparameter search", "Coarse als_p grid searched when als_optimize=True. Defaults to a single value matching als_p's own default (0.05, asymmetric -- appropriate for real absorption-dominated spectra): if this contains only one value, als_p is held fixed at it and only als_lam is searched. Widen this (e.g. to include values up to 0.5) only if you specifically want the search to also consider symmetric/near-symmetric continuum fits -- a wide grid that includes symmetric values can otherwise let the search discard the physically-motivated asymmetric default in favor of a symmetric fit."),
     "als_lam_grid_fine_n": ("ALS hyperparameter search", "Number of points in the fine als_lam refinement grid around the coarse best value."),
     "als_p_grid_fine_n": ("ALS hyperparameter search", "Number of points in the fine als_p refinement grid around the coarse best value."),
     "als_opt_verbose": ("ALS hyperparameter search", "Log every (lam, p) trial's score during the ALS hyperparameter search."),
@@ -133,6 +134,13 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
     "als_hutchinson_probes": ("ALS hyperparameter search", "Number of Hutchinson stochastic-trace probes used to estimate the ALS effective degrees of freedom."),
     "als_bic_dof_penalty": ("ALS hyperparameter search", "Penalty weight multiplying k_eff*ln(n) in the BIC-like ALS score."),
     "als_lambda_floor": ("ALS hyperparameter search", "Optional minimum als_lam to prevent pathological low-lambda ALS fits."),
+
+    # ── Polynomial continuum ──────────────────────────────────────────────
+    "poly_continuum_order": ("Polynomial continuum", "Polynomial order for continuum_method='polynomial' (ignored if poly_continuum_optimize=True)."),
+    "poly_continuum_p": ("Polynomial continuum", "Asymmetry weight for the polynomial's IRLS reweighting -- same convention/role as als_p."),
+    "poly_continuum_niter": ("Polynomial continuum", "Number of asymmetric-reweighting iterations for the polynomial fit."),
+    "poly_continuum_optimize": ("Polynomial continuum", "If True, grid-search poly_continuum_order_grid (scored like the ALS lam/p search) instead of using the fixed poly_continuum_order."),
+    "poly_continuum_order_grid": ("Polynomial continuum", "Candidate polynomial orders searched when poly_continuum_optimize=True."),
 
     # ── ALS continuum line masks ─────────────────────────────────────────
     "als_mask_ca": ("ALS line masking", "Exclude the Ca II triplet windows from the ALS continuum fit (they are absorption, not continuum)."),
@@ -195,6 +203,24 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
     "use_jax_objective": ("Optimizer", "Use a JAX-jitted analytic value-and-gradient instead of Numba/finite differences. Default True: exact gradients are strictly more accurate and, for realistic template counts, much faster (finite differences need ~n_params extra evaluations per gradient). Falls back to finite differences automatically if JAX is unavailable."),
     "jax_enable_x64": ("Optimizer", "Enable float64 precision in JAX (recommended; JAX defaults to float32)."),
     "print_every": ("Optimizer", "Log an objective-value progress line every N optimizer evaluations (0 disables)."),
+
+    # ── Bayesian sampling (NUTS) ───────────────────────────────────────────
+    # The defaults (50 warmup + 75 samples, 4 chains) are validated to
+    # converge reliably (max R-hat < 1.1, negligible divergences) on typical
+    # problem sizes in well under a minute. result["result"].success reports
+    # whether the reliability gates actually passed for a given fit -- if
+    # False, increase nuts_num_warmup/nuts_num_samples and refit rather than
+    # trusting the point estimate. For an even faster preliminary look
+    # (checking a wavelength window/template list/xlam choice before
+    # committing to a full run), nuts_num_chains=2 is a legitimate, still-
+    # checked option (R-hat remains computable, just a somewhat weaker
+    # diagnostic with fewer chains) -- it is the same estimator (posterior
+    # mean) at any of these settings, just noisier with less sampling, never
+    # a different, systematically biased one.
+    "nuts_num_warmup": ("Bayesian sampling", "NUTS warmup/adaptation steps per chain (step size and mass matrix tuning). Increase if result['result'].success is False."),
+    "nuts_num_samples": ("Bayesian sampling", "NUTS post-warmup posterior samples per chain. Total posterior draws = nuts_num_samples * nuts_num_chains. Increase if result['result'].success is False."),
+    "nuts_num_chains": ("Bayesian sampling", "Number of independent NUTS chains, run as one batched/vmap-ed computation (chain_method='vectorized'). Needed (>1) for R-hat convergence diagnostics; 2 is a legitimate faster option for a preliminary look, 4 (default) gives a stronger diagnostic."),
+    "nuts_seed": ("Bayesian sampling", "PRNG seed for NUTS sampling."),
 
     # ── Kinematic-fit cleaning ────────────────────────────────────────────
     "clean": ("Kinematic cleaning", "Enable iterative sigma-clipping of outlier pixels from the LOSVD/template chi-squared fit itself."),
@@ -288,6 +314,8 @@ class _HybridDescribe:
 class FitConfig:
     """
     All tunable parameters controlling a single LOSVD spectral fit.
+    Run FitConfig.describe() to see a grouped, filterable table of all 
+    fields and their one-line descriptions.
 
     ``FitConfig`` is the single configuration object passed to
     :func:`~kinextract.fitting.run_spectral_fit` and
@@ -310,14 +338,20 @@ class FitConfig:
     Continuum mode
         Pre-normalised input vs. co-fit ALS (asymmetric least squares)
         continuum baseline.
-    Pre-normalised mode / ALS continuum / ALS hyperparameter search /
-    ALS line masking / ALS good-pixel cleaning
+    Pre-normalised mode, ALS continuum, ALS hyperparameter search, ALS line masking, ALS good-pixel cleaning
         Options specific to each continuum-handling path.
     LOSVD/template
         Template-mixture and continuum-offset conventions inherited from
         the legacy Fortran objective function.
     Optimizer
-        L-BFGS-B iteration/tolerance/JAX settings for the MAP fit.
+        L-BFGS-B iteration/tolerance/JAX settings for the reported fit
+        itself, and internally for the ``xlam`` search, ALS continuum
+        convergence, and ``clean``-mode outlier rejection.
+    Bayesian sampling
+        NUTS/HMC posterior-sampling settings, used only by the optional,
+        non-default full-posterior path
+        (:func:`kinextract.bayesian.fit_state_bayesian`, called directly
+        rather than through :func:`~kinextract.fitting.run_spectral_fit`).
     Kinematic cleaning
         Iterative sigma-clipping of outliers from the LOSVD chi-squared
         fit itself (distinct from ALS good-pixel cleaning, which only
@@ -325,48 +359,143 @@ class FitConfig:
     Emission masking
         Pre-fit exclusion of known and unknown emission-line pixels.
 
+    Performance
+    ---------------------------------------------------------------------
+    The reported fit is a bound-constrained L-BFGS-B optimum (MAP point
+    estimate) of ``chi2 + wing-tapered smoothness penalty + LOSVD
+    normalization penalty``, the same objective minimised by the original
+    Fortran implementation this package is a port of -- fast (typically a
+    few seconds for a single-template mock or moderate real spectrum,
+    including the ``xlam`` auto-selection grid search and ALS continuum
+    outer loop). A full-posterior (NUTS/HMC) alternative is available via
+    :func:`kinextract.bayesian.fit_state_bayesian` for users who want a
+    sampled posterior instead of a point estimate (see that function's
+    module docstring); it is not the default because a comprehensive
+    recovery-accuracy comparison (LOSVD-shape L1 distance to a known
+    truth, across MUSE/STIS at and away from their resolution limits, for
+    both Gaussian and moderately non-Gaussian LOSVDs) found the MAP point
+    estimate matches or exceeds the posterior mean's shape recovery in
+    every tested condition, at a small fraction of the runtime (seconds
+    vs. tens of seconds to minutes for NUTS). Always check
+    ``result["result"].success`` (the L-BFGS-B optimizer's own convergence
+    flag) -- if ``False``, inspect ``result["result"].message`` and
+    consider raising ``map_maxiter``/loosening ``map_ftol`` rather than
+    trusting the point estimate.
+
     Known limitations: recovery near the instrumental resolution limit
     ---------------------------------------------------------------------
     Validated with a synthetic multi-instrument sweep (``benchmarks/``;
-    MUSE, STIS, and representative SDSS/BOSS, Keck/DEIMOS, and VLT/X-shooter
-    setups spanning R~2000-8800): once a real instrumental line-spread
-    function is modeled and matched via ``data_fwhm_A``/``template_fwhm_A``
-    (rather than assumed already-matched), recovery degrades *gracefully*
-    near the resolution limit rather than failing outright:
+    MUSE and STIS setups, both at and away from each instrument's own
+    resolution limit, for Gaussian and moderately non-Gaussian
+    Gauss-Hermite LOSVD truths, 6 seeds per condition): once a real
+    instrumental line-spread function is modeled and matched via
+    ``data_fwhm_A``/``template_fwhm_A`` (rather than assumed
+    already-matched), recovery degrades *gracefully* near the resolution
+    limit rather than failing outright, but a real, condition-dependent
+    bias remains -- there is no universal correction, which is exactly
+    why :func:`~kinextract.validation.assess_recovery_bias` exists (see
+    below).
 
-    - At the true velocity dispersion ≈ the instrument's LSF sigma
-      (``FWHM_LSF / 2.3548``, e.g. ~42 km/s for MUSE at R~3000, ~25 km/s
-      for STIS at R~5000), expect real but bounded bias -- roughly 10-50%
-      fractional on recovered sigma, and a systematic *shrinkage toward
-      zero* on recovered V whose absolute size grows with ``|v_true|``
-      and vanishes at ``v_true = 0`` (it is a shortfall in recovered
-      magnitude, not a fixed-sign error). By ~1.5-2x the LSF sigma,
-      recovery is reliable across every instrument tested (biases shrink
-      to a few percent).
-    - This V bias was confirmed to be a genuine property of the
-      regularized MAP estimate itself, not an optimizer-convergence
-      artifact or a tunable knob: neither a finer/coarser
-      ``n_losvd_bins``, an extended ``xlam_auto_grid``, nor seeding the
-      LOSVD initial guess with a cross-correlation velocity estimate
-      (instead of the default flat prior) measurably changed it in
-      testing. **Do not** reach for
-      :func:`~kinextract.errors.bias_corrected_losvd` as a fix here --
-      it was tested in this regime and made the bias *much worse*
-      (h3/h4 pinned at their fit bounds), since its linearized
-      hat-matrix correction is unstable when the LOSVD is this weakly
-      identified.
+    - V-bias is real but not one-signed or uniform across
+      instruments/resolution regimes/LOSVD shapes: in a 216-fit
+      validation sweep (2 instruments x 3 resolution regimes x 3 LOSVD
+      shapes x 2 S/N levels x 6 seeds), mean bias_V per condition ranged
+      from about -5.2 km/s (MUSE, 1.5x LSF sigma, Gaussian truth) to
+      about +8.2 km/s (MUSE, 4x LSF sigma -- i.e. well-resolved --
+      strongly non-Gaussian truth), with scatter of a similar magnitude.
+      There is no single "expect X km/s bias" number that holds across
+      setups, and bias does not simply vanish away from the resolution
+      limit for strongly asymmetric LOSVDs (see the `xlam_auto` note
+      below).
+    - Sigma is more consistently **overestimated**, sometimes
+      substantially: mean bias_sigma in the same sweep ranged from about
+      -5.2 km/s (MUSE, well-resolved, Gaussian truth) up to about +13.3
+      km/s (STIS, 1.5x LSF sigma, strongly non-Gaussian truth) --
+      consistent with the well-known effect of noise amplification when
+      deconvolving a velocity dispersion at or below an instrument's own
+      LSF, not a bug or a tunable knob.
+    - The MAP objective's wing-tapered smoothness penalty is always
+      zero-centered (matching the original Fortran convention), rather
+      than recentered on a data-driven velocity estimate for each fit.
+      Recentering can amplify bias whenever the velocity estimate itself
+      is imprecise -- a few to several km/s off, which is routine for a
+      coarse cross-correlation -- so a fixed zero point is the more
+      robust default across a broad range of targets. Use
+      :func:`~kinextract.validation.assess_recovery_bias` (below) to
+      check whether a specific target near its instrument's resolution
+      limit would benefit from a more tailored treatment.
+    - :func:`~kinextract.errors.bias_corrected_losvd` (analytic
+      hat-matrix linearization) is a separate, older correction attempt
+      that amplifies noise catastrophically (h3/h4 pinned at their fit
+      bounds) when the LOSVD is this weakly identified. **Do not** use it
+      as a resolution-limit correction.
     - This is distinct from -- and should not be confused with -- trying
       to recover a velocity dispersion *below* the detector's native
       pixel sampling with no LSF modeled at all (e.g. sub-pixel
       broadening): that regime showed much larger, less predictable
       bias in testing and is closer to an information-theoretic limit
       than a resolution-limit one.
-    - Practical guidance: compare the target's expected sigma against the
-      instrument's LSF sigma before trusting V/sigma at face value; when
-      the stellar template library and the science data have different
-      native resolutions (the common case), always set
-      ``data_fwhm_A``/``template_fwhm_A`` rather than leaving them at the
-      default ``None`` (which silently assumes the two already match).
+    - **Recommended practical guidance**: since the direction and size of
+      the bias is condition-dependent, don't rely on the generic numbers
+      above for a specific target -- use
+      :func:`~kinextract.validation.assess_recovery_bias` to measure the
+      empirical bias directly, on mock spectra matched to that target's
+      own instrument resolution, template mixture, continuum, and noise
+      level (built automatically from a completed fit via
+      :func:`~kinextract.mocks.build_matched_mock`), then optionally apply
+      :func:`~kinextract.validation.correct_recovered_losvd` to correct
+      for it. This is only worth the extra runtime (one MAP refit per
+      mock seed) when the target's sigma is within about 2x the
+      instrument's LSF sigma; well away from the resolution limit the
+      bias shrinks toward zero.
+    - ``als_lam``'s fixed default is implicitly tuned for one
+      instrument's own continuum shape/pixel scale, which can elevate
+      chi2_red for narrower-window/finer-sampled instruments (e.g.
+      STIS-like setups relative to MUSE) unless a per-target value is
+      selected -- this is why ``als_optimize=True`` (per-target ALS
+      hyperparameter search) is the default, together with
+      ``als_p_grid`` defaulting to ``(0.05,)`` so the search covers
+      ``als_lam`` without changing the continuum's asymmetry unless
+      explicitly requested (a symmetric grid would bias fits toward the
+      wrong side of absorption features). This addresses chi2_red
+      specifically -- it does **not** mean the ALS continuum *shape* fit
+      is always trustworthy: on complex, high-velocity-dispersion
+      spectra, the fitted continuum can come out nearly linear even when
+      a lower, more flexible ``als_lam`` would give a more realistic
+      shape at *equal or better* final chi2_red, since the
+      hyperparameter search's scoring can settle on an over-smoothed
+      solution. Inspect ``plot_als_continuum(fit, cfg)``'s overlay
+      directly for any fit where the continuum shape itself matters,
+      rather than trusting chi2_red alone; ``continuum_method="polynomial"``
+      (see below) is an alternative that is less prone to this
+      over-smoothing failure mode for some spectra.
+    - ``xlam_auto`` (the default regularization-strength selector) can
+      occasionally over-smooth strongly asymmetric (large ``h3``/``h4``)
+      LOSVDs for specific noise realizations, biasing V by 15-30 km/s in
+      roughly a quarter of tested cases for a strongly non-Gaussian truth
+      -- tightening ``xlam_chi2_tolerance`` reduces this but was found to
+      regress the common near-Gaussian case, so the default is
+      unchanged. For targets suspected to have strongly asymmetric
+      LOSVDs, cross-check with :func:`~kinextract.validation.assess_recovery_bias`
+      rather than assuming the auto-selected ``xlam`` is well-calibrated.
+      Insufficient regularization more generally (a fixed, low ``xlam``
+      chosen by hand rather than ``xlam_auto``) reproduces the same
+      failure mode and is not specific to strongly asymmetric truths --
+      it is the standard bias-variance tradeoff of any penalized
+      non-parametric fit, present in the original Fortran implementation
+      too for an equally under-regularized choice, not a new behavior.
+    - Fit cost scales strongly with template count, independent of
+      pixel count -- e.g. 5 templates cost roughly 4-7x a single
+      template, and a 35-template library roughly 12x (at fixed
+      ``xlam``), mostly from ``xlam_auto``'s internal grid search
+      needing a fresh JAX kernel compile per candidate value. This
+      compounds multiplicatively with
+      :meth:`~kinextract.errors.LOSVDErrorEstimator.residual_bootstrap`'s
+      per-replicate cost. For large template libraries, consider a
+      smaller, pre-selected subset, and set ``xlam_auto=False`` (with a
+      pre-chosen ``xlam``) for repeated refits (bootstrap and
+      :func:`~kinextract.validation.assess_recovery_bias` already do this
+      internally where appropriate).
 
     Examples
     --------
@@ -383,7 +512,7 @@ class FitConfig:
     template_dir: Optional[str] = None
     regions_bad_path: str = "regions.bad"
     outdir: Optional[str] = "."
-    write_outputs: bool = True
+    write_outputs: bool = False
 
     # ── Wavelength / redshift ───────────────────────────────────────────────
     # wavemin_full / step are needed for raw index-format files.
@@ -456,8 +585,20 @@ class FitConfig:
 
     # ── Continuum mode ──────────────────────────────────────────────────────
     # False = pre-normalised mode
-    # True  = ALS continuum mode
+    # True  = full-scale continuum co-fit, method selected by continuum_method
     fit_als_continuum: bool = False
+
+    # Which full-scale continuum model to co-fit when fit_als_continuum=True:
+    # "als" (default, asymmetric-least-squares smoothing spline) or
+    # "polynomial" (asymmetric-reweighted polynomial -- see "Polynomial
+    # continuum options" below). The polynomial option is useful when
+    # ALS's hyperparameter search settles on an oversmoothed, near-linear
+    # continuum despite a lower, more flexible als_lam giving a more
+    # realistic shape and better final joint chi2_red (see the "Known
+    # limitations" note on ALS above) -- a low-order polynomial has far
+    # fewer effective degrees of freedom than the ALS spline, so it is
+    # less prone to this over-smoothing failure mode.
+    continuum_method: str = "als"
 
     # ── Pre-normalised mode options ─────────────────────────────────────────
     norm_error_mode: str = "unit"  # "unit" or "file"
@@ -475,7 +616,7 @@ class FitConfig:
     als_eps: float = 1e-6
 
     # If True, optimize lam/p only for the initial ALS continuum, then reuse.
-    als_optimize_init_only: bool = False
+    als_optimize_init_only: bool = True
 
     # Clamp ALS continuum values.
     als_clip: tuple = (0.0, float("inf"))
@@ -489,9 +630,9 @@ class FitConfig:
     use_spectrum_errors: bool = True
 
     # ── ALS hyperparameter optimization ─────────────────────────────────────
-    als_optimize: bool = False
+    als_optimize: bool = True
     als_lam_grid: tuple = (1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9)
-    als_p_grid: tuple = (0.5,)
+    als_p_grid: tuple = (0.05,)
     als_lam_grid_fine_n: int = 5
     als_p_grid_fine_n: int = 5
     als_opt_verbose: bool = False
@@ -506,6 +647,21 @@ class FitConfig:
     als_bic_dof_penalty: float = 1.0
     # Optional minimum lambda to prevent pathological low-lambda fits
     als_lambda_floor: Optional[float] = None
+
+    # ── Polynomial continuum options (continuum_method="polynomial") ────────
+    # Same asymmetric-reweighting idea as the ALS baseline (see
+    # asymmetric_least_squares_continuum), but with a low-order polynomial
+    # basis instead of a penalized smoothing spline -- far fewer effective
+    # degrees of freedom, so it cannot track noise/overfit a large template
+    # mixture's scoring proxy the way an under-constrained ALS fit can.
+    poly_continuum_order: int = 4
+    poly_continuum_p: float = 0.05
+    poly_continuum_niter: int = 20
+    # If True, search poly_continuum_order_grid (scored the same way as the
+    # ALS lam/p search, including als_use_bic/als_chisq_floor) instead of
+    # using the fixed poly_continuum_order.
+    poly_continuum_optimize: bool = True
+    poly_continuum_order_grid: tuple = (2, 3, 4, 5, 6, 8)
 
     # ── ALS continuum line masks ────────────────────────────────────────────
     # These masks affect only the ALS continuum fit, not the LOSVD/template fit.
@@ -622,6 +778,16 @@ class FitConfig:
     use_jax_objective: bool = True
     jax_enable_x64: bool = True
     print_every: int = 200
+
+    # ── Bayesian sampling (NUTS) ─────────────────────────────────────────────
+    # Only consumed by the optional, non-default full-posterior path
+    # (kinextract.bayesian.fit_state_bayesian, called directly rather than
+    # through run_spectral_fit) -- the default MAP+bootstrap pipeline never
+    # reads these.
+    nuts_num_warmup: int = 50
+    nuts_num_samples: int = 75
+    nuts_num_chains: int = 4
+    nuts_seed: int = 0
 
     # ── Kinematic-fit sigma-clipping / cleaning ─────────────────────────────
     # This is separate from ALS continuum good-pixel cleaning.

@@ -720,6 +720,34 @@ def optimize_als_hyperparams_for_target(
                     best_p = float(p)
 
     if best_cont is None:
+        # Every coarse-grid candidate was rejected -- almost always because
+        # chisq_floor is stricter than every (lam, p) in the grid can satisfy
+        # for this data (e.g. a large, flexible template mixture can fit the
+        # continuum-divided target well below chi2_red=1 regardless of how
+        # smooth the continuum baseline itself is). Falling back to
+        # best_lam/best_p's hardcoded initial values (the *middle* of
+        # lam_grid, an arbitrary array index, not a considered choice) would
+        # silently produce a poorly-justified continuum. Instead, fall back
+        # to the least-overfit candidate actually evaluated (highest
+        # chi2_red, i.e. closest to satisfying the floor) and warn clearly,
+        # so this is visible rather than silently wrong.
+        least_overfit = max(records, key=lambda r: r["chi2_red"])
+        warnings.warn(
+            f"ALS hyperparameter search: every (lam, p) candidate had "
+            f"chi2_red < chisq_floor={chisq_floor:g} (range "
+            f"{min(r['chi2_red'] for r in records):.3g}-"
+            f"{max(r['chi2_red'] for r in records):.3g}) -- the floor could not "
+            f"be satisfied by any grid point. Falling back to the least-overfit "
+            f"candidate tried (lam={least_overfit['lam']:.3g}, "
+            f"p={least_overfit['p']:.3g}, chi2_red={least_overfit['chi2_red']:.3g}) "
+            f"rather than an arbitrary default. Consider lowering chisq_floor, "
+            f"widening lam_grid toward larger (smoother) values, or checking "
+            f"whether the score_data/templates used to score candidates are "
+            f"appropriate for this fit.",
+            RuntimeWarning, stacklevel=2,
+        )
+        best_lam = float(least_overfit["lam"])
+        best_p = float(least_overfit["p"])
         best_cont = asymmetric_least_squares_continuum(
             y,
             base_mask=base_mask,
@@ -791,6 +819,228 @@ def optimize_als_hyperparams_for_target(
         )
 
     return best_cont, best_lam, best_p, records
+
+
+def polynomial_continuum_asymmetric(
+    x: np.ndarray,
+    y: np.ndarray,
+    base_mask: Optional[np.ndarray] = None,
+    order: int = 4,
+    p: float = 0.05,
+    niter: int = 20,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    """
+    Fit a low-order polynomial continuum baseline with the same
+    asymmetric-reweighting idea as `asymmetric_least_squares_continuum`.
+
+    The baseline is a degree-`order` polynomial in (normalized)
+    wavelength, refit `niter` times with weights that penalize the
+    baseline lying below the data (`1 - p`) much more than lying above it
+    (`p`) -- identical convention to `asymmetric_least_squares_continuum`'s
+    `p`, so results are directly comparable and `als_p`'s default (0.05,
+    pulling the baseline toward the upper envelope so absorption troughs
+    sit below it) applies unchanged. Unlike the ALS penalized spline,
+    a polynomial has a small, fixed number of effective degrees of
+    freedom (`order + 1`) regardless of `niter` or the data -- it cannot
+    overfit a flexible scoring proxy (e.g. a large template mixture) the
+    way an under-constrained smoothing spline can, at the cost of being
+    unable to track continuum shapes with more structure than the chosen
+    polynomial order supports.
+
+    Parameters
+    ----------
+    x : ndarray
+        1-D coordinate array (typically wavelength) the polynomial is
+        defined over.
+    y : ndarray
+        1-D flux array to fit the continuum baseline to.
+    base_mask : ndarray of bool, optional
+        Boolean mask, same length as `y`; True marks pixels that
+        participate in the fit as continuum. Defaults to all pixels.
+    order : int, optional
+        Polynomial degree.
+    p : float, optional
+        Asymmetry weight in (0, 1); same convention as
+        `asymmetric_least_squares_continuum`'s `p`.
+    niter : int, optional
+        Number of asymmetric-reweighting iterations.
+    eps : float, optional
+        Minimum weight floor for masked-out pixels.
+
+    Returns
+    -------
+    ndarray
+        The fitted continuum baseline, same length as `y`.
+    """
+    x = np.asarray(x, float)
+    y = np.asarray(y, float)
+    L = y.size
+    base_mask = np.ones(L, dtype=bool) if base_mask is None else np.asarray(base_mask, bool)
+
+    x_center = float(np.mean(x))
+    x_scale = float(0.5 * (np.max(x) - np.min(x))) or 1.0
+    xn = (x - x_center) / x_scale
+    # Vandermonde matrix, highest power first to match np.polyfit/np.polyval
+    # conventions elsewhere in the package, but column order doesn't matter
+    # for the weighted-least-squares solve below.
+    V = np.vander(xn, order + 1)
+
+    w = np.where(base_mask, 1.0, eps).astype(float)
+    z = np.copy(y)
+    for _ in range(niter):
+        Vw = V * w[:, None]
+        A = V.T @ Vw
+        b = V.T @ (w * y)
+        try:
+            coef = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            coef, *_ = np.linalg.lstsq(A, b, rcond=None)
+        z = V @ coef
+        w = np.where(
+            y > z,
+            base_mask * p + (~base_mask) * eps,
+            base_mask * (1 - p) + (~base_mask) * eps,
+        )
+        w = np.maximum(w, eps)
+    return z
+
+
+def optimize_polynomial_order_for_target(
+    x: np.ndarray,
+    y: np.ndarray,
+    yerr: np.ndarray,
+    base_mask: np.ndarray,
+    *,
+    order_grid: Optional[np.ndarray] = None,
+    p: float = 0.05,
+    niter: int = 20,
+    templates: Optional[np.ndarray] = None,
+    template_selection: str = "lsq",
+    score_data: Optional[np.ndarray] = None,
+    score_err: Optional[np.ndarray] = None,
+    score_model0: Optional[np.ndarray] = None,
+    use_bic: bool = False,
+    chisq_floor: float = 0.0,
+    hutchinson_probes: int = 25,
+    bic_dof_penalty: float = 1.0,
+    verbose: bool = False,
+) -> tuple[np.ndarray, int, list]:
+    """
+    Search a grid of polynomial orders and return the best-scoring continuum.
+
+    Mirrors `optimize_als_hyperparams_for_target`'s search/scoring logic
+    (same `score_als_target` scoring, same BIC-like and chi2-floor
+    overfitting protection) but varies the polynomial `order` instead of
+    `(als_lam, als_p)`. Since a polynomial's effective degrees of freedom
+    equal `order + 1` exactly (no Hutchinson trace estimate needed), the
+    BIC-like score can use that directly.
+
+    Returns
+    -------
+    continuum : ndarray
+        Best-scoring polynomial continuum baseline.
+    order : int
+        Selected polynomial order.
+    records : list of dict
+        One record per grid point evaluated.
+    """
+    y = np.asarray(y, float)
+    yerr = np.asarray(yerr, float)
+    base_mask = np.asarray(base_mask, bool)
+
+    if order_grid is None:
+        order_grid = np.array([2, 3, 4, 5, 6, 8])
+    order_grid = np.atleast_1d(np.asarray(order_grid, int))
+
+    records: list[dict] = []
+    best_score = np.inf
+    best_cont: Optional[np.ndarray] = None
+    best_order = int(order_grid[len(order_grid) // 2])
+
+    for order in order_grid:
+        cont = polynomial_continuum_asymmetric(x, y, base_mask, order=int(order), p=p, niter=niter)
+        chi2_red, n, score_kind, nt = score_als_target(
+            y, yerr, cont, base_mask,
+            templates=templates, template_selection=template_selection,
+            score_data=score_data, score_err=score_err, score_model0=score_model0,
+        )
+        k_eff = float(order) + 1.0
+        if chisq_floor > 0.0 and np.isfinite(chi2_red) and chi2_red < chisq_floor:
+            score = np.inf
+        elif n < 2 or not np.isfinite(chi2_red) or chi2_red <= 0.0:
+            score = np.inf
+        elif use_bic:
+            score = float(chi2_red * n + bic_dof_penalty * k_eff * np.log(max(n, 2)))
+        else:
+            score = float(chi2_red)
+
+        records.append(dict(
+            order=int(order), chi2_red=float(chi2_red), score=float(score),
+            score_kind=score_kind, nt=int(nt), n=int(n), k_eff=k_eff,
+        ))
+        if verbose:
+            print(f"  poly order={order:2d} score={score_kind:8s} chi2_red={chi2_red:.6g} target={score:.6g}")
+        if np.isfinite(score) and score < best_score:
+            best_score = score
+            best_cont = cont
+            best_order = int(order)
+
+    if best_cont is None:
+        least_overfit = max(records, key=lambda r: r["chi2_red"])
+        warnings.warn(
+            f"Polynomial continuum order search: every order in {tuple(int(o) for o in order_grid)} had "
+            f"chi2_red < chisq_floor={chisq_floor:g} (range "
+            f"{min(r['chi2_red'] for r in records):.3g}-"
+            f"{max(r['chi2_red'] for r in records):.3g}). Falling back to the "
+            f"least-overfit order tried (order={least_overfit['order']}, "
+            f"chi2_red={least_overfit['chi2_red']:.3g}).",
+            RuntimeWarning, stacklevel=2,
+        )
+        best_order = int(least_overfit["order"])
+        best_cont = polynomial_continuum_asymmetric(x, y, base_mask, order=best_order, p=p, niter=niter)
+
+    return best_cont, best_order, records
+
+
+def fit_polynomial_target(
+    x: np.ndarray,
+    y: np.ndarray,
+    yerr: np.ndarray,
+    base_mask: np.ndarray,
+    cfg,
+    *,
+    force_fixed: bool = False,
+    templates: Optional[np.ndarray] = None,
+    score_data: Optional[np.ndarray] = None,
+    score_err: Optional[np.ndarray] = None,
+    score_model0: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, int, list]:
+    """
+    Fit a polynomial continuum baseline, optionally optimizing its order.
+
+    Thin dispatch wrapper analogous to `fit_als_target`: if
+    ``cfg.poly_continuum_optimize`` is True and `force_fixed` is False,
+    delegates to `optimize_polynomial_order_for_target`; otherwise fits
+    once at the fixed ``cfg.poly_continuum_order``.
+    """
+    if getattr(cfg, "poly_continuum_optimize", True) and not force_fixed:
+        return optimize_polynomial_order_for_target(
+            x, y, yerr, base_mask,
+            order_grid=np.asarray(cfg.poly_continuum_order_grid, int),
+            p=float(cfg.poly_continuum_p), niter=int(cfg.poly_continuum_niter),
+            templates=templates, template_selection=getattr(cfg, "als_template_selection", "lsq"),
+            score_data=score_data, score_err=score_err, score_model0=score_model0,
+            use_bic=getattr(cfg, "als_use_bic", True), chisq_floor=getattr(cfg, "als_chisq_floor", 1.0),
+            hutchinson_probes=getattr(cfg, "als_hutchinson_probes", 25),
+            bic_dof_penalty=getattr(cfg, "als_bic_dof_penalty", 1.0),
+            verbose=getattr(cfg, "als_opt_verbose", False),
+        )
+    order = int(cfg.poly_continuum_order)
+    cont = polynomial_continuum_asymmetric(
+        x, y, base_mask, order=order, p=float(cfg.poly_continuum_p), niter=int(cfg.poly_continuum_niter),
+    )
+    return cont, order, []
 
 
 def fit_als_target(
@@ -2026,7 +2276,7 @@ def _als_auto_abs_line_mask(st, cfg) -> np.ndarray:
     return mask
 
 
-def init_als_continuum(st, cfg, templates: Optional[np.ndarray] = None) -> np.ndarray:
+def _init_als_continuum_impl(st, cfg, templates: Optional[np.ndarray] = None) -> np.ndarray:
     """
     Initialize the ALS continuum baseline from the raw flux before LOSVD fitting.
 
@@ -2089,7 +2339,12 @@ def init_als_continuum(st, cfg, templates: Optional[np.ndarray] = None) -> np.nd
     )
     line_mask = build_als_line_mask(st, cfg)
     base = good & ~line_mask
-    fill = np.nanmedian(st.g[base]) if np.any(base) else np.nanmedian(st.g[good])
+    if np.any(base):
+        fill = np.nanmedian(st.g[base])
+    elif np.any(good):
+        fill = np.nanmedian(st.g[good])
+    else:
+        fill = np.nan  # no good pixels at all; caught by the isfinite check below
     if not np.isfinite(fill):
         fill = 1.0
     y = np.where(np.isfinite(st.g), st.g, fill)
@@ -2161,7 +2416,7 @@ def init_als_continuum(st, cfg, templates: Optional[np.ndarray] = None) -> np.nd
     return cont
 
 
-def update_als_continuum(st, cfg, a_best: np.ndarray) -> float:
+def _update_als_continuum_impl(st, cfg, a_best: np.ndarray) -> float:
     """
     Refine the ALS continuum baseline after an LOSVD/template optimization step.
 
@@ -2233,7 +2488,12 @@ def update_als_continuum(st, cfg, a_best: np.ndarray) -> float:
     target[good] = st.g[good] / gp0[good]
     target_err[good] = st.gerr[good] / np.abs(gp0[good])
 
-    fill = np.nanmedian(target[base]) if np.any(base) else np.nanmedian(target[good])
+    if np.any(base):
+        fill = np.nanmedian(target[base])
+    elif np.any(good):
+        fill = np.nanmedian(target[good])
+    else:
+        fill = np.nan  # no good pixels at all; caught by the isfinite check below
     if not np.isfinite(fill):
         fill = 1.0
 
@@ -2296,3 +2556,226 @@ def update_als_continuum(st, cfg, a_best: np.ndarray) -> float:
     )
 
     return delta
+
+
+def _init_polynomial_continuum_impl(st, cfg, templates: Optional[np.ndarray] = None) -> np.ndarray:
+    """
+    Initialize the polynomial continuum baseline from the raw flux before LOSVD fitting.
+
+    Polynomial counterpart of `_init_als_continuum_impl`: identical
+    masking, error-fill, and template-error-propagation logic, but the
+    continuum itself comes from `fit_polynomial_target`
+    (asymmetric-reweighted polynomial, see `polynomial_continuum_asymmetric`)
+    instead of the ALS penalized spline. Selected via
+    ``cfg.continuum_method == "polynomial"``; see `init_als_continuum`.
+    """
+    if getattr(cfg, "als_auto_caii_shift", True):
+        caii_shift = _estimate_caii_mask_shift(st, cfg)
+        if caii_shift != 0.0:
+            cfg.als_mask_center_shift_A = float(getattr(cfg, "als_mask_center_shift_A", 0.0)) + caii_shift
+            st.als_caii_refine_shift_A = caii_shift
+            log(
+                f"Ca II mask shift: {caii_shift:+.3f} Å  "
+                f"(als_mask_center_shift_A → {cfg.als_mask_center_shift_A:.3f} Å)"
+            )
+
+    good = (
+        (st.gerr < BIG)
+        & np.isfinite(st.g)
+        & np.isfinite(st.gerr)
+        & (st.gerr > 0.0)
+    )
+    line_mask = build_als_line_mask(st, cfg)
+    base = good & ~line_mask
+    if np.any(base):
+        fill = np.nanmedian(st.g[base])
+    elif np.any(good):
+        fill = np.nanmedian(st.g[good])
+    else:
+        fill = np.nan
+    if not np.isfinite(fill):
+        fill = 1.0
+    y = np.where(np.isfinite(st.g), st.g, fill)
+    err_fill = np.nanmedian(st.gerr[good]) if np.any(good) else 1.0
+    if not np.isfinite(err_fill) or err_fill <= 0.0:
+        err_fill = 1.0
+    yerr = np.where(
+        np.isfinite(st.gerr) & (st.gerr > 0.0),
+        st.gerr,
+        err_fill,
+    )
+    cont, order, records = fit_polynomial_target(
+        st.x, y, yerr, base, cfg,
+        force_fixed=False,
+        templates=getattr(st, "t", None),
+    )
+    if getattr(cfg, "als_optimize_init_only", False):
+        cfg.poly_continuum_order = int(order)
+        log(f"Polynomial optimize-init-only: reusing order={order}")
+    lo, hi = cfg.als_clip
+    cont = np.clip(cont, lo, hi) if np.isfinite(hi) else np.maximum(cont, lo)
+    st.continuum_mult = cont
+    st.continuum_mask = base
+    st.continuum_mask_init = base.copy()
+    st.als_lam_current = float(order)   # reuse the same diagnostic slots as ALS
+    st.als_p_current = float(cfg.poly_continuum_p)
+    st.als_records.append(
+        {
+            "kind": "init",
+            "method": "polynomial",
+            "order": int(order),
+            "records": records,
+        }
+    )
+    log(
+        f"Polynomial init: order={order} "
+        f"median={np.nanmedian(cont):.4g} "
+        f"base_pixels={np.count_nonzero(base)} "
+        f"line_mask_pixels={np.count_nonzero(line_mask)}"
+    )
+
+    f_tpl = float(getattr(st, "f_template", 0.0))
+    if f_tpl > 0.0 and getattr(cfg, "use_spectrum_errors", True):
+        sigma_tpl = f_tpl * np.abs(cont)
+        valid = st.gerr < BIG
+        old_gerr_med = float(np.nanmedian(st.gerr[valid])) if valid.any() else 0.0
+        st.gerr = np.where(valid, np.sqrt(st.gerr**2 + sigma_tpl**2), st.gerr)
+        new_gerr_med = float(np.nanmedian(st.gerr[valid])) if valid.any() else 0.0
+        log(
+            f"Template error propagation: f_template={f_tpl:.4f}  "
+            f"median(gerr): {old_gerr_med:.4g} → {new_gerr_med:.4g}"
+        )
+
+    return cont
+
+
+def _update_polynomial_continuum_impl(st, cfg, a_best: np.ndarray) -> float:
+    """
+    Refine the polynomial continuum baseline after an LOSVD/template optimization step.
+
+    Polynomial counterpart of `_update_als_continuum_impl`; see that
+    function and `update_als_continuum` for the shared outer-loop
+    semantics. Selected via ``cfg.continuum_method == "polynomial"``.
+    """
+    from .numerics import evaluate_model_gp
+    gp0, *_ = evaluate_model_gp(a_best, st, apply_continuum=False)
+
+    good = (
+        (st.gerr < BIG)
+        & np.isfinite(st.g)
+        & np.isfinite(st.gerr)
+        & (st.gerr > 0.0)
+        & np.isfinite(gp0)
+        & (np.abs(gp0) > 0.0)
+    )
+
+    line_mask = build_als_line_mask(st, cfg)
+    init_mask = getattr(st, "continuum_mask_init", None)
+    _abs_clean_init_only = getattr(cfg, "als_abs_clean_init_only", False)
+    if _abs_clean_init_only and init_mask is not None:
+        base = good & np.asarray(init_mask, bool)
+    else:
+        base = good & ~line_mask
+
+    target = np.full(st.npix, np.nan, dtype=float)
+    target_err = np.full(st.npix, np.nan, dtype=float)
+
+    target[good] = st.g[good] / gp0[good]
+    target_err[good] = st.gerr[good] / np.abs(gp0[good])
+
+    if np.any(base):
+        fill = np.nanmedian(target[base])
+    elif np.any(good):
+        fill = np.nanmedian(target[good])
+    else:
+        fill = np.nan
+    if not np.isfinite(fill):
+        fill = 1.0
+
+    y = np.where(np.isfinite(target), target, fill)
+
+    err_fill = np.nanmedian(target_err[good]) if np.any(good) else 1.0
+    if not np.isfinite(err_fill) or err_fill <= 0.0:
+        err_fill = 1.0
+
+    yerr = np.where(
+        np.isfinite(target_err) & (target_err > 0.0),
+        target_err,
+        err_fill,
+    )
+
+    old = getattr(st, "continuum_mult", np.ones(st.npix, dtype=float))
+
+    cont, order, records = fit_polynomial_target(
+        st.x, y, yerr, base, cfg,
+        force_fixed=getattr(cfg, "als_optimize_init_only", False),
+        templates=None,
+        score_data=st.g,
+        score_err=st.gerr,
+        score_model0=gp0,
+    )
+
+    lo, hi = cfg.als_clip
+    cont = np.clip(cont, lo, hi) if np.isfinite(hi) else np.maximum(cont, lo)
+
+    st.continuum_mult = cont
+    st.continuum_mask = base
+    st.als_lam_current = float(order)
+    st.als_p_current = float(cfg.poly_continuum_p)
+
+    if not hasattr(st, "als_records") or st.als_records is None:
+        st.als_records = []
+
+    st.als_records.append(
+        {
+            "kind": "update",
+            "method": "polynomial",
+            "order": int(order),
+            "records": records,
+        }
+    )
+
+    denom = np.maximum(np.abs(old), 1e-12)
+    delta = float(np.nanmedian(np.abs((cont - old) / denom)))
+
+    log(
+        f"  Polynomial update: order={order} "
+        f"delta={delta:.4g} "
+        f"base_pixels={np.count_nonzero(base)} "
+        f"line_mask_pixels={np.count_nonzero(line_mask)}"
+    )
+
+    return delta
+
+
+def init_als_continuum(st, cfg, templates: Optional[np.ndarray] = None) -> np.ndarray:
+    """
+    Initialize the full-scale continuum baseline from the raw flux before
+    LOSVD fitting, dispatching to ALS or polynomial fitting per
+    ``cfg.continuum_method`` (default "als").
+
+    See `_init_als_continuum_impl` (``continuum_method="als"``) and
+    `_init_polynomial_continuum_impl` (``continuum_method="polynomial"``)
+    for the method-specific behavior; both establish ``st.continuum_mult``
+    and ``st.continuum_mask`` identically from the caller's perspective.
+    """
+    method = str(getattr(cfg, "continuum_method", "als")).lower()
+    if method == "polynomial":
+        return _init_polynomial_continuum_impl(st, cfg, templates=templates)
+    return _init_als_continuum_impl(st, cfg, templates=templates)
+
+
+def update_als_continuum(st, cfg, a_best: np.ndarray) -> float:
+    """
+    Refine the full-scale continuum baseline after an LOSVD/template
+    optimization step, dispatching to ALS or polynomial fitting per
+    ``cfg.continuum_method`` (default "als").
+
+    See `_update_als_continuum_impl` (``continuum_method="als"``) and
+    `_update_polynomial_continuum_impl` (``continuum_method="polynomial"``)
+    for the method-specific behavior.
+    """
+    method = str(getattr(cfg, "continuum_method", "als")).lower()
+    if method == "polynomial":
+        return _update_polynomial_continuum_impl(st, cfg, a_best)
+    return _update_als_continuum_impl(st, cfg, a_best)

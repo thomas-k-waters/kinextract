@@ -59,8 +59,11 @@ class FitState:
         Stellar/SSP template matrix on the galaxy grid, one column per
         template, each normalized to a flux level of order 1 (see
         :func:`kinextract.templates.build_template_matrix_fortran`).
-    outside_tpl : ndarray of bool, shape (npix,)
-        True where no template in `t` covers the pixel's wavelength.
+    outside_tpl : ndarray of bool, shape (npix, nt)
+        True where a given template in `t` does not cover a given pixel's
+        wavelength -- per-template, not per-pixel, so a pixel covered by
+        some but not all templates only excludes the templates that
+        actually lack coverage there rather than the whole pixel.
         Replaces the fragile ``t == 1.0`` sentinel used in the original
         Fortran-derived logic, which could misidentify genuine in-range
         pixels whose value happened to equal 1.0 exactly.
@@ -164,6 +167,15 @@ class FitState:
         True to co-fit an asymmetric-least-squares (ALS) continuum
         baseline alongside the LOSVD and template weights, rather than
         relying on a pre-normalized input spectrum.
+    v_center : float
+        Velocity (km/s) to recenter the LOSVD wing-taper smoothness
+        penalty on (see :func:`kinextract.numerics._compute_smoothness`).
+        Always 0.0 for the default MAP pipeline, matching the original
+        Fortran convention (the fixed grid's zero point, not a
+        data-driven estimate, which is more robust when the estimate
+        itself is imprecise). Only the optional Bayesian path
+        (:func:`kinextract.bayesian.fit_state_bayesian`) sets this to a
+        nonzero, data-driven value.
     ntot : int
         Running count of objective-function evaluations for the current
         optimization, used for progress logging.
@@ -173,8 +185,9 @@ class FitState:
     g: np.ndarray
     gerr: np.ndarray
     t: np.ndarray
-    # outside_tpl: True where at least one template does not cover the pixel.
-    # Replaces the fragile t_missing = (T == 1.0) sentinel from the original.
+    # outside_tpl: (npix, nt) -- True where a given template does not cover
+    # a given pixel. Replaces the fragile t_missing = (T == 1.0) sentinel
+    # from the original Fortran-derived logic.
     outside_tpl: np.ndarray
     c1: float
     resd: float
@@ -215,6 +228,7 @@ class FitState:
     continuum_poly_mode: str = "none"
     continuum_poly_x: Optional[np.ndarray] = None
     continuum_poly_bound: float = 0.1
+    v_center: float = 0.0
     ntot: int = 0
 
     def __getstate__(self):

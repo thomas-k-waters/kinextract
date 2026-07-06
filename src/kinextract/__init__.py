@@ -4,7 +4,8 @@ kinextract — Non-parametric LOSVD spectral fitting package.
 The top-level namespace (``import kinextract`` / ``from kinextract import
 ...``) exposes the public API: configuration (:class:`FitConfig`), the
 main entry point (:func:`run_spectral_fit`), error estimation
-(:class:`LOSVDErrorEstimator`), plotting, and commonly reused standalone
+(:class:`LOSVDErrorEstimator`), empirical recovery-bias validation
+(:func:`assess_recovery_bias`), plotting, and commonly reused standalone
 utilities (ALS continuum fitting, Gauss-Hermite LOSVD characterization,
 legacy-format file I/O).
 
@@ -135,6 +136,10 @@ from .plotting import (
 # ── Error estimation ───────────────────────────────────────────────────────
 from .errors import LOSVDErrorEstimator, estimate_losvd_errors
 
+# ── Recovery-bias validation ───────────────────────────────────────────────
+from .mocks import build_matched_mock, true_losvd_on_grid
+from .validation import assess_recovery_bias, correct_recovered_losvd
+
 __all__ = [
     "__version__",
     # utils
@@ -178,4 +183,7 @@ __all__ = [
     "plot_fit", "plot_losvd", "plot_als_continuum", "PROMINENT_STELLAR_LINES",
     # errors
     "LOSVDErrorEstimator", "estimate_losvd_errors",
+    # recovery-bias validation
+    "build_matched_mock", "true_losvd_on_grid",
+    "assess_recovery_bias", "correct_recovered_losvd",
 ]

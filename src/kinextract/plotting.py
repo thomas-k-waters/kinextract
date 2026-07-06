@@ -18,16 +18,53 @@ import numpy as np
 
 try:
     import matplotlib.pyplot as plt
-    try:
-        plt.style.use("~/.mplstyle")
-    except Exception:
-        pass
 except ImportError:
     plt = None  # type: ignore
 
 from ._utils import BIG
 from .losvd import fit_losvd_gauss_hermite
 from .continuum import _STELLAR_ABSORPTION_LINE_TABLES, _center_to_fit_frame
+
+
+# =============================================================================
+# Shared plot style
+# =============================================================================
+#
+# Color convention used across all plots in this module (not enforced by the
+# rcParams color cycle below, since plots pass explicit `color=` per series --
+# listed here so new panels stay consistent):
+#   steelblue  - observed/input data
+#   tomato     - MAP model / recovered fit
+#   grey       - truth / reference / masked-out
+#   darkcyan   - secondary metric (e.g. dispersion on a twin axis)
+#
+# Applied automatically on import so every caller -- the plot_* functions
+# below, or a notebook doing its own Matplotlib calls -- gets consistent
+# styling with no separate style-file lookup.
+if plt is not None:
+    plt.rcParams.update({
+        "figure.dpi": 100,
+        "savefig.dpi": 150,
+        "figure.facecolor": "white",
+        "font.size": 11,
+        "axes.titlesize": 12,
+        "axes.labelsize": 11,
+        "xtick.labelsize": 10,
+        "ytick.labelsize": 10,
+        "legend.fontsize": 9.5,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": True,
+        "grid.alpha": 0.25,
+        "grid.linestyle": "-",
+        "grid.linewidth": 0.6,
+        "axes.axisbelow": True,
+        "lines.linewidth": 1.5,
+        "legend.frameon": False,
+        "axes.prop_cycle": plt.cycler(
+            color=["steelblue", "tomato", "darkcyan", "grey", "goldenrod", "mediumpurple"]
+        ),
+    })
 
 
 # =============================================================================
@@ -268,6 +305,143 @@ def plot_losvd(fit: dict) -> None:
     axes[1].grid(alpha=0.25)
     plt.tight_layout()
     plt.show()
+
+
+def plot_losvd_posterior(fit: dict, confidence: float = 0.68, max_gh_draws: int = 300) -> dict:
+    """Plot the recovered LOSVD with posterior credible-interval error bars.
+
+    The optional Bayesian fit path (:func:`kinextract.bayesian.fit_state_bayesian`,
+    not used by default -- see that function's module docstring for when
+    to reach for it instead of the default MAP+bootstrap pipeline) reports
+    a full posterior over the LOSVD histogram, not just a point estimate --
+    this is the direct, native way to see uncertainty on it, as an
+    alternative to the bootstrap/Laplace-based
+    ``kinextract.errors.plot_losvd_with_errors`` for fits run through that
+    (NUTS-based) path. Left panel: the posterior mean LOSVD
+    (matching ``fit["outputs"]["b"]``) with a shaded
+    ``confidence``-fraction credible band (from the raw posterior draws,
+    not a Gaussian approximation) and a scatter of per-draw
+    Gauss-Hermite (V, sigma) points to show how correlated the kinematic
+    uncertainty is. Right panel: posterior mean/credible-interval error
+    bars on the Gauss-Hermite moments (V, sigma, h3, h4) themselves,
+    computed by re-fitting :func:`kinextract.losvd.fit_losvd_gauss_hermite`
+    to each posterior draw individually (not just the mean LOSVD) --
+    this correctly propagates LOSVD-shape uncertainty into the moments
+    rather than assuming they're independent.
+
+    Parameters
+    ----------
+    fit : dict
+        Output of :func:`kinextract.bayesian.fit_state_bayesian` (called
+        directly; ``run_spectral_fit()``'s default MAP output has no
+        posterior). Must contain ``fit["state"].xl`` and
+        ``fit["result"].mcmc`` (the NUTS ``numpyro.infer.MCMC`` object).
+    confidence : float, optional
+        Credible-interval width, e.g. 0.68 (~1-sigma) or 0.95.
+    max_gh_draws : int, optional
+        Cap on how many posterior draws get an individual Gauss-Hermite
+        fit (each is itself a small optimization; fitting every draw of a
+        large posterior is unnecessary for a stable uncertainty estimate
+        and would be slow). Draws are evenly subsampled if there are more
+        than this.
+
+    Returns
+    -------
+    dict
+        ``{"V": (mean, lo, hi), "sigma": (...), "h3": (...), "h4": (...)}``
+        where ``lo``/``hi`` are the ``confidence``-fraction credible
+        interval bounds, for programmatic use alongside the plot.
+
+    Raises
+    ------
+    ValueError
+        If ``fit["result"]`` has no ``mcmc`` attribute (e.g. it came from
+        the MAP path, which has no posterior to draw error bars from --
+        use :func:`plot_losvd` for that case instead).
+    """
+    st = fit["state"]
+    mcmc = getattr(fit["result"], "mcmc", None)
+    if mcmc is None:
+        raise ValueError(
+            "fit['result'] has no posterior (mcmc is None) -- plot_losvd_posterior "
+            "only works for fits from kinextract.bayesian.fit_state_bayesian. Use "
+            "plot_losvd() for a point-estimate-only fit, e.g. from the default "
+            "MAP+bootstrap pipeline (run_spectral_fit())."
+        )
+
+    samples = mcmc.get_samples()
+    b_draws = np.asarray(samples["b"])  # (n_draws, nl)
+    n_draws = b_draws.shape[0]
+
+    alpha = (1.0 - confidence) / 2.0
+    b_mean = b_draws.mean(axis=0)
+    b_lo = np.quantile(b_draws, alpha, axis=0)
+    b_hi = np.quantile(b_draws, 1.0 - alpha, axis=0)
+
+    idx = np.linspace(0, n_draws - 1, min(n_draws, max_gh_draws)).astype(int)
+    moments = {"vherm": [], "sherm": [], "h3": [], "h4": []}
+    for i in idx:
+        gh_i = fit_losvd_gauss_hermite(st.xl, b_draws[i], fit_h3h4=True)
+        if gh_i["fit_success"]:
+            moments["vherm"].append(gh_i["vherm"])
+            moments["sherm"].append(gh_i["sherm"])
+            moments["h3"].append(gh_i["h3"])
+            moments["h4"].append(gh_i["h4"])
+
+    def _summarize(key):
+        arr = np.asarray(moments[key])
+        return float(np.mean(arr)), float(np.quantile(arr, alpha)), float(np.quantile(arr, 1.0 - alpha))
+
+    summary = {
+        "V": _summarize("vherm"), "sigma": _summarize("sherm"),
+        "h3": _summarize("h3"), "h4": _summarize("h4"),
+    }
+
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+    ax = axes[0]
+    ax.fill_between(st.xl, b_lo, b_hi, color="tab:blue", alpha=0.25,
+                     label=f"{confidence:.0%} credible interval")
+    ax.plot(st.xl, b_mean, "o-", color="tab:blue", label="Posterior mean LOSVD")
+    ax.axvline(summary["V"][0], color="tab:red", ls="--", lw=1.3)
+    annotation = (
+        rf"$V = {summary['V'][0]:.2f}^{{+{summary['V'][2] - summary['V'][0]:.2f}}}"
+        rf"_{{-{summary['V'][0] - summary['V'][1]:.2f}}}$" "\n"
+        rf"$\sigma = {summary['sigma'][0]:.2f}^{{+{summary['sigma'][2] - summary['sigma'][0]:.2f}}}"
+        rf"_{{-{summary['sigma'][0] - summary['sigma'][1]:.2f}}}$" "\n"
+        rf"$h_3 = {summary['h3'][0]:.3f}$, $h_4 = {summary['h4'][0]:.3f}$"
+        f" ({len(moments['vherm'])}/{len(idx)} draws)"
+    )
+    ax.text(0.05, 0.95, annotation, transform=ax.transAxes,
+            ha="left", va="top", fontsize=8,
+            bbox=dict(boxstyle="round,pad=0.35", facecolor="white",
+                      edgecolor="0.4", alpha=0.85))
+    ax.set_xlabel("Velocity [km/s]")
+    ax.set_ylabel("LOSVD")
+    ax.legend(fontsize=8)
+    ax.grid(alpha=0.25)
+
+    ax = axes[1]
+    names = ["V", "sigma", "h3", "h4"]
+    means = [summary[n][0] for n in names]
+    lo_err = [summary[n][0] - summary[n][1] for n in names]
+    hi_err = [summary[n][2] - summary[n][0] for n in names]
+    ax.errorbar(range(len(names)), means, yerr=[lo_err, hi_err], fmt="o",
+                color="tab:blue", capsize=4)
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels([f"${n}$" if n in ("h3", "h4") else n for n in names])
+    ax.set_ylabel("Value")
+    ax.set_title(f"Gauss-Hermite moments ({confidence:.0%} credible interval)")
+    ax.grid(alpha=0.25)
+    plt.tight_layout()
+    plt.show()
+
+    print(
+        f"V={summary['V'][0]:.4f} [{summary['V'][1]:.4f}, {summary['V'][2]:.4f}]  "
+        f"sigma={summary['sigma'][0]:.4f} [{summary['sigma'][1]:.4f}, {summary['sigma'][2]:.4f}]  "
+        f"h3={summary['h3'][0]:.4f} [{summary['h3'][1]:.4f}, {summary['h3'][2]:.4f}]  "
+        f"h4={summary['h4'][0]:.4f} [{summary['h4'][1]:.4f}, {summary['h4'][2]:.4f}]"
+    )
+    return summary
 
     print(
         f"vherm={gh['vherm']:.4f}  sherm={gh['sherm']:.4f}  "

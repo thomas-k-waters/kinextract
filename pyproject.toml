@@ -28,13 +28,14 @@ dependencies = [
     "scipy>=1.10",
     "matplotlib>=3.7",
     "tomli>=2.0; python_version < '3.11'",
-]
-
-[project.optional-dependencies]
-fast = [
     "numba>=0.57",
     "jax[cpu]>=0.4",
     "threadpoolctl>=3.0",
+]
+
+[project.optional-dependencies]
+bayesian = [
+    "numpyro>=0.21",
 ]
 lines = [
     "astroquery>=0.4",
@@ -48,7 +49,6 @@ docs = [
     "sphinx-rtd-theme>=2.0",
     "myst-parser>=2.0",
     "sphinx-copybutton>=0.5",
-    "nbsphinx>=0.9",
 ]
 dev = [
     "pytest>=7.0",
@@ -62,8 +62,8 @@ dev = [
 kinextract = "kinextract.__main__:main"
 
 [project.urls]
-"Homepage" = "https://github.com/gultekingroup/kinextract"
-"Bug Tracker" = "https://github.com/gultekingroup/kinextract/issues"
+"Homepage" = "https://github.com/thomas-k-waters/kinextract"
+"Bug Tracker" = "https://github.com/thomas-k-waters/kinextract/issues"
 "Documentation" = "https://kinextract.readthedocs.io"
 
 [tool.setuptools.packages.find]

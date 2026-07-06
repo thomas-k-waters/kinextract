@@ -178,6 +178,56 @@ def _projected_gradient(
     return grad
 
 
+def _require_genuine_map_fit(fit: dict, method_name: str) -> None:
+    """Raise a clear error if ``fit`` came from the optional Bayesian path
+    (:func:`kinextract.bayesian.fit_state_bayesian`) rather than a genuine
+    MAP/L-BFGS-B optimization.
+
+    ``laplace_covariance`` and ``bias_correction`` both require ``fit["a_map"]``
+    to sit at (or very near) a true stationary point of the *full* penalized
+    objective -- the former builds and inverts a Hessian there under that
+    assumption, checking it via a projected-gradient diagnostic; the latter's
+    hat-matrix bias estimate carries the same "this is what a MAP fit would
+    have converged to" framing. The Bayesian path's output stores
+    the NUTS **posterior mean** under the ``fit["a_map"]``/
+    ``fit["outputs"]["b"]`` keys -- and by construction (see
+    :mod:`kinextract.bayesian`'s module docstring), the posterior mean is
+    generically *not* at a stationary point of the penalized objective
+    whenever the posterior is skewed -- exactly the regime (near the
+    instrumental resolution limit) where this distinction matters most.
+    Calling these methods on such a fit does not crash outright: the
+    existing projected-gradient check merely emits a generic "MAP did not
+    fully converge" warning and produces a Hessian-based covariance that
+    is not statistically meaningful, with no indication that the actual
+    cause is conceptual rather than a convergence-tolerance problem
+    (retrying with tighter ``map_ftol``/``map_gtol`` cannot fix it, since
+    no MAP optimization is being run at all on that path).
+
+    Detected via ``fit["result"].mcmc is not None`` (only set by the
+    Bayesian path; a MAP-path ``scipy.optimize.OptimizeResult``-like
+    object has no ``mcmc`` attribute at all).
+    """
+    result = fit.get("result")
+    if getattr(result, "mcmc", None) is not None:
+        raise ValueError(
+            f"{method_name} requires a genuine MAP-mode fit, but this fit's "
+            f"result carries posterior samples (fit['result'].mcmc is not "
+            f"None) -- it came from the optional Bayesian path "
+            f"(kinextract.bayesian.fit_state_bayesian), whose reported point "
+            f"estimate is the posterior *mean*, not the MAP *mode*. A "
+            f"Hessian computed at the posterior mean is not a valid Laplace "
+            f"approximation (see the kinextract.bayesian module docstring). "
+            f"For error bars on this fit, use "
+            f"kinextract.plotting.plot_losvd_posterior() (built directly "
+            f"from the NUTS posterior draws, no stationarity assumption "
+            f"needed). If you specifically want a Laplace/hat-matrix "
+            f"comparison, obtain a genuine MAP fit first via "
+            f"kinextract.fitting.fit_state_map_with_optional_clean() and "
+            f"pass that fit dict instead. residual_bootstrap() is unaffected "
+            f"and can still be used directly on this fit."
+        )
+
+
 def _make_frozen_cfg(cfg, st=None):
     """
     Return a copy of cfg with ALS hyperparameter optimisation disabled.
@@ -575,13 +625,13 @@ def bias_corrected_losvd(
 
     Warning
     -------
-    Validated (``benchmarks/``) to be actively harmful when the true LOSVD
-    is only weakly identified -- specifically, when the velocity dispersion
-    is comparable to the instrument's LSF width (see
-    :class:`~kinextract.config.FitConfig`'s "Known limitations" section).
-    In that regime this correction was found to amplify noise catastrophically
-    (recovered h3/h4 pinned at their fit bounds, velocity bias several times
-    *larger* than the uncorrected MAP estimate) rather than reduce bias.
+    Actively harmful when the true LOSVD is only weakly identified --
+    specifically, when the velocity dispersion is comparable to the
+    instrument's LSF width (see :class:`~kinextract.config.FitConfig`'s
+    "Known limitations" section). In that regime this correction amplifies
+    noise catastrophically (recovered h3/h4 pinned at their fit bounds,
+    velocity bias several times *larger* than the uncorrected MAP estimate)
+    rather than reducing bias.
     The truncated-SVD threshold does not adequately regularize ``H_b`` when
     it is this close to singular. Prefer this correction only when ``sigma``
     is comfortably above (roughly ``>= 2x``) the instrument's LSF width.
@@ -791,18 +841,31 @@ class LOSVDErrorEstimator:
     """
     Unified interface for estimating uncertainties on a recovered LOSVD.
 
-    Wraps the output of a completed ``run_spectral_fit()`` (a MAP/penalized-
-    likelihood fit that recovers a non-parametric line-of-sight velocity
-    distribution ``b`` on the velocity grid ``xl``, together with template
-    weights ``w``) and provides three complementary, combinable error
-    estimation strategies plus Gauss-Hermite (GH) moment error propagation:
+    Wraps the output of a completed ``run_spectral_fit()`` -- a fit that
+    recovers a non-parametric line-of-sight velocity distribution ``b`` on
+    the velocity grid ``xl``, together with template weights ``w`` -- and
+    provides three complementary, combinable error estimation strategies
+    plus Gauss-Hermite (GH) moment error propagation. ``run_spectral_fit()``'s
+    default output is a genuine MAP/penalized-likelihood fit, so
+    :meth:`laplace_covariance` and :meth:`bias_correction` work directly on
+    it. If instead handed a fit produced by the optional, non-default
+    full-posterior path (:func:`kinextract.bayesian.fit_state_bayesian`,
+    whose reported point estimate is the NUTS posterior *mean*, not a MAP
+    *mode*), those two methods raise a clear ``ValueError`` rather than
+    silently computing a meaningless Hessian at a non-stationary point
+    (see :func:`_require_genuine_map_fit`) -- use
+    :func:`~kinextract.plotting.plot_losvd_posterior` for error bars on
+    such a fit instead. :meth:`residual_bootstrap` works either way (it
+    always refits fresh via the MAP machinery internally, regardless of
+    what kind of fit it was constructed from):
 
     1. **Laplace / penalized-likelihood covariance** (:meth:`laplace_covariance`)
        — fast (~seconds), computes a finite-difference Hessian of the MAP
        objective and inverts it to obtain the Bayesian posterior covariance
        under the Laplace approximation. Cheap and always worth running
        first, but likely underestimates true (frequentist) errors if the
-       noise model or regularization strength is imperfect.
+       noise model or regularization strength is imperfect. Requires a
+       genuine MAP fit (see above).
 
     2. **Residual bootstrap** (:meth:`residual_bootstrap`) — the most
        statistically honest but most expensive method (minutes, embarrassingly
@@ -819,7 +882,12 @@ class LOSVDErrorEstimator:
        penalty used during the MAP fit shrinks the recovered LOSVD toward
        flatness (regularization bias); the hat (influence) matrix of the
        linearized penalized problem is used to estimate and subtract this
-       bias, at the cost of amplified noise in the corrected LOSVD.
+       bias, at the cost of amplified noise in the corrected LOSVD. Requires
+       a genuine MAP fit (see above); also see
+       :class:`~kinextract.config.FitConfig`'s "Known limitations" section --
+       this correction was separately found to be actively harmful near the
+       instrumental resolution limit, independent of the MAP-vs-Bayesian
+       question here.
 
     4. **Gauss-Hermite moment errors** — propagates the LOSVD covariance
        (from either the Laplace or bootstrap methods) through the GH moment
@@ -984,6 +1052,7 @@ class LOSVDErrorEstimator:
             gh_err        : dict of GH moment errors via delta method
             moments_err   : dict of flux-weighted moment errors
         """
+        _require_genuine_map_fit(self.fit, "laplace_covariance()")
         # sf is imported at module level from kinextract
 
         print("[LOSVDErrors] Computing Hessian...")
@@ -1304,6 +1373,12 @@ class LOSVDErrorEstimator:
         print(f"[LOSVDErrors] Bootstrap done in {time.perf_counter()-t0:.1f}s. "
               f"Success: {n_success}/{n_bootstrap}")
 
+        if n_success == 0:
+            raise RuntimeError(
+                f"All {n_bootstrap} bootstrap replicates failed; cannot estimate errors. "
+                "Check the per-replicate exceptions logged above."
+            )
+
         if n_success < 10:
             warnings.warn(
                 f"Only {n_success} bootstrap replicates succeeded. "
@@ -1414,6 +1489,7 @@ class LOSVDErrorEstimator:
               ``trace(H_b)``, out of a maximum of ``nl`` (the number of
               LOSVD velocity bins).
         """
+        _require_genuine_map_fit(self.fit, "bias_correction()")
         print("[LOSVDErrors] Computing LOSVD influence matrix...")
         t0 = time.perf_counter()
         H_b = compute_losvd_hat_matrix(self.st, self.a_map)

@@ -4,8 +4,45 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kinextract.templates import resolution_mismatch_sigma_A, convolve_gaussian_pixels
+from kinextract.templates import (
+    resolution_mismatch_sigma_A, convolve_gaussian_pixels, build_template_matrix_fortran,
+)
 from kinextract.config import FitConfig
+
+
+def test_template_coverage_mask_is_per_template_not_any(tmp_path):
+    # Two templates covering different (overlapping-but-not-identical) ranges:
+    # template A covers [0, 9), template B covers [2, 13) (coverage is
+    # half-open -- see interp_template_tp_with_outside). Pixel x=1 is only
+    # covered by A, x=10 only by B, and x=5 by both.
+    xg = np.arange(13, dtype=float)
+
+    def write_template(path, wave, flux):
+        np.savetxt(path, np.column_stack([wave, flux]))
+
+    wave_a = np.arange(0, 9, dtype=float)
+    write_template(tmp_path / "a.dat", wave_a, np.full_like(wave_a, 2.0))
+    wave_b = np.arange(2, 14, dtype=float)
+    write_template(tmp_path / "b.dat", wave_b, np.full_like(wave_b, 3.0))
+
+    T, T_err, outside_each, outside_all = build_template_matrix_fortran(
+        xg, [str(tmp_path / "a.dat"), str(tmp_path / "b.dat")],
+    )
+
+    assert outside_each.shape == (13, 2)
+    # Template A (column 0) has no coverage past x=8.
+    assert outside_each[10, 0] and outside_each[11, 0]
+    assert not outside_each[0, 0]
+    # Template B (column 1) has no coverage before x=2.
+    assert outside_each[0, 1] and outside_each[1, 1]
+    assert not outside_each[10, 1]
+    # A pixel covered by at least one template must NOT be flagged in outside_all,
+    # even though it's outside one specific template's own range.
+    assert not outside_all[1]    # covered by A only
+    assert not outside_all[10]   # covered by B only
+    assert not outside_all[5]    # covered by both
+    # No pixel in [0, 12] is outside every template's range here.
+    assert not outside_all.any()
 
 _SIGMA_TO_FWHM = 2.0 * np.sqrt(2.0 * np.log(2.0))
 

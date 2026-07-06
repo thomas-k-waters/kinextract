@@ -1,0 +1,82 @@
+[
+  {
+    "name": "very_low_snr_5",
+    "status": "PASS",
+    "note": "success=True chi2_red=1.08"
+  },
+  {
+    "name": "heavily_masked_90pct",
+    "status": "PASS",
+    "note": "ngood=37 success=True"
+  },
+  {
+    "name": "all_pixels_masked",
+    "status": "PASS",
+    "note": "did not raise; ngood=0 chi2=inf"
+  },
+  {
+    "name": "mismatched_template",
+    "status": "PASS",
+    "note": "chi2_red=8.26 success=True (expect degraded but finite fit)"
+  },
+  {
+    "name": "vgrid_narrower_than_true_losvd",
+    "status": "PASS",
+    "note": "recovered sigma=25.2 (true 150, grid truncated at +-150)"
+  },
+  {
+    "name": "fit_global_amp_true",
+    "status": "PASS",
+    "note": "success=True A=25.66"
+  },
+  {
+    "name": "continuum_poly_mode_additive_with_jax",
+    "status": "PASS",
+    "note": "success=True (JAX should fall back to finite-diff for continuum_poly_mode)"
+  },
+  {
+    "name": "bootstrap_tiny_n",
+    "status": "PASS",
+    "note": "n_bootstrap=2 completed, gh_map present=True"
+  },
+  {
+    "name": "assess_recovery_bias_n_seeds_1",
+    "status": "PASS",
+    "note": "single-seed bias table + correction OK: {'v_corrected': 76.91030907438726, 'v_uncertainty_inflation': 0.0, 'sigma_corrected': 91.36520009003783, 'sigma_uncertainty_inflation': 0.0}"
+  },
+  {
+    "name": "correct_recovered_losvd_extrapolation",
+    "status": "PASS",
+    "note": "extrapolated correction is finite: {'v_corrected': 5001.550620609927, 'v_uncertainty_inflation': 0.0, 'sigma_corrected': 4996.637266841817, 'sigma_uncertainty_inflation': 0.0}"
+  },
+  {
+    "name": "cfg_not_mutated_by_assess_recovery_bias",
+    "status": "PASS",
+    "note": "cfg.xlam unchanged after assess_recovery_bias (100000.0)"
+  },
+  {
+    "name": "reproducibility_same_seed_same_result",
+    "status": "PASS",
+    "note": "identical fit re-run: max|b1-b2|=0.00e+00"
+  },
+  {
+    "name": "negative_sigma_true_in_true_losvd_on_grid",
+    "status": "PASS",
+    "note": "negative sigma_true -> all-NaN LOSVD (matches gauss_hermite_losvd_model's documented behavior): True"
+  },
+  {
+    "name": "mock_true_losvd_normalization_matches_sum_convention",
+    "status": "PASS",
+    "note": "sum(b)=1.0000000000"
+  },
+  {
+    "name": "stis_mismatch_template_unavailable_raises_clearly",
+    "status": "PASS",
+    "note": "raised ValueError as documented: stis has no mismatch_template; template_role='mismatched' is not available for this instrument."
+  },
+  {
+    "name": "xlam_auto_no_unimodal_solution_fallback",
+    "status": "PASS",
+    "note": "xlam selected=5.0 success=True"
+  }
+]

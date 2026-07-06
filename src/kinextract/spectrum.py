@@ -495,10 +495,11 @@ def make_fit_state(cfg: FitConfig, gal_file: Optional[str] = None, gal_errors=No
 
     with Timer("read + interpolate templates"):
         tpl_files = read_template_list(cfg.template_list_file, cfg.template_dir)
-        T, T_err, outside_any = build_template_matrix_fortran(x_reg, tpl_files)
-        if cfg.fortran_mask_template_outside and outside_any.any():
-            log(f"Template coverage mask: {outside_any.sum()} pixels masked")
-            gerr = np.where(outside_any, BIG, gerr)
+        T, T_err, outside_each, outside_all = build_template_matrix_fortran(x_reg, tpl_files)
+        if cfg.fortran_mask_template_outside and outside_all.any():
+            log(f"Template coverage mask: {outside_all.sum()} pixels masked "
+                f"(no template covers them)")
+            gerr = np.where(outside_all, BIG, gerr)
 
         # Pooled fractional template error: median(err/flux) across all templates
         # at pixels where both T and T_err are positive.
@@ -598,7 +599,7 @@ def make_fit_state(cfg: FitConfig, gal_file: Optional[str] = None, gal_errors=No
     st = FitState(
         x=x_reg, g=g_reg, gerr=gerr,
         t=T, t_err=T_err, f_template=f_template,
-        outside_tpl=outside_any,
+        outside_tpl=outside_each,
         c1=c1, resd=step_used ** 3,
         xlam=cfg.xlam, xl=xl,
         sigl0=cfg.sigl,

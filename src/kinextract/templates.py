@@ -17,8 +17,7 @@ LOSVD fit, so that the recovered LOSVD width reflects genuine kinematic
 broadening rather than a resolution difference baked in as spurious extra
 "kinematics". This only activates when the caller supplies both
 ``cfg.data_fwhm_A`` and ``cfg.template_fwhm_A`` (see :class:`~kinextract.config.FitConfig`);
-by default kinextract assumes the two are already matched, exactly as
-before this was added.
+by default kinextract assumes the two are already matched.
 """
 from __future__ import annotations
 import numpy as np
@@ -191,7 +190,7 @@ def interp_template_tp_with_outside(
 
 def build_template_matrix_fortran(
     xg: np.ndarray, template_paths: list[str],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Build the full (npix, ntemplates) stellar template matrix.
 
     Loads every template listed in `template_paths`, median-normalizes each
@@ -224,15 +223,22 @@ def build_template_matrix_fortran(
     T_err : ndarray, shape (npix, ntemplates)
         Per-pixel template flux uncertainty, normalized identically to `T`.
         Columns are all-zero for templates whose file had no error column.
-    outside_any : ndarray of bool, shape (npix,)
+    outside_each : ndarray of bool, shape (npix, ntemplates)
+        True where a given template has no wavelength coverage at a given
+        pixel -- used to exclude just that template (not the whole pixel)
+        from the per-pixel mixture when template libraries have slightly
+        different native wavelength ranges (the common case for real
+        libraries assembled from more than one source/run).
+    outside_all : ndarray of bool, shape (npix,)
         True at pixels that fall outside the wavelength coverage of *every*
-        template in the list; such pixels carry no template information and
-        are typically masked out of the fit (``gerr`` set to `BIG`).
+        template in the list; such pixels carry no template information at
+        all and are typically masked out of the fit (``gerr`` set to
+        `BIG`).
     """
     from .io import read_template_xy
     T = np.empty((len(xg), len(template_paths)), float)
     T_err = np.zeros_like(T)
-    outside_any = np.zeros(len(xg), dtype=bool)
+    outside_each = np.zeros((len(xg), len(template_paths)), dtype=bool)
     for k, p in enumerate(template_paths):
         wave, flux, err = read_template_xy(p)
         # Normalize to median positive flux so template ≈ 1.0 (shape only).
@@ -244,8 +250,9 @@ def build_template_matrix_fortran(
                 err = err / med
         tp, outside = interp_template_tp_with_outside(xg, wave, flux)
         T[:, k] = tp
-        outside_any |= outside
+        outside_each[:, k] = outside
         if err is not None:
             te, _ = interp_template_tp_with_outside(xg, wave, err)
             T_err[:, k] = te
-    return T, T_err, outside_any
+    outside_all = outside_each.all(axis=1)
+    return T, T_err, outside_each, outside_all

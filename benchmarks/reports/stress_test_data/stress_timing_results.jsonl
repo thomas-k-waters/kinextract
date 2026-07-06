@@ -1,0 +1,19 @@
+{"label": "nt_scaling_nt1", "n_templates": 1, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 3.7015888690948486, "run2_s": 1.6035819053649902}
+{"label": "nt_scaling_nt5", "n_templates": 5, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 11.683486938476562, "run2_s": 14.128467321395874}
+{"label": "nt_scaling_nt10", "n_templates": 10, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 16.634112119674683, "run2_s": 19.95154094696045}
+{"label": "nt_scaling_nt20", "n_templates": 20, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 18.877243757247925, "run2_s": 22.902319192886353}
+{"label": "npix_scaling_w100", "n_templates": 1, "npix": 80, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 3.0315358638763428, "run2_s": 1.2082290649414062}
+{"label": "npix_scaling_w400", "n_templates": 1, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 3.736801862716675, "run2_s": 3.870785713195801}
+{"label": "npix_scaling_w800", "n_templates": 1, "npix": 640, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 4.772657871246338, "run2_s": 2.5321431159973145}
+{"label": "npix_scaling_w1500", "n_templates": 1, "npix": 1200, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 4.866390943527222, "run2_s": 3.3804428577423096}
+{"label": "nl_scaling_sigl40", "n_templates": 1, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 7.268129110336304, "run2_s": 7.418622970581055}
+{"label": "nl_scaling_sigl120", "n_templates": 1, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 2.60144305229187, "run2_s": 1.762450933456421}
+{"label": "nl_scaling_sigl300", "n_templates": 1, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 3.3089981079101562, "run2_s": 2.2233779430389404}
+{"label": "nl_scaling_sigl600", "n_templates": 1, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 4.246634006500244, "run2_s": 2.553816795349121}
+{"label": "objective_jaxTrue", "n_templates": 5, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 11.195528030395508, "run2_s": 15.321532249450684}
+{"label": "objective_jaxFalse", "n_templates": 5, "npix": 320, "nl": 29, "use_jax_objective": false, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 59.34763216972351, "run2_s": 70.50711297988892}
+{"label": "xlam_auto_True", "n_templates": 1, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 2.499049186706543, "run2_s": 1.7568740844726562}
+{"label": "xlam_auto_False", "n_templates": 1, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": false, "fit_als_continuum": true, "run1_s": 0.5351488590240479, "run2_s": 0.6733598709106445}
+{"label": "fit_als_continuum_True", "n_templates": 1, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": true, "run1_s": 2.466841220855713, "run2_s": 1.7250428199768066}
+{"label": "fit_als_continuum_False", "n_templates": 1, "npix": 320, "nl": 29, "use_jax_objective": true, "xlam_auto": true, "fit_als_continuum": false, "run1_s": 3.9139602184295654, "run2_s": 2.6315619945526123}
+{"label": "jax_cache_reuse_fixed_xlam", "cold_s": 3.2089598178863525, "warm_s": 2.61130690574646, "speedup": 1.2288711873831044}

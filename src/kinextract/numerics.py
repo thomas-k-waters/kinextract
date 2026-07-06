@@ -9,7 +9,7 @@ pixel-scatter scheme driven by the precomputed ``ip_map`` table) to produce a
 model spectrum, and :func:`objective_map` compares that model to the data to
 form
 
-    objective = chi2 + smoothness_penalty + 0.1 * |sum(b) - 1|
+    objective = chi2 + smoothness_penalty + 0.1 * ``|sum(b) - 1|``
 
 where ``chi2`` is the usual (data - model)^2 / sigma^2 sum over good pixels
 and the smoothness penalty is a second-derivative roughness penalty on ``b``
@@ -29,15 +29,14 @@ Compiled JAX kernels are cached process-wide in ``_JAX_VG_CACHE`` (see
 :func:`_get_or_build_jax_vg`) so repeated fits sharing the same problem
 shape/data don't each pay a fresh ~10-120s XLA compilation. Anyone touching
 that cache should read the docstrings on :func:`_array_fingerprint` and
-:func:`_get_or_build_jax_vg` first: an earlier version keyed the cache on
-shape/scalar parameters alone, which let two *different* fits (different
-template, different LOSVD grid) silently share one compiled kernel whenever
-their shapes and scalars happened to coincide, evaluating one fit's data
-against another's template/grid with no error -- and a later version fixed
-that but serialized all compilation through one process-wide lock, which
-was safe but defeated `ThreadPoolExecutor`-based parallelism across
-distinct problem shapes. Both are fixed (content-fingerprinted keys,
-per-key locks), but the failure mode is subtle enough to call out here.
+:func:`_get_or_build_jax_vg` first: the cache key is a content fingerprint,
+not just shape/scalar parameters, specifically because keying on shape
+alone would let two *different* fits (different template, different LOSVD
+grid) silently share one compiled kernel whenever their shapes and scalars
+happened to coincide, evaluating one fit's data against another's
+template/grid with no error. Compilation is also locked per-key (not one
+process-wide lock), so distinct problem shapes can still compile in
+parallel under `ThreadPoolExecutor`-based concurrency.
 Separately, running many fits concurrently -- multiple threads in one
 process, multiple separate processes, or under unrelated external CPU
 load -- was verified (``benchmarks/``) to *not* perturb numerical results;
@@ -67,6 +66,7 @@ try:
 except Exception:
     def njit(*a, **k):
         return a[0] if a and callable(a[0]) else lambda f: f
+from ._utils import CEE, BIG
 from .state import FitState, getnlosvd_fast_from_b
 
 
@@ -127,6 +127,11 @@ def _get_or_build_jax_vg(st):
     # When icoff==0 or icoff==2, coffi/coff2i are baked into the JAX closure as
     # Python float constants.  Include them in the key so two spectra with the
     # same shape but different fixed coff values don't share a compiled kernel.
+    # v_center is likewise baked in (it sets the wing-taper's lam_vec), so it
+    # must also be part of the key -- otherwise two fits sharing every other
+    # scalar/shape but with different data-driven v_center (the common case,
+    # since it's estimated per-spectrum) would silently share one compiled
+    # kernel, applying the *first* fit's taper recentering to the *second*.
     content_fp = _array_fingerprint(
         st.t, st.outside_tpl, st.xl, st.losvd_j0, st.losvd_j1, st.losvd_w,
         st.ip_map, st.ip_mask,
@@ -135,7 +140,7 @@ def _get_or_build_jax_vg(st):
         int(st.nl), int(st.nt), int(st.npix), int(st.nlosvd),
         int(st.icoff), bool(st.fit_global_amp),
         bool(st.fortran_template_mixture), bool(st.fit_als_continuum),
-        float(st.xlam), float(st.sigl0),
+        float(st.xlam), float(st.sigl0), float(getattr(st, "v_center", 0.0)),
         float(st.coffi)  if int(st.icoff) in (0, 2) else 0.0,
         float(st.coff2i) if int(st.icoff) == 0       else 0.0,
         content_fp,
@@ -198,10 +203,106 @@ def _compute_chi2(
     return chi2
 
 
+def estimate_velocity_xcorr(st: FitState, detrend_deg: int = 3) -> float:
+    """Cross-correlate the galaxy spectrum against the template to estimate
+    a velocity shift.
+
+    Used only by the optional Bayesian/NUTS path
+    (:func:`kinextract.bayesian.fit_state_bayesian`) to recenter its
+    wing-taper smoothness prior. The default MAP path does **not** use
+    this estimate -- it always leaves the wing taper's `v_center`
+    (:func:`_compute_smoothness`) at 0.0, matching the original Fortran
+    convention, since this estimate is a coarse, pixel-lag
+    cross-correlation (not a precision measurement) and a fixed zero
+    point is more robust across a broad range of targets.
+
+    Both the galaxy spectrum and template are detrended (each has a
+    degree-`detrend_deg` polynomial, fit over the good pixels, subtracted)
+    before cross-correlating. This matters because the continuum's smooth,
+    broadband shape dominates a raw (mean-subtracted only) cross-
+    correlation: the continuum's own autocorrelation peaks at zero lag and
+    decays smoothly over many pixels, swamping the much narrower, weaker
+    correlation peak produced by the actual (LOSVD-shifted) absorption
+    features, which sit at the true velocity lag. Without detrending, the
+    estimate is systematically pulled toward zero regardless of the true
+    velocity -- verified directly against mock spectra with a known
+    injected velocity, where the un-detrended version returned exactly 0.0
+    km/s in every tested condition (including well-resolved, high-S/N
+    cases where the true shift was several pixels), while the detrended
+    version recovers the correct sign and rough magnitude of the shift.
+
+    Uses a simple pixel-lag cross-correlation on the detrended residuals:
+    the fit window is narrow enough (typically a few hundred Angstrom
+    around one reference wavelength) that a locally-linear pixel-to-
+    velocity conversion is already used elsewhere in this package (e.g.
+    ``facnew0`` in :func:`kinextract.spectrum.make_fit_state`), and this
+    estimate only needs to be good enough to recenter a regularization
+    term, not to be the final measurement -- so an integer-pixel-lag
+    resolution (no sub-pixel interpolation of the correlation peak) is
+    sufficient.
+
+    Parameters
+    ----------
+    st : FitState
+        Fit state providing the wavelength grid ``x``, data ``g``,
+        per-pixel error ``gerr``, template matrix ``t``, pixel scale
+        ``scale``, and LOSVD velocity grid ``xl`` (the estimate is clipped
+        to ``[xl[0], xl[-1]]`` so a spurious correlation peak cannot
+        propose a shift outside the velocity range being fit).
+    detrend_deg : int, optional
+        Degree of the polynomial subtracted from each signal before
+        cross-correlating. Not sensitive in practice (degrees 2-4 give
+        the same answer on tested mocks); higher degrees risk also
+        removing genuine broad LOSVD structure.
+
+    Returns
+    -------
+    float
+        Estimated velocity shift, km/s. Returns 0.0 if fewer than
+        ``2 * detrend_deg + 3`` good pixels are available (too few to
+        both fit the detrending polynomial and leave a meaningful
+        correlation).
+    """
+    good = (st.gerr < BIG) & np.isfinite(st.g) & np.isfinite(st.gerr) & (st.gerr > 0.0)
+    if good.sum() < max(10, 2 * detrend_deg + 3):
+        return 0.0
+    tpl = st.t.mean(axis=1) if st.t.ndim == 2 else np.ravel(st.t)
+
+    def _detrend(sig: np.ndarray) -> np.ndarray:
+        idx = np.arange(len(sig), dtype=float)
+        coefs = np.polyfit(idx[good], sig[good], detrend_deg)
+        return np.where(good, sig - np.polyval(coefs, idx), 0.0)
+
+    g = _detrend(st.g)
+    t = _detrend(tpl)
+    xcorr = np.correlate(g, t, mode="full")
+    lag_pix = int(np.argmax(xcorr)) - (len(t) - 1)
+    lam_ref = float(st.x[len(st.x) // 2])
+    v_est = lag_pix * st.scale * CEE / lam_ref
+    return float(np.clip(v_est, st.xl[0], st.xl[-1]))
+
+
+def _wing_taper_lam_vec(
+    xl: np.ndarray, xlam: float, sigl0: float, v_center: float, sfac: float = 1.8,
+) -> np.ndarray:
+    """Per-bin regularization strength, wing-tapered around `v_center`.
+
+    Vectorized NumPy equivalent of the per-bin loop in
+    :func:`_compute_smoothness`, used by
+    :func:`_build_jax_objective_value_and_grad` to precompute the
+    (JAX-closure-constant) taper weights once per fit rather than inside
+    the jitted objective.
+    """
+    xl = np.asarray(xl, dtype=float)
+    d = np.abs(xl - v_center)
+    return np.where(d > sfac * sigl0, xlam * (np.maximum(d / sigl0, sfac) / sfac) ** 4, xlam)
+
+
 @njit(cache=True)
 def _compute_smoothness(
     b: np.ndarray, xl: np.ndarray,
     xlam: float, sigl0: float, resd: float, nl: int,
+    v_center: float = 0.0,
 ) -> float:
     """Second-derivative roughness penalty on the LOSVD, with wing tapering.
 
@@ -230,6 +331,18 @@ def _compute_smoothness(
         of freedom / residual scale), applied to the summed penalty.
     nl : int
         Number of LOSVD bins.
+    v_center : float, optional
+        Velocity (km/s) to recenter the wing taper on. Defaults to, and
+        for the default MAP pipeline always is, 0.0 -- matching the
+        original Fortran convention. A fixed zero point is more robust
+        than recentering on a data-driven velocity estimate (e.g.
+        :func:`estimate_velocity_xcorr`), since such an estimate is
+        routinely a few to several km/s off (it's a coarse
+        cross-correlation, not a precision measurement) and recentering
+        on an imprecise estimate can introduce worse LOSVD bias and
+        spurious asymmetry than the fixed zero point. This parameter is
+        used by the optional Bayesian path; the default MAP pipeline
+        always leaves it at 0.0.
 
     Returns
     -------
@@ -239,22 +352,23 @@ def _compute_smoothness(
     Notes
     -----
     The regularization weight is not spatially uniform: for bins with
-    ``|xl[j]| > 1.8 * sigl0`` (i.e. beyond 1.8 sigma into the LOSVD wings),
-    ``lam`` is scaled up by a factor ``(|xl[j] / sigl0| / 1.8)**4``. This
-    intentionally suppresses noise-driven wiggles far from the line core,
-    where the data carry little information about the LOSVD shape, while
-    leaving the regularization near the peak comparatively loose so genuine
-    kinematic structure can be recovered. The factor of 1.8 and the quartic
-    form exactly match a legacy Fortran convention and are kept as-is for
-    compatibility with historical fits; this is a deliberate design choice,
-    not a bug.
+    ``|xl[j] - v_center| > 1.8 * sigl0`` (i.e. beyond 1.8 sigma into the
+    LOSVD wings, measured from `v_center`), ``lam`` is scaled up by a
+    factor ``(|xl[j] - v_center| / sigl0 / 1.8)**4``. This intentionally
+    suppresses noise-driven wiggles far from the line core, where the data
+    carry little information about the LOSVD shape, while leaving the
+    regularization near the peak comparatively loose so genuine kinematic
+    structure can be recovered. With the default ``v_center=0.0`` this
+    exactly matches the legacy Fortran convention (wings measured from the
+    fixed grid zero point, not a data-driven estimate).
     """
     sfac = 1.8
     smooth = 0.0
     for j in range(nl):
         lam = xlam
-        if abs(xl[j]) > sfac * sigl0:
-            lam = xlam * (abs(xl[j] / sigl0) / sfac) ** 4
+        d = abs(xl[j] - v_center)
+        if d > sfac * sigl0:
+            lam = xlam * (d / sigl0 / sfac) ** 4
         if j == 0:
             smooth += lam * (b[1] - 2 * b[0]) ** 2
         elif j == nl - 1:
@@ -389,10 +503,11 @@ def evaluate_model_gp(
 
     Notes
     -----
-    When ``st.fortran_template_mixture`` is False, pixels outside any
-    template's wavelength coverage are excluded via ``st.outside_tpl`` (a
-    boolean mask), rather than via the fragile ``T == 1.0`` sentinel value
-    used by the legacy Fortran/early-Python code.
+    When ``st.fortran_template_mixture`` is False, each pixel's mixture only
+    uses the templates that actually cover it there, via the per-template
+    ``st.outside_tpl`` mask (shape ``(npix, nt)``), rather than via the
+    fragile ``T == 1.0`` sentinel value used by the legacy Fortran/
+    early-Python code.
     """
     nl, nt, npix = st.nl, st.nt, st.npix
     i = 0
@@ -421,10 +536,11 @@ def evaluate_model_gp(
     if st.fortran_template_mixture:
         tval = st.t @ w / sum2
     else:
-        # Exclude pixels outside any template's coverage.
-        # Uses outside_tpl (bool) instead of the old T==1.0 sentinel.
-        valid_t = np.where(st.outside_tpl[:, None], 0.0, st.t)
-        s2o = sum2 - (st.outside_tpl[:, None] * w[None, :]).sum(axis=1)
+        # Exclude, per pixel, only the templates that don't cover it there
+        # (outside_tpl is (npix, nt), not per-pixel-only -- a pixel covered
+        # by some but not all templates keeps using the ones that do).
+        valid_t = np.where(st.outside_tpl, 0.0, st.t)
+        s2o = sum2 - (st.outside_tpl * w[None, :]).sum(axis=1)
         s2o = np.where(s2o == 0, 1.0, s2o)
         tval = (valid_t * w[None, :]).sum(axis=1) / s2o
 
@@ -466,7 +582,7 @@ def objective_map(a: np.ndarray, st: FitState) -> float:
     the chi2 goodness-of-fit with the LOSVD smoothness penalty and a soft
     normalization constraint:
 
-        objective = chi2 + smoothness_penalty + 0.1 * |sum(b) - 1|
+        objective = chi2 + smoothness_penalty + 0.1 * ``|sum(b) - 1|``
 
     where ``chi2`` is computed by :func:`_compute_chi2` over the good
     (unmasked, finite, non-clipped) pixels, and ``smoothness_penalty`` is
@@ -503,7 +619,7 @@ def objective_map(a: np.ndarray, st: FitState) -> float:
         st.time_eval_model = 0.0
     st.time_eval_model += time.perf_counter() - t0
     chi2 = _compute_chi2(st.g, gp, st.gerr, st.iskip, st.npix)
-    smooth = _compute_smoothness(b, st.xl, st.xlam, st.sigl0, st.resd, st.nl)
+    smooth = _compute_smoothness(b, st.xl, st.xlam, st.sigl0, st.resd, st.nl, getattr(st, "v_center", 0.0))
     return float(chi2 + smooth + 1e-1 * abs(float(np.sum(b)) - 1.0))
 
 
@@ -591,19 +707,15 @@ def _build_jax_objective_value_and_grad(st: FitState):
     sigl0 = float(st.sigl0)
     resd = float(st.resd)
     iskip = int(st.iskip)
+    v_center = float(getattr(st, "v_center", 0.0))
 
     fit_mask = np.zeros(npix, dtype=bool)
     fit_mask[iskip:npix - iskip] = True
     fit_mask = jnp.asarray(fit_mask, dtype=bool)
 
-    sfac = 1.8
-    lam_vec = np.array([
-        xlam * (max(abs(float(st.xl[j])) / sigl0, sfac) / sfac) ** 4
-        if abs(float(st.xl[j])) > sfac * sigl0
-        else xlam
-        for j in range(nl)
-    ], dtype=float)
-    lam_vec = jnp.asarray(lam_vec, dtype=jnp.float64)
+    lam_vec = jnp.asarray(
+        _wing_taper_lam_vec(st.xl, xlam, sigl0, v_center), dtype=jnp.float64
+    )
 
     # Keep 2D shape (npix, nlosvd) to avoid jnp.tile/repeat inside the jitted function.
     ip_safe = jnp.clip(jnp.asarray(ip_map, dtype=jnp.int32), 0, npix - 1)
@@ -652,8 +764,8 @@ def _build_jax_objective_value_and_grad(st: FitState):
         if fortran_template_mixture:
             tval = (t @ w) / sum2
         else:
-            valid_t = jnp.where(outside_tpl[:, None], 0.0, t)
-            s2o = sum2 - jnp.sum(outside_tpl[:, None] * w[None, :], axis=1)
+            valid_t = jnp.where(outside_tpl, 0.0, t)
+            s2o = sum2 - jnp.sum(outside_tpl * w[None, :], axis=1)
             s2o = jnp.where(s2o == 0.0, 1.0, s2o)
             tval = jnp.sum(valid_t * w[None, :], axis=1) / s2o
 
@@ -746,7 +858,7 @@ def objective_components(a: np.ndarray, st: FitState) -> dict:
     """
     gp, b, *_ = evaluate_model_gp(a, st)
     chi2   = _compute_chi2(st.g, gp, st.gerr, st.iskip, st.npix)
-    smooth = _compute_smoothness(b, st.xl, st.xlam, st.sigl0, st.resd, st.nl)
+    smooth = _compute_smoothness(b, st.xl, st.xlam, st.sigl0, st.resd, st.nl, getattr(st, "v_center", 0.0))
     fadd   = 1e-1 * abs(float(np.sum(b)) - 1.0)
     return {
         "chi2": float(chi2), "smooth": float(smooth),
@@ -793,10 +905,7 @@ def compute_weighted_template_spectrum(st: FitState, w: np.ndarray) -> np.ndarra
         return np.ones(st.npix)
     if st.fortran_template_mixture:
         return st.t @ w / sum2
-    valid_t = np.where(st.outside_tpl[:, None], 0.0, st.t)
-    s2o = np.where(
-        (sum2 - (st.outside_tpl[:, None] * w[None, :]).sum(axis=1)) == 0,
-        1.0,
-        sum2 - (st.outside_tpl[:, None] * w[None, :]).sum(axis=1),
-    )
+    valid_t = np.where(st.outside_tpl, 0.0, st.t)
+    s2o_raw = sum2 - (st.outside_tpl * w[None, :]).sum(axis=1)
+    s2o = np.where(s2o_raw == 0, 1.0, s2o_raw)
     return (valid_t * w[None, :]).sum(axis=1) / s2o

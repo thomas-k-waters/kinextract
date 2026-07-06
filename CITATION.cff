@@ -7,8 +7,8 @@ authors:
     given-names: Thomas, K.
     affiliation: University of Michigan
 version: 0.1.0
-date-released: "2026-06-25"
-url: "https://github.com/gultekingroup/kinextract"
+date-released: "2026-07-06"
+url: "https://github.com/thomas-k-waters/kinextract"
 abstract: >
   kinextract fits galaxy spectra using a non-parametric line-of-sight velocity
   distribution (LOSVD) represented directly on a velocity grid.  An

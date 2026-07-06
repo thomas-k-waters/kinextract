@@ -10,6 +10,7 @@ __pycache__/
 build/
 _build/
 docs/_build/
+docs/generated/
 dist/
 
 # Jupyter

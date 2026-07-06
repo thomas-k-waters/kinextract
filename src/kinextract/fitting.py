@@ -693,9 +693,25 @@ def fit_state_map_with_optional_clean(
 ):
     """Run the MAP fit, optionally with sigma-clipping and/or an ALS outer loop.
 
-    This is the mid-level orchestration function used by
-    :func:`run_spectral_fit`: it optionally runs the automatic ``xlam``
-    grid search (:func:`_auto_select_xlam`) once up front, then either
+    This is ``run_spectral_fit``'s primary fit path: a bound-constrained
+    L-BFGS-B optimisation of ``chi2 + wing-tapered smoothness penalty +
+    LOSVD normalisation penalty`` (:func:`kinextract.numerics.objective_map`),
+    the same objective minimised by the original Fortran implementation
+    this package is a port of. It is also used internally by
+    :mod:`kinextract.errors`'s residual-bootstrap error estimation, which
+    needs hundreds to thousands of fast independent refits per fit -- a
+    cost only a point-estimate optimisation, not full posterior sampling,
+    can sustain. A full-posterior (NUTS/HMC) alternative is available via
+    :func:`kinextract.bayesian.fit_state_bayesian` for users who want a
+    sampled posterior instead of a point estimate; it is not used by
+    default because a comprehensive recovery-accuracy comparison found the
+    MAP point estimate matches or exceeds the posterior mean's LOSVD-shape
+    recovery across tested instruments and LOSVD shapes, at a small
+    fraction of the runtime.
+
+    This is the mid-level orchestration function: it optionally runs the
+    automatic ``xlam`` grid search (:func:`_auto_select_xlam`) once up
+    front, then either
     performs a single (optionally sigma-clipped) MAP fit, or, when
     ``cfg.fit_als_continuum`` is set, alternates MAP fitting with
     re-estimating the ALS (asymmetric least squares) continuum baseline
@@ -843,16 +859,43 @@ def run_spectral_fit(
     :class:`~kinextract.state.FitState` (:func:`~kinextract.spectrum.make_fit_state`);
     builds an initial non-parametric guess for the LOSVD and template
     weights (:func:`~kinextract.spectrum.build_initial_guess_nonparam`);
-    runs the MAP optimisation, with optional automatic regularisation
-    (``xlam``) selection, iterative sigma-clipping, and an ALS continuum
-    outer loop as configured (:func:`fit_state_map_with_optional_clean`,
-    which minimises the objective ``chi2 + smoothness_penalty +
-    0.1*|sum(b) - 1|`` described in the :mod:`kinextract.numerics` module
-    docstring); and finally computes summary statistics and (by default)
+    runs a bound-constrained MAP optimisation
+    (:func:`fit_state_map_with_optional_clean`) over that same flat
+    parameter vector, with optional automatic regularisation (``xlam``)
+    selection, sigma-clipping, and an ALS continuum outer loop as
+    configured; and finally computes summary statistics and (by default)
     writes the standard fitlov/ascii/rms/template output files. It supports
     both notebook usage (set ``cfg.gal_file`` and call
     ``run_spectral_fit(cfg)``) and command-line/scripted usage (pass
     `gal_file` explicitly, overriding `cfg`).
+
+    The LOSVD's wing-tapered smoothness penalty is always zero-centered
+    (``st.v_center = 0.0``), matching the original Fortran convention,
+    rather than recentered per-fit on a data-driven velocity estimate --
+    a fixed zero point is more robust whenever the velocity estimate
+    itself is imprecise (routinely the case, since it comes from a coarse
+    cross-correlation, not a precision measurement). A full-posterior
+    (NUTS/HMC) alternative to this MAP
+    point estimate is available via
+    :func:`kinextract.bayesian.fit_state_bayesian` for users who want a
+    sampled posterior instead; call it directly in place of this function
+    if you need distributional uncertainty from a single fit rather than
+    (or in addition to) the bootstrap error estimators in
+    :mod:`kinextract.errors`. It is not the default because a
+    comprehensive recovery-accuracy comparison found the MAP point
+    estimate matches or exceeds the posterior mean's LOSVD-shape recovery
+    across tested instruments and LOSVD shapes, at a small fraction of the
+    runtime -- consistent with the original Fortran implementation this
+    package is a port of, which also uses MAP + Monte Carlo resampling
+    rather than full posterior sampling.
+
+    For characterizing recovery bias for a specific target's instrument/
+    S-N/template configuration -- e.g. near the instrumental resolution
+    limit, where any point estimator has some residual bias -- see
+    :func:`kinextract.validation.assess_recovery_bias`, which runs matched
+    mock simulations and reports (and optionally corrects for) the
+    empirical bias directly, rather than relying on generic multi-instrument
+    numbers.
 
     Parameters
     ----------
@@ -878,7 +921,7 @@ def run_spectral_fit(
         equivalent model products purely in memory (useful for
         notebook-driven exploration or bootstrap workers where per-replicate
         file I/O would be wasteful). Defaults to ``cfg.write_outputs`` (which
-        itself defaults to True) when not given explicitly, so this can be
+        itself defaults to False) when not given explicitly, so this can be
         set once per :class:`~kinextract.config.FitConfig` instead of on
         every call; pass an explicit True/False here to override the config
         for a single call.
@@ -999,6 +1042,13 @@ def run_spectral_fit(
             if gfr.any()
             else np.nan
         )
+        nrms = int(gfr.sum())
+        chi2_total = (
+            float(np.sum((st.g[sl][gfr] - gp[sl][gfr]) ** 2 / st.gerr[sl][gfr] ** 2))
+            if gfr.any()
+            else 0.0
+        )
+        chi2_red = chi2_total / max(nrms - 1, 1)
 
         outputs = {
             "gp": gp,
@@ -1010,7 +1060,9 @@ def run_spectral_fit(
             "coff2": coff2,
             "A": A,
             "rms": rms,
-            "nrms": int(gfr.sum()),
+            "chi2_red": chi2_red,
+            "chi2_total": chi2_total,
+            "nrms": nrms,
             "continuum": cont,
             "paths": {},
         }

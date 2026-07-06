@@ -8,10 +8,11 @@
 
 - **Non-parametric LOSVD**: recovers arbitrary shapes including double-peaked and asymmetric distributions
 - **Automatic regularization**: grid-searches `xlam` via a chi-squared or roughness + unimodality criterion
-- **ALS continuum**: asymmetric least-squares baseline co-fitted with the LOSVD; no polynomial continuum assumed
-- **JAX acceleration**: analytic JIT-compiled gradients by default (falls back to finite differences automatically if JAX isn't installed) for a large speedup and more reliable convergence over plain finite differences
+- **Continuum co-fitting**: asymmetric least-squares (ALS) baseline by default, or a low-order asymmetric-reweighted polynomial (`FitConfig.continuum_method = "polynomial"`) as a less over-smoothing-prone alternative
+- **JAX acceleration**: analytic JIT-compiled gradients, installed by default, for a large speedup and more reliable convergence over plain finite differences
 - **Instrumental LSF matching**: optionally convolves the sharper of the data/templates down to match the coarser one before fitting, given both resolutions (see `FitConfig.data_fwhm_A`/`template_fwhm_A`)
 - **Uncertainty estimation**: Laplace approximation (with active-set conditioning and a convergence diagnostic), residual bootstrap, and bias correction (via `LOSVDErrorEstimator`)
+- **Empirical recovery-bias validation**: `assess_recovery_bias` fits matched mock spectra (same instrument, templates, continuum, and noise level as a real target) on a grid of known truths, so bias near the instrumental resolution limit can be measured directly rather than assumed
 - **Self-documenting configuration**: `FitConfig.describe()` prints every tunable field, grouped by subsystem, optionally filtered by a substring (e.g. `FitConfig.describe("als")`)
 
 ## Installation
@@ -20,16 +21,21 @@
 pip install kinextract
 ```
 
-For full performance (JAX + Numba JIT):
+This installs everything needed for the primary MAP + bootstrap pipeline,
+including JAX and Numba for fast fitting. The optional full-posterior
+(NUTS/HMC) path in `kinextract.bayesian` needs NumPyro on top:
 
 ```bash
-pip install "kinextract[fast]"
+pip install "kinextract[bayesian]"
 ```
+
+`pip install kinextract` works the same way inside a conda environment;
+there is no separate conda package.
 
 From source:
 
 ```bash
-git clone https://github.com/gultekingroup/kinextract
+git clone https://github.com/thomas-k-waters/kinextract
 cd kinextract
 pip install -e ".[dev]"
 ```
@@ -123,6 +129,9 @@ src/kinextract/
     templates.py   Template reading/interpolation, instrumental LSF matching
     plotting.py    Diagnostic plots (fit residuals, LOSVD, ALS continuum)
     errors.py      LOSVDErrorEstimator (Laplace + bootstrap + bias correction)
+    mocks.py       Matched mock-spectrum generation for recovery-bias validation
+    validation.py  assess_recovery_bias / correct_recovered_losvd
+    bayesian.py    Optional full-posterior (NUTS/HMC) alternative to the MAP pipeline
 ```
 
 ## Known limitations
@@ -138,6 +147,10 @@ src/kinextract/
 - At low S/N, fine-scale LOSVD structure is not reliable — check `chi2_red` and the roughness value.
 - Template mismatch can bias the LOSVD; run with multiple template libraries and compare.
 - Emission lines are masked but not modelled; simultaneous emission fitting is not supported.
+- Near the instrumental resolution limit, recovered V/sigma carry a real, condition-dependent bias
+  (see `FitConfig`'s "Known limitations" section for details and typical magnitudes). Use
+  `assess_recovery_bias` to measure this directly for a specific target's instrument/S-N/template
+  configuration, rather than relying on generic numbers.
 
 ## Citation
 
@@ -148,7 +161,7 @@ If you use `kinextract` in published research, please cite:
   author  = {Waters, Thomas K.},
   title   = {kinextract: Non-parametric binned-LOSVD spectral fitter for galaxy kinematics},
   year    = {2026},
-  url     = {https://github.com/gultekingroup/kinextract},
+  url     = {https://github.com/thomas-k-waters/kinextract},
 }
 ```
 
