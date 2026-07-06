@@ -1,8 +1,8 @@
 # kinextract
 
-**Non-parametric binned-LOSVD spectral fitter for galaxy kinematics**
-
 NOTE: This package is actively being developed. Please let me know if you encounter any issues or if you have suggestions for improvement. You can reach me via email at thomas.k.waters@gmail.com.
+
+**Non-parametric binned-LOSVD spectral fitter for galaxy kinematics**
 
 `kinextract` fits galaxy spectra using a non-parametric line-of-sight velocity distribution (LOSVD) represented directly on a velocity grid — no Gauss-Hermite parametrisation assumed. An asymmetric-least-squares (ALS) baseline is co-fitted with the LOSVD, and regularization strength is selected automatically via a roughness criterion. The package targets integral-field-spectroscopy data (MUSE, STIS) for black-hole mass measurements through Schwarzschild orbit modelling.
 
