@@ -20,7 +20,7 @@ NOTE: This package is actively being developed. Please let me know if you encoun
 ## Installation
 
 ```bash
-pip install kinextract
+pip install git+https://github.com/thomas-k-waters/kinextract.git
 ```
 
 This installs everything needed for the primary MAP + bootstrap pipeline,
@@ -28,10 +28,10 @@ including JAX and Numba for fast fitting. The optional full-posterior
 (NUTS/HMC) path in `kinextract.bayesian` needs NumPyro on top:
 
 ```bash
-pip install "kinextract[bayesian]"
+pip install "git+https://github.com/thomas-k-waters/kinextract.git[bayesian]"
 ```
 
-`pip install kinextract` works the same way inside a conda environment;
+`pip install git+https://github.com/thomas-k-waters/kinextract.git` works the same way inside a conda environment;
 there is no separate conda package.
 
 From source:
@@ -43,6 +43,9 @@ pip install -e ".[dev]"
 ```
 
 Requires Python ≥ 3.10.
+
+## Documentation
+Documentation for kinextract is available at [Read the Docs](https://kinextract.readthedocs.io/en/latest/index.html).
 
 ## Quick start
 
@@ -172,3 +175,5 @@ See also `CITATION.cff` for the full citation metadata.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Documentation
