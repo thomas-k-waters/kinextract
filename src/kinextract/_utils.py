@@ -18,6 +18,28 @@ CEE = 299792.458   # speed of light, km/s (IAU 2012)
 BIG = 1e10     # sentinel value for masked pixels
 
 _T0 = time.perf_counter()
+_VERBOSE = True
+
+
+def set_verbose(verbose: bool) -> None:
+    """Enable or disable :func:`log`'s progress messages package-wide.
+
+    ``kinextract`` logs progress (stage start/end timing, xlam/ALS search
+    steps, etc.) unconditionally via :func:`log` throughout the fitting
+    pipeline. Call ``set_verbose(False)`` once (e.g. at the top of a
+    notebook or script) to silence all of it -- useful when running many
+    fits back-to-back and only the final results matter, not the internal
+    progress trace. Independent of `FitConfig.print_every`, which only
+    controls the separate per-iteration objective-evaluation counter inside
+    a single optimization.
+
+    Parameters
+    ----------
+    verbose : bool
+        If False, :func:`log` becomes a no-op until re-enabled.
+    """
+    global _VERBOSE
+    _VERBOSE = bool(verbose)
 
 
 def log(msg: str) -> None:
@@ -26,14 +48,16 @@ def log(msg: str) -> None:
     Prefixes `msg` with the elapsed wall-clock time (in seconds) since the
     module was first imported, and flushes immediately so messages interleave
     correctly with output from long-running fits (including those run in
-    subprocesses/workers during bootstrap error estimation).
+    subprocesses/workers during bootstrap error estimation). No-op if
+    :func:`set_verbose` has been called with ``False``.
 
     Parameters
     ----------
     msg : str
         Message to print.
     """
-    print(f"[{time.perf_counter() - _T0:9.2f}s] {msg}", flush=True)
+    if _VERBOSE:
+        print(f"[{time.perf_counter() - _T0:9.2f}s] {msg}", flush=True)
 
 
 class Timer:

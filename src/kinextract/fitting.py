@@ -32,7 +32,9 @@ from .io import infer_output_prefix, write_fitlov_outputs
 # fit_losvd_gauss_hermite is not used inside this module, but is re-exported
 # here because several example notebooks/scripts import it via
 # `from kinextract.fitting import fit_losvd_gauss_hermite`; the canonical
-# definition is in .losvd.
+# definition is in .losvd. The noqa keeps ruff/pyflakes from treating this
+# as an unused import and silently deleting it on the next `ruff --fix`.
+from .losvd import fit_losvd_gauss_hermite  # noqa: F401
 from .masking import _bloom_rejected, _update_clean_mask, build_clean_protect_mask
 from .numerics import (
     _get_or_build_jax_vg,

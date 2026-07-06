@@ -21,7 +21,7 @@ configuration object specifically.
 from __future__ import annotations
 
 # ── Utilities ──────────────────────────────────────────────────────────────
-from ._utils import BIG, CEE, Timer, log
+from ._utils import BIG, CEE, Timer, log, set_verbose
 from ._version import __version__
 
 # ── Configuration ──────────────────────────────────────────────────────────
@@ -141,7 +141,7 @@ from .validation import assess_recovery_bias, correct_recovered_losvd
 __all__ = [
     "__version__",
     # utils
-    "CEE", "BIG", "log", "Timer",
+    "CEE", "BIG", "log", "Timer", "set_verbose",
     # config
     "FitConfig", "load_config_from_toml",
     # state
