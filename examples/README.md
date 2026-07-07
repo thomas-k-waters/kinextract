@@ -38,11 +38,11 @@ demo), 03, and 04.
 ```text
 data/
   muse/
-    bin0105sp.spec   central Voronoi bin — VLT/MUSE WFM, NGC 5102 (notebooks 02, 03)
+    bin0105sp.spec   spaxel on the galactic center — VLT/MUSE WFM, NGC 5102 (notebook 03)
     <template>.dat   one or more template spectra (any number supported)
     Tlist            template list file: one template filename per line
   stis/
-    bin0105sp.spec   inner-bin spectrum — HST/STIS G750L
+    bin0105sp.spec   spaxel on the galactic center — HST/STIS G750L, NGC 5102 (notebook 04)
     <template>.dat   one or more template spectra (any number supported)
     Tlist            template list file: one template filename per line
 ```

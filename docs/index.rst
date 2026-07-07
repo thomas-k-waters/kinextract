@@ -7,9 +7,8 @@ Non-parametric binned-LOSVD spectral fitter for galaxy kinematics.
 velocity distribution (LOSVD) represented directly on a velocity grid -- no
 Gauss-Hermite parametrisation assumed. A continuum baseline (asymmetric
 least-squares or a low-order polynomial) is co-fitted with the LOSVD, and
-regularization strength is selected automatically. The package targets
-integral-field-spectroscopy data (MUSE, STIS) for black-hole mass
-measurements through Schwarzschild orbit modelling.
+regularization strength is selected automatically. The package uses
+spectroscopic data for use in stellar dynamical modeling.
 
 .. toctree::
    :maxdepth: 2
