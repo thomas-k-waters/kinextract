@@ -1,0 +1,102 @@
+name: Publish to PyPI
+
+# Two ways to run this:
+#   1. Automatically, when a GitHub Release is published -> publishes to
+#      the real PyPI (job `publish-pypi`).
+#   2. Manually (Actions tab -> "Publish to PyPI" -> "Run workflow") -> does
+#      a dry-run publish to TestPyPI instead (job `publish-testpypi`), so a
+#      new release process can be sanity-checked without touching the real
+#      index. https://test.pypi.org/project/kinextract/ once configured.
+#
+# Both publish jobs use PyPI's "Trusted Publisher" (OIDC) mechanism -- no
+# API token/secret is stored in this repo. One-time setup required on the
+# PyPI/TestPyPI side before this workflow can publish (see README/plan):
+#   pypi.org/manage/account/publishing/ and test.pypi.org/manage/account/publishing/
+#   -> add a pending trusted publisher for:
+#      owner=thomas-k-waters, repository=kinextract,
+#      workflow=publish.yml, environment=pypi (or testpypi)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Run tests before publishing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - run: pytest -m "not slow" --tb=short -q
+
+  build:
+    name: Build sdist and wheel
+    needs: [test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip build
+      - run: python -m build
+
+      # Guard against publishing a release whose git tag doesn't match the
+      # version actually baked into the package -- PyPI uploads are
+      # effectively permanent (a version number can never be reused, even
+      # if yanked), so catching a mismatch here is much cheaper than after.
+      - name: Check release tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          PKG_VERSION=$(python -c "from kinextract._version import __version__; print(__version__)")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Release tag 'v$TAG_VERSION' does not match kinextract._version.__version__ ('$PKG_VERSION'). Update _version.py and re-tag before publishing."
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  publish-testpypi:
+    name: Publish to TestPyPI (manual dry run)
+    if: github.event_name == 'workflow_dispatch'
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/p/kinextract
+    permissions:
+      id-token: write  # required for trusted publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi:
+    name: Publish to PyPI
+    if: github.event_name == 'release' && github.event.action == 'published'
+    needs: [build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/kinextract
+    permissions:
+      id-token: write  # required for trusted publishing (OIDC)
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

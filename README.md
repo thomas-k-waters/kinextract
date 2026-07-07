@@ -45,6 +45,7 @@ pip install -e ".[dev]"
 Requires Python ≥ 3.10.
 
 ## Documentation
+
 Documentation for kinextract is available at [Read the Docs](https://kinextract.readthedocs.io/en/latest/index.html).
 
 ## Quick start
@@ -175,5 +176,3 @@ See also `CITATION.cff` for the full citation metadata.
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
-## Documentation
