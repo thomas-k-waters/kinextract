@@ -53,7 +53,7 @@ jobs:
       - name: Check release tag matches package version
         if: github.event_name == 'release'
         run: |
-          PKG_VERSION=$(python -c "from kinextract._version import __version__; print(__version__)")
+          PKG_VERSION=$(grep -oP '(?<=__version__ = ")[^"]+' src/kinextract/_version.py)
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
             echo "::error::Release tag 'v$TAG_VERSION' does not match kinextract._version.__version__ ('$PKG_VERSION'). Update _version.py and re-tag before publishing."
