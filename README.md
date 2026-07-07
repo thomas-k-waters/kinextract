@@ -20,7 +20,7 @@ Non-parametric binned-LOSVD spectral fitter for galaxy kinematics
 ## Installation
 
 ```bash
-pip install git+https://github.com/thomas-k-waters/kinextract.git
+pip install kinextract
 ```
 
 This installs everything needed for the primary MAP + bootstrap pipeline,
@@ -28,10 +28,10 @@ including JAX and Numba for fast fitting. The optional full-posterior
 (NUTS/HMC) path in `kinextract.bayesian` needs NumPyro on top:
 
 ```bash
-pip install "git+https://github.com/thomas-k-waters/kinextract.git[bayesian]"
+pip install "kinextract[bayesian]"
 ```
 
-`pip install git+https://github.com/thomas-k-waters/kinextract.git` works the same way inside a conda environment;
+`pip install kinextract` works the same way inside a conda environment;
 there is no separate conda package.
 
 From source:
