@@ -477,12 +477,50 @@ def write_fitlov_outputs(
         ``"nrms"``), the continuum array, and a ``"paths"`` dict giving the
         four output file paths.
     """
-    from .numerics import compute_weighted_template_spectrum, evaluate_model_gp
+    from .numerics import evaluate_model_gp
+
+    gp, b, w, coff, coff2, A = evaluate_model_gp(a_best, st)
+    return write_fitlov_outputs_from_model(st, gp, b, w, coff, coff2, A, outdir, prefix)
+
+
+def write_fitlov_outputs_from_model(
+    st, gp: np.ndarray, b: np.ndarray, w: np.ndarray,
+    coff: float, coff2: float, A: float,
+    outdir: str = ".", prefix: Optional[str] = None,
+) -> dict:
+    """Write legacy-format output files from an already-evaluated model.
+
+    Same file layout as :func:`write_fitlov_outputs`, factored out so
+    callers that evaluate the forward model themselves (e.g. the joint
+    continuum-in-the-model fit in :mod:`kinextract.joint`, whose parameter
+    vector layout ``evaluate_model_gp`` cannot unpack) can reuse the exact
+    same writer instead of duplicating the file-format logic.
+
+    Parameters
+    ----------
+    st : FitState
+        Fit state holding the spectrum and template matrix.
+    gp, b, w : ndarray
+        Model spectrum, LOSVD histogram, and template weights, as returned
+        by whichever forward-model evaluator produced them.
+    coff, coff2, A : float
+        Continuum-offset/amplitude parameters in the shipped pipeline's
+        sense. Callers whose model has no such parameters (e.g. the joint
+        fit, whose continuum is a P-spline folded into `gp` already) should
+        pass neutral placeholders (``0.0, 0.0, 1.0``).
+    outdir, prefix : optional
+        See :func:`write_fitlov_outputs`.
+
+    Returns
+    -------
+    dict
+        Same structure as :func:`write_fitlov_outputs`'s return value.
+    """
+    from .numerics import compute_weighted_template_spectrum
 
     outdir = Path("." if outdir is None else outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
-    gp, b, w, coff, coff2, A = evaluate_model_gp(a_best, st)
     sw = float(np.sum(w))
     wfrac = w / sw if sw else w
     tt = compute_weighted_template_spectrum(st, w)

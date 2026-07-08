@@ -964,6 +964,21 @@ class LOSVDErrorEstimator:
         """
         # sf is imported at module level from kinextract
 
+        joint_active = getattr(cfg, "continuum_method", "als") == "joint" and (
+            cfg.fit_als_continuum or getattr(cfg, "joint_prenorm", False)
+        )
+        if joint_active:
+            raise NotImplementedError(
+                "LOSVDErrorEstimator does not yet support fits made with "
+                "continuum_method='joint' (kinextract.joint): its flat "
+                "parameter vector -- [LOSVD bins, template weights, "
+                "continuum P-spline coefficients] -- is a different layout "
+                "than evaluate_model_gp expects, so bootstrap refits would "
+                "silently re-fit the wrong model. Use "
+                "cfg.continuum_method='als' or 'polynomial' for error "
+                "estimation until joint-mode support is added."
+            )
+
         self.fit = fit
         self.cfg = cfg
         self.st: FitState = fit["state"]

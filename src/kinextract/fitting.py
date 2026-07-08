@@ -425,6 +425,18 @@ def _chi2_stats(st: FitState, a_best: np.ndarray) -> tuple[float, int]:
         Number of pixels included in the sum.
     """
     gp, *_ = evaluate_model_gp(a_best, st)
+    return _chi2_stats_from_gp(st, gp)
+
+
+def _chi2_stats_from_gp(st: FitState, gp: np.ndarray) -> tuple[float, int]:
+    """Same computation as :func:`_chi2_stats`, given an already-evaluated
+    model spectrum `gp` instead of a flat parameter vector.
+
+    Factored out so callers whose parameter-vector layout ``evaluate_model_gp``
+    cannot unpack (e.g. the joint continuum-in-the-model fit in
+    :mod:`kinextract.joint`, which already evaluates its own forward model)
+    can still get the same chi2/ngood definition without re-deriving it.
+    """
     sl = slice(st.iskip, st.npix - st.iskip)
 
     good = (
@@ -1020,6 +1032,48 @@ def run_spectral_fit(
     with Timer("build FitState"):
         st, tpl_files = make_fit_state(cfg, gal_file=gal_file, gal_errors=gal_errors)
 
+    prefix = output_prefix if output_prefix is not None else infer_output_prefix(gal_file)
+
+    use_joint = cfg.continuum_method == "joint" and (cfg.fit_als_continuum or cfg.joint_prenorm)
+    if use_joint:
+        # The joint continuum-in-the-model fit (kinextract.joint) has its own
+        # parameter-vector layout and its own initial-guess/optimization
+        # driver, so it bypasses build_initial_guess_nonparam/
+        # fit_state_map_with_optional_clean/evaluate_model_gp entirely rather
+        # than trying to fit through machinery specific to the shipped
+        # layout. See kinextract.joint.run_joint_fit's docstring.
+        #
+        # Only triggered in pre-normalized mode (fit_als_continuum=False) if
+        # cfg.joint_prenorm is explicitly set -- joint's sigl0 fixed-point
+        # iteration costs up to n_sigl0_iter * len(xlam_auto_grid) full
+        # optimizations per fit, so this stays opt-in rather than silently
+        # slowing down every default pre-normalized fit package-wide.
+        from .joint import run_joint_fit
+
+        log("Continuum method: joint (P-spline continuum-in-the-model)")
+        outputs = run_joint_fit(st, cfg, write_outputs=write_outputs, outdir=cfg.outdir, prefix=prefix)
+        res = outputs["result"]
+        if not res.success:
+            log(f"WARNING: optimizer reported: {res.message}")
+        a_map, f_map = np.asarray(res.x, float), float(res.fun)
+        chi2, ngood = _chi2_stats_from_gp(st, outputs["gp"])
+
+        log(f"Final chi2={chi2:.6g} ngood={ngood} xlam={st.xlam}")
+        log("==== spectral fitting END ====")
+
+        return {
+            "state": st,
+            "template_files": tpl_files,
+            "result": res,
+            "a_map": a_map,
+            "f_map": f_map,
+            "outputs": outputs,
+            "chi2": chi2,
+            "ngood": ngood,
+            "prefix": prefix,
+            "gal_file": gal_file,
+        }
+
     a0, xlb, xub = build_initial_guess_nonparam(st, cfg.coff, cfg.coff2)
     bounds = list(zip(xlb, xub))
 
@@ -1028,8 +1082,6 @@ def run_spectral_fit(
         log(f"WARNING: optimizer reported: {res.message}")
 
     a_map, f_map = np.asarray(res.x, float), float(res.fun)
-
-    prefix = output_prefix if output_prefix is not None else infer_output_prefix(gal_file)
 
     if write_outputs:
         outputs = write_fitlov_outputs(st, a_map, cfg.outdir, prefix)

@@ -632,10 +632,18 @@ def make_fit_state(cfg: FitConfig, gal_file: Optional[str] = None, gal_errors=No
     with Timer("precompute LOSVD + ip map"):
         precompute_losvd_interp(st)
         precompute_ip_map(st)
-        if cfg.fit_als_continuum:
+        if cfg.fit_als_continuum and cfg.continuum_method != "joint":
             init_als_continuum(st, cfg, templates=getattr(st, 't', None))
             log("ALS continuum initialised.")
         else:
+            # continuum_method="joint" builds its own P-spline initial guess
+            # directly from the data (see kinextract.joint.build_initial_guess)
+            # and has no use for an ALS pre-pass -- running one anyway would
+            # just be a wasted hyperparameter search, against the whole point
+            # of the joint method (no separate continuum sub-fit). st's
+            # continuum_mult is overwritten with the recovered P-spline
+            # continuum once the joint fit completes (see
+            # kinextract.joint.run_joint_fit).
             st.continuum_mult = np.ones(st.npix)
 
     log(

@@ -113,6 +113,20 @@ def assess_recovery_bias(
         `n_seeds` if some replicates fail). Grid points where every
         replicate failed are omitted (logged, not raised).
     """
+    joint_active = getattr(cfg, "continuum_method", "als") == "joint" and (
+        cfg.fit_als_continuum or getattr(cfg, "joint_prenorm", False)
+    )
+    if joint_active:
+        raise NotImplementedError(
+            "assess_recovery_bias does not yet support fits made with "
+            "continuum_method='joint' (kinextract.joint): fit['a_map']'s "
+            "layout -- [LOSVD bins, template weights, continuum P-spline "
+            "coefficients] -- is not what build_matched_mock/evaluate_model_gp "
+            "expect, so mock generation would silently use the wrong model. "
+            "Use cfg.continuum_method='als' or 'polynomial' for recovery-bias "
+            "validation until joint-mode support is added."
+        )
+
     st_ref = fit["state"]
     a_fit = np.asarray(fit["a_map"], float)
     st_fields = _fit_state_to_fields(st_ref)

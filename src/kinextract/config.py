@@ -101,7 +101,17 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
 
     # ── Continuum mode ───────────────────────────────────────────────────
     "fit_als_continuum": ("Continuum mode", "False: input is already continuum-normalised. True: co-fit a full-scale continuum baseline with the LOSVD (method set by continuum_method)."),
-    "continuum_method": ("Continuum mode", "'als' (default) or 'polynomial' -- which full-scale continuum model to co-fit when fit_als_continuum=True."),
+    "continuum_method": ("Continuum mode", "'joint' (default) -- single-shot P-spline-continuum-in-the-model fit (see kinextract.joint). 'als' or 'polynomial' -- legacy separate-continuum-sub-fit alternatives, kept opt-in for users who want that approach. Only used when fit_als_continuum=True."),
+
+    # ── Joint continuum-in-the-model options (continuum_method="joint") ──
+    "joint_n_interior_knots": ("Joint continuum", "Number of interior knots for the continuum's P-spline basis (n_coef = joint_n_interior_knots + joint_degree + 1)."),
+    "joint_degree": ("Joint continuum", "B-spline polynomial degree per segment for the continuum P-spline basis (3 = cubic)."),
+    "joint_xlam_cont": ("Joint continuum", "P-spline continuum roughness-penalty weight, applied to coefficients normalized by their own initial-guess scale."),
+    "joint_cont_diff_order": ("Joint continuum", "Discrete difference order for the continuum P-spline roughness penalty (2 = penalize curvature)."),
+    "joint_n_sigl0_iter": ("Joint continuum", "Number of fit-then-update rounds in the self-consistent sigl0 fixed-point iteration (see kinextract.joint.fit_joint_auto_xlam_sigl0)."),
+    "joint_sigl0_tol": ("Joint continuum", "Stop the sigl0 fixed-point iteration early once consecutive sigl0 values agree within this tolerance (km/s)."),
+    "joint_recenter_v": ("Joint continuum", "If True, recenter the wing-taper's v_center on a cross-correlation velocity estimate before each xlam grid search."),
+    "joint_prenorm": ("Joint continuum", "If True, use the joint engine's v_center/sigl0/xlam-selection improvements even in pre-normalized mode (fit_als_continuum=False), with the continuum fixed at 1.0. Opt-in: costs up to n_sigl0_iter * len(xlam_auto_grid) full optimizations per fit."),
 
     # ── Pre-normalised mode ───────────────────────────────────────────────
     "norm_error_mode": ("Pre-normalised mode", "'unit': use uniform errors on normalised flux. 'file': use the .norm file's own error column."),
@@ -592,16 +602,53 @@ class FitConfig:
     fit_als_continuum: bool = False
 
     # Which full-scale continuum model to co-fit when fit_als_continuum=True:
-    # "als" (default, asymmetric-least-squares smoothing spline) or
-    # "polynomial" (asymmetric-reweighted polynomial -- see "Polynomial
-    # continuum options" below). The polynomial option is useful when
-    # ALS's hyperparameter search settles on an oversmoothed, near-linear
-    # continuum despite a lower, more flexible als_lam giving a more
-    # realistic shape and better final joint chi2_red (see the "Known
-    # limitations" note on ALS above) -- a low-order polynomial has far
-    # fewer effective degrees of freedom than the ALS spline, so it is
-    # less prone to this over-smoothing failure mode.
-    continuum_method: str = "als"
+    # "joint" (default), "als", or "polynomial".
+    #
+    # "joint" folds a penalized-B-spline (P-spline) continuum directly into
+    # the same single L-BFGS-B optimization as the LOSVD and template
+    # weights (see kinextract.joint), rather than treating continuum
+    # estimation as a separate sub-fit with its own hyperparameter search
+    # and overfitting heuristic. This is the primary/recommended method:
+    # on a real MUSE spectrum, ALS's hyperparameter search settled on an
+    # oversmoothed, near-linear continuum despite a more flexible als_lam
+    # giving a healthier chi2_red and visibly tracking the data's real
+    # curvature -- every ALS grid candidate failed the overfitting floor
+    # check, and the fallback logic is systematically biased toward the
+    # *smoothest* available option. The same failure mode was confirmed
+    # for the standalone polynomial alternative.
+    #
+    # "als" (asymmetric-least-squares smoothing spline) and "polynomial"
+    # (asymmetric-reweighted polynomial -- see "Polynomial continuum
+    # options" below) remain available as opt-in alternatives for users
+    # who specifically want a separate continuum sub-fit instead.
+    continuum_method: str = "joint"
+
+    # ── Joint continuum-in-the-model options (continuum_method="joint") ────
+    # See kinextract.joint.fit_joint_auto_xlam_sigl0/fit_joint_auto_xlam for
+    # the full rationale behind each of these. Shared concepts (xlam grid
+    # search, its chi2 tolerance/peak constraints, the initial sigma guess,
+    # optimizer budgets) reuse the existing xlam_auto_grid/xlam_chi2_tolerance/
+    # xlam_max_peaks/xlam_peak_min_prominence/sigl/map_maxiter/map_ftol/
+    # map_maxfun/use_jax_objective fields above rather than duplicating them;
+    # only genuinely new concepts get a joint_-prefixed field here.
+    joint_n_interior_knots: int = 10
+    joint_degree: int = 3
+    joint_xlam_cont: float = 3.0
+    joint_cont_diff_order: int = 2
+    joint_n_sigl0_iter: int = 3
+    joint_sigl0_tol: float = 2.0
+    joint_recenter_v: bool = True
+
+    # If True, use the joint fitting engine (v_center recentering, sigl0
+    # fixed-point convergence, safer xlam auto-selection) even in
+    # pre-normalized mode (fit_als_continuum=False), with the continuum
+    # fixed at 1.0 rather than co-fit (see kinextract.joint.fit_joint's
+    # `fit_continuum` parameter). Default False: joint's sigl0 fixed-point
+    # iteration costs up to n_sigl0_iter * len(xlam_auto_grid) full
+    # optimizations per fit (up to 15x the shipped pre-normalized path's
+    # single fit), so this stays opt-in rather than silently slowing down
+    # every default (unconfigured) pre-normalized fit package-wide.
+    joint_prenorm: bool = False
 
     # ── Pre-normalised mode options ─────────────────────────────────────────
     norm_error_mode: str = "unit"  # "unit" or "file"
@@ -901,6 +948,12 @@ class FitConfig:
         if self.continuum_poly_mode not in ("none", "additive", "multiplicative"):
             raise ValueError(
                 "continuum_poly_mode must be 'none', 'additive', or 'multiplicative'"
+            )
+
+        self.continuum_method = self.continuum_method.lower().strip()
+        if self.continuum_method not in ("joint", "als", "polynomial"):
+            raise ValueError(
+                "continuum_method must be 'joint', 'als', or 'polynomial'"
             )
 
         if self.fit_als_continuum and self.continuum_poly_mode != "none":

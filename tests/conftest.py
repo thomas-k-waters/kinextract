@@ -89,7 +89,7 @@ def real_muse_fit():
         wavefitmin=8400.0, wavefitmax=8750.0,
         zgal=0.001556,
         losvd_vmin=-300.0, losvd_vmax=300.0,
-        fit_als_continuum=True,
+        fit_als_continuum=True, continuum_method="als",
         use_spectrum_errors=False,
         xlam_auto=True, xlam_criterion="roughness", xlam_smooth_threshold=0.25,
         sigl=100.0, clean=True,

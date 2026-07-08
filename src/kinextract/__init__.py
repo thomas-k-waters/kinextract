@@ -70,8 +70,19 @@ from .io import (
     select_region_with_errors,
     setbadreg,
     write_fitlov_outputs,
+    write_fitlov_outputs_from_model,
     write_gh_errors_file,
     write_losvd_errors_file,
+)
+
+# ── Joint continuum-in-the-model fit ────────────────────────────────────────
+from .joint import (
+    build_pspline_design,
+    evaluate_model_gp_joint,
+    fit_joint,
+    fit_joint_auto_xlam,
+    fit_joint_auto_xlam_sigl0,
+    run_joint_fit,
 )
 
 # ── LOSVD analysis ─────────────────────────────────────────────────────────
@@ -152,7 +163,11 @@ __all__ = [
     "read_template_list", "infer_output_prefix", "nint_fortran", "setbadreg",
     "build_wavelength_from_index", "select_region_with_errors",
     "estimate_step_from_wavelength", "count_in_window", "read_galaxy_params",
-    "write_fitlov_outputs", "write_losvd_errors_file", "write_gh_errors_file",
+    "write_fitlov_outputs", "write_fitlov_outputs_from_model",
+    "write_losvd_errors_file", "write_gh_errors_file",
+    # joint continuum-in-the-model fit
+    "run_joint_fit", "fit_joint", "fit_joint_auto_xlam", "fit_joint_auto_xlam_sigl0",
+    "build_pspline_design", "evaluate_model_gp_joint",
     # templates
     "interp_template_tp_with_outside", "build_template_matrix_fortran",
     "resolution_mismatch_sigma_A", "convolve_gaussian_pixels",
