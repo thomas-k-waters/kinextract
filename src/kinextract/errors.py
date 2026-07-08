@@ -230,6 +230,28 @@ def _require_genuine_map_fit(fit: dict, method_name: str) -> None:
         )
 
 
+def _require_not_joint(estimator: "LOSVDErrorEstimator", method_name: str) -> None:
+    """Raise a clear error if `estimator` wraps a joint-mode fit.
+
+    Unlike :meth:`LOSVDErrorEstimator.residual_bootstrap` (which refits from
+    scratch via :mod:`kinextract.joint` and so works for either fit type),
+    ``laplace_covariance``/``bias_correction`` both need a Hessian or hat
+    matrix of the *shipped* objective (:func:`kinextract.numerics.objective_map`)
+    evaluated at ``a_map`` -- meaningless for a joint-mode ``a_map``, whose
+    entries are ``[LOSVD bins, template weights, continuum P-spline
+    coefficients]`` under a different objective entirely.
+    """
+    if getattr(estimator, "is_joint", False):
+        raise NotImplementedError(
+            f"{method_name} does not yet support fits made with "
+            f"continuum_method='joint' (kinextract.joint): it needs a "
+            f"Hessian/hat-matrix of the shipped objective_map at a_map, "
+            f"which doesn't apply to the joint model's own objective. "
+            f"residual_bootstrap() is unaffected and works directly on "
+            f"this fit."
+        )
+
+
 def _make_frozen_cfg(cfg, st=None):
     """
     Return a copy of cfg with ALS hyperparameter optimisation disabled.
@@ -280,6 +302,26 @@ def _make_frozen_cfg(cfg, st=None):
             c.als_lam = float(st.als_lam_current)
         if getattr(st, "als_p_current", None) is not None:
             c.als_p = float(st.als_p_current)
+    return c
+
+
+def _make_frozen_cfg_joint(cfg):
+    """Joint-mode analogue of :func:`_make_frozen_cfg`.
+
+    Relaxes optimizer tolerances for speed on bootstrap replicates (a
+    good-enough solution is fine; MAP-level precision on every one of
+    hundreds of replicates isn't). Unlike the shipped path, there is no
+    ALS-specific state to freeze here, and no xlam/sigl0/v_center grid
+    search to disable -- those are frozen implicitly by reusing the
+    already-converged ``st.xlam``/``st.sigl0``/``st.v_center`` from the
+    main fit (see :func:`kinextract.joint.run_joint_fit`) and calling
+    :func:`kinextract.joint.fit_joint` directly (a single fit at fixed
+    hyperparameters, not the auto-selecting drivers) per replicate.
+    """
+    c = copy.deepcopy(cfg)
+    c.print_every = 0
+    c.map_ftol = max(float(getattr(cfg, "map_ftol", 1e-12)), 1e-8)
+    c.map_gtol = max(float(getattr(cfg, "map_gtol", 1e-10)), 1e-6)
     return c
 
 
@@ -808,6 +850,102 @@ def _refit_one_bootstrap(
         return None
 
 
+def _refit_one_bootstrap_joint(args: tuple) -> Optional[dict]:
+    """
+    Worker function for one bootstrap replicate under the joint
+    continuum-in-the-model engine (:mod:`kinextract.joint`).
+
+    Mirrors :func:`_refit_one_bootstrap`'s structure and return shape
+    exactly, so :meth:`LOSVDErrorEstimator.residual_bootstrap`'s downstream
+    percentile/GH-moment/``.sim``-file code needs no changes regardless of
+    which worker produced the samples -- only *how one replicate is
+    refit* differs.
+
+    Refits via a single, frozen-hyperparameter
+    :func:`kinextract.joint.fit_joint` call rather than the auto-selecting
+    :func:`kinextract.joint.fit_joint_auto_xlam_sigl0` driver used for the
+    original fit. The xlam/sigl0/v_center auto-selection machinery is
+    deliberately *not* re-run per replicate: :func:`kinextract.joint.run_joint_fit`
+    freezes the converged values onto ``st.xlam``/``st.sigl0``/``st.v_center``
+    after the main fit, and re-selecting them per bootstrap replicate would
+    cost ``n_sigl0_iter * len(xlam_grid)`` optimizations per replicate
+    (hundreds of times the shipped path's single refit) while injecting
+    extra hyperparameter-selection noise into the error bars rather than
+    reflecting genuine data noise at fixed, already-decided regularization
+    -- exactly the same rationale :func:`_make_frozen_cfg` already applies
+    to the shipped path's ``xlam_auto``/ALS-hyperparameter search.
+
+    Parameters (packed into args tuple for pickling)
+    -------------------------------------------------
+    g_boot       : ndarray (npix,)  Synthetic spectrum.
+    cfg_frozen   : FitConfig        Relaxed-tolerance config (see
+                                     :func:`_make_frozen_cfg_joint`).
+    base_gerr    : ndarray (npix,)  Original per-pixel errors.
+    st_fields    : dict             Serialized FitState fields (``xlam``/
+                                     ``sigl0``/``v_center`` already carry the
+                                     converged values from the main fit).
+    joint_kwargs : dict             ``n_interior_knots``/``degree``/
+                                     ``xlam_cont``/``cont_diff_order``/
+                                     ``fit_continuum``, from
+                                     ``LOSVDErrorEstimator.__init__``.
+    seed         : int              Unused placeholder, kept only so this
+                                     worker's args tuple has the same shape/
+                                     position convention as
+                                     :func:`_refit_one_bootstrap`'s.
+
+    Returns
+    -------
+    dict with keys: b, w, gh_* , converged -- same shape as
+    :func:`_refit_one_bootstrap`'s return value.
+    or None on failure.
+    """
+    from .joint import evaluate_model_gp_joint, fit_joint, normalize_template_matrix
+
+    g_boot, cfg_frozen, base_gerr, st_fields, joint_kwargs, seed = args
+
+    try:
+        st = FitState(**st_fields)
+        st.g = np.asarray(g_boot, float).copy()
+        st.gerr = np.asarray(base_gerr, float).copy()
+        st.ntot = 0
+
+        result, design = fit_joint(
+            st,
+            n_interior_knots=joint_kwargs["n_interior_knots"],
+            degree=joint_kwargs["degree"],
+            xlam_cont=joint_kwargs["xlam_cont"],
+            cont_diff_order=joint_kwargs["cont_diff_order"],
+            maxiter=cfg_frozen.map_maxiter, ftol=cfg_frozen.map_ftol,
+            maxfun=cfg_frozen.map_maxfun, use_jax=cfg_frozen.use_jax_objective,
+            auto_recenter_v=False, fit_continuum=joint_kwargs["fit_continuum"],
+        )
+
+        t_norm, _ = normalize_template_matrix(st)
+        gp, b, w, cont_coeffs, cont = evaluate_model_gp_joint(result.x, st, design, t_norm)
+
+        gh = fit_losvd_gauss_hermite(st.xl, b, fit_h3h4=True)
+        gh_ho = fit_losvd_gauss_hermite_higher(st.xl, b, max_order=6)
+
+        result_dict = {
+            "b": b.copy(),
+            "w": w.copy(),
+            "gh_vherm": gh["vherm"],
+            "gh_sherm": gh["sherm"],
+            "gh_h3": gh["h3"],
+            "gh_h4": gh["h4"],
+            "gh_v1": gh["v1"],
+            "gh_v2": gh["v2"],
+            "converged": result.success,
+        }
+        for k in ["vherm", "sherm", "h3", "h4", "h5", "h6"]:
+            result_dict[f"gh_ho_{k}"] = gh_ho.get(k, np.nan)
+        return result_dict
+
+    except Exception as exc:
+        warnings.warn(f"Bootstrap replicate failed: {exc}", RuntimeWarning, stacklevel=1)
+        return None
+
+
 def _fit_state_to_fields(st) -> dict:
     """
     Extract the picklable fields of a FitState for multiprocessing.
@@ -964,20 +1102,9 @@ class LOSVDErrorEstimator:
         """
         # sf is imported at module level from kinextract
 
-        joint_active = getattr(cfg, "continuum_method", "als") == "joint" and (
+        self.is_joint = getattr(cfg, "continuum_method", "als") == "joint" and (
             cfg.fit_als_continuum or getattr(cfg, "joint_prenorm", False)
         )
-        if joint_active:
-            raise NotImplementedError(
-                "LOSVDErrorEstimator does not yet support fits made with "
-                "continuum_method='joint' (kinextract.joint): its flat "
-                "parameter vector -- [LOSVD bins, template weights, "
-                "continuum P-spline coefficients] -- is a different layout "
-                "than evaluate_model_gp expects, so bootstrap refits would "
-                "silently re-fit the wrong model. Use "
-                "cfg.continuum_method='als' or 'polynomial' for error "
-                "estimation until joint-mode support is added."
-            )
 
         self.fit = fit
         self.cfg = cfg
@@ -988,9 +1115,34 @@ class LOSVDErrorEstimator:
         self.gp_map: np.ndarray = fit["outputs"]["gp"].copy()
         self.xl: np.ndarray = self.st.xl.copy()
 
-        # Build bounds (same as used during the original fit)
-        _, xlb, xub = build_initial_guess_nonparam(self.st, cfg.coff, cfg.coff2)
-        self.bounds = list(zip(xlb, xub))
+        if self.is_joint:
+            # laplace_covariance/bias_correction still don't support the
+            # joint parameter layout (see their own guards below) -- only
+            # residual_bootstrap does, via _refit_one_bootstrap_joint. Build
+            # the joint continuum design/bounds once here (design depends
+            # only on st.x, which doesn't change across bootstrap replicates)
+            # rather than every worker rebuilding it from scratch.
+            from .joint import build_initial_guess as _joint_build_initial_guess
+            from .joint import normalize_template_matrix as _joint_normalize_template_matrix
+
+            fit_continuum = bool(cfg.fit_als_continuum)
+            _, joint_bounds, _, joint_design = _joint_build_initial_guess(
+                self.st, cfg.joint_n_interior_knots, cfg.joint_degree,
+                fit_continuum=fit_continuum,
+            )
+            self.bounds = joint_bounds
+            self._joint_design = joint_design
+            self._joint_t_norm, _ = _joint_normalize_template_matrix(self.st)
+            self._joint_fit_continuum = fit_continuum
+            self._joint_kwargs = dict(
+                n_interior_knots=cfg.joint_n_interior_knots, degree=cfg.joint_degree,
+                xlam_cont=cfg.joint_xlam_cont, cont_diff_order=cfg.joint_cont_diff_order,
+                fit_continuum=fit_continuum,
+            )
+        else:
+            # Build bounds (same as used during the original fit)
+            _, xlb, xub = build_initial_guess_nonparam(self.st, cfg.coff, cfg.coff2)
+            self.bounds = list(zip(xlb, xub))
 
     # ------------------------------------------------------------------
     # Method 1: Laplace covariance
@@ -1070,6 +1222,7 @@ class LOSVDErrorEstimator:
             moments_err   : dict of flux-weighted moment errors
         """
         _require_genuine_map_fit(self.fit, "laplace_covariance()")
+        _require_not_joint(self, "laplace_covariance()")
         # sf is imported at module level from kinextract
 
         print("[LOSVDErrors] Computing Hessian...")
@@ -1281,10 +1434,15 @@ class LOSVDErrorEstimator:
         # sf is imported at module level from kinextract
 
         rng = np.random.default_rng(seed)
-        cfg_frozen = _make_frozen_cfg(self.cfg, self.st)
 
-        if not refit_als:
-            cfg_frozen.fit_als_continuum = False
+        if self.is_joint:
+            worker_fn = _refit_one_bootstrap_joint
+            cfg_frozen = _make_frozen_cfg_joint(self.cfg)
+        else:
+            worker_fn = _refit_one_bootstrap
+            cfg_frozen = _make_frozen_cfg(self.cfg, self.st)
+            if not refit_als:
+                cfg_frozen.fit_als_continuum = False
 
         print(f"[LOSVDErrors] Starting residual bootstrap "
               f"(n={n_bootstrap}, block={block_size}, jobs={n_jobs})...")
@@ -1305,11 +1463,18 @@ class LOSVDErrorEstimator:
 
         seeds = rng.integers(0, 2**31, size=n_bootstrap)
 
-        args_list = [
-            (g_boots[i], cfg_frozen, base_gerr, self.a_map,
-             self.bounds, int(seeds[i]), st_fields)
-            for i in range(n_bootstrap)
-        ]
+        if self.is_joint:
+            args_list = [
+                (g_boots[i], cfg_frozen, base_gerr, st_fields,
+                 self._joint_kwargs, int(seeds[i]))
+                for i in range(n_bootstrap)
+            ]
+        else:
+            args_list = [
+                (g_boots[i], cfg_frozen, base_gerr, self.a_map,
+                 self.bounds, int(seeds[i]), st_fields)
+                for i in range(n_bootstrap)
+            ]
 
         t0 = time.perf_counter()
         results = []
@@ -1317,7 +1482,7 @@ class LOSVDErrorEstimator:
         if n_jobs == 1:
             # Serial execution — simple and avoids pickling issues
             for k, args in enumerate(args_list):
-                r = _refit_one_bootstrap(args)
+                r = worker_fn(args)
                 results.append(r)
                 if (k + 1) % max(1, n_bootstrap // 10) == 0:
                     elapsed = time.perf_counter() - t0
@@ -1338,16 +1503,23 @@ class LOSVDErrorEstimator:
             # (use_jax_objective=True), giving ~50-100x speedup per replicate
             # over finite-difference gradients.
             #
-            # _make_frozen_cfg forces use_jax_objective=False (safe default for
-            # fork workers), so we make a shallow copy and override it here.
+            # _make_frozen_cfg/_make_frozen_cfg_joint force use_jax_objective=False
+            # (safe default for fork workers), so we make a shallow copy and
+            # override it here.
             cfg_frozen_t = copy.copy(cfg_frozen)
             cfg_frozen_t.use_jax_objective = bool(
                 getattr(self.cfg, "use_jax_objective", False)
             )
-            args_list_t = [
-                (g, cfg_frozen_t, ge, a, b, s, sf_)
-                for (g, _, ge, a, b, s, sf_) in args_list
-            ]
+            if self.is_joint:
+                args_list_t = [
+                    (g, cfg_frozen_t, ge, sf_, jk, s)
+                    for (g, _, ge, sf_, jk, s) in args_list
+                ]
+            else:
+                args_list_t = [
+                    (g, cfg_frozen_t, ge, a, b, s, sf_)
+                    for (g, _, ge, a, b, s, sf_) in args_list
+                ]
 
             # Limit each BLAS library (OpenBLAS / MKL / OpenMP) to 1 internal
             # thread per Python thread.  With n_workers threads this gives
@@ -1363,7 +1535,7 @@ class LOSVDErrorEstimator:
             with _blas_ctx:
                 with _TPE(max_workers=n_workers) as executor:
                     futures = {
-                        executor.submit(_refit_one_bootstrap, a): i
+                        executor.submit(worker_fn, a): i
                         for i, a in enumerate(args_list_t)
                     }
                     results = [None] * n_bootstrap
@@ -1507,6 +1679,7 @@ class LOSVDErrorEstimator:
               LOSVD velocity bins).
         """
         _require_genuine_map_fit(self.fit, "bias_correction()")
+        _require_not_joint(self, "bias_correction()")
         print("[LOSVDErrors] Computing LOSVD influence matrix...")
         t0 = time.perf_counter()
         H_b = compute_losvd_hat_matrix(self.st, self.a_map)
@@ -2570,7 +2743,10 @@ def estimate_losvd_errors(
     bias = None
 
     if run_laplace:
-        laplace = est.laplace_covariance()
+        try:
+            laplace = est.laplace_covariance()
+        except NotImplementedError as exc:
+            print(f"[losvd_errs] Skipping Laplace covariance: {exc}")
 
     if run_bootstrap:
         bootstrap = est.residual_bootstrap(
@@ -2583,7 +2759,10 @@ def estimate_losvd_errors(
         )
 
     if run_bias:
-        bias = est.bias_correction()
+        try:
+            bias = est.bias_correction()
+        except NotImplementedError as exc:
+            print(f"[losvd_errs] Skipping bias correction: {exc}")
 
     summary = est.summarize(
         laplace_result=laplace,

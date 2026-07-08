@@ -961,6 +961,16 @@ def run_joint_fit(st: FitState, cfg, write_outputs: bool = False, outdir: str = 
     gp, b, w, cont_coeffs, cont = evaluate_model_gp_joint(result.x, st, design, t_norm)
     st.continuum_mult = cont
     st.xlam = best_xlam
+    # Freeze the converged sigl0/v_center onto st too (mirroring st.xlam
+    # above) -- estimate_velocity_xcorr is a deterministic, pure function of
+    # st.g/st.t, so recomputing it here reproduces exactly what the last
+    # sigl0-iteration used internally, without needing fit_joint_auto_xlam_sigl0
+    # to thread it back out as an extra return value. Needed so a frozen,
+    # single-shot fit_joint(st, ...) call later (e.g. a bootstrap replicate
+    # refit) reproduces this fit's regularization pivot instead of silently
+    # reverting to the pre-fit defaults (sigl0=cfg.sigl, v_center=0.0).
+    st.sigl0 = float(sigl0_trace[-1])
+    st.v_center = estimate_velocity_xcorr(st) if cfg.joint_recenter_v else 0.0
 
     sw = float(np.sum(w))
     wfrac = w / sw if sw else w

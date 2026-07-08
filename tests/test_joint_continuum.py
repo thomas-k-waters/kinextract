@@ -301,11 +301,20 @@ def test_run_spectral_fit_dispatches_to_joint_by_default():
     assert np.all(np.isfinite(fit["outputs"]["gp"]))
     assert np.isclose(np.sum(fit["outputs"]["b"]), 1.0, atol=1e-8)
 
-    # The old bootstrap/mock-based tools don't understand the joint layout
-    # yet -- they must refuse to run rather than silently misinterpreting
-    # a_map, per the explicit product decision to block them for now.
+    # LOSVDErrorEstimator itself now supports joint-mode fits (bootstrap
+    # refits via kinextract.joint), but laplace_covariance/bias_correction
+    # still need the shipped objective's Hessian/hat-matrix and must refuse
+    # to run rather than silently misinterpreting a_map.
+    est = LOSVDErrorEstimator(fit, cfg)
+    assert est.is_joint is True
     with pytest.raises(NotImplementedError):
-        LOSVDErrorEstimator(fit, cfg)
+        est.laplace_covariance()
+    with pytest.raises(NotImplementedError):
+        est.bias_correction()
+
+    # assess_recovery_bias (injected-truth mock validation, a separate
+    # mechanism from LOSVDErrorEstimator) doesn't understand the joint
+    # layout yet -- must still refuse to run.
     with pytest.raises(NotImplementedError):
         assess_recovery_bias(fit, cfg, v_true_grid=[0.0], sigma_true_grid=[100.0], n_seeds=1)
 
@@ -383,3 +392,55 @@ def test_joint_prenorm_opt_in_fixes_continuum_at_one():
     )
     assert fit["outputs"]["coff"] == 0.0
     assert np.isclose(np.sum(fit["outputs"]["b"]), 1.0, atol=1e-8)
+
+
+def test_residual_bootstrap_works_on_joint_mode_fit():
+    """LOSVDErrorEstimator.residual_bootstrap must work directly on a
+    joint-mode fit (refitting each replicate via kinextract.joint.fit_joint
+    at the main fit's own frozen xlam/sigl0/v_center, rather than the
+    auto-selecting drivers -- see _refit_one_bootstrap_joint's docstring),
+    producing the same result-dict shape the shipped path's bootstrap does
+    so downstream consumers (summarize, .sim-file writing) don't need to
+    know which engine actually ran.
+    """
+    if not SPEC_FILE.exists():
+        pytest.skip("bundled MUSE example data not found")
+    from kinextract import FitConfig, run_spectral_fit
+    from kinextract.errors import LOSVDErrorEstimator
+
+    data = np.loadtxt(SPEC_FILE)
+    flux = data[:, 1]
+    ferr = flux / 50.0
+    cfg = FitConfig(
+        template_list_file=str(MUSE_DIR / "Tlist"),
+        template_dir=str(MUSE_DIR),
+        wavemin_full=4750.0, step=1.25,
+        wavefitmin=8400.0, wavefitmax=8750.0,
+        zgal=0.001556,
+        losvd_vmin=-300.0, losvd_vmax=300.0,
+        fit_als_continuum=True,  # continuum_method left at its "joint" default
+        use_spectrum_errors=False,
+        sigl=100.0, clean=False,
+        joint_n_sigl0_iter=1,  # keep the fixture fit fast
+        map_maxiter=2000,
+    )
+    fit = run_spectral_fit(cfg, gal_file=str(SPEC_FILE), gal_errors=ferr)
+    st = fit["state"]
+
+    # The main fit must have frozen its converged sigl0/v_center onto st
+    # (not left at their pre-fit defaults) -- this is what lets a bootstrap
+    # replicate's frozen single-shot fit_joint call reproduce the same
+    # regularization pivot instead of silently reverting to cfg.sigl/0.0.
+    assert st.sigl0 != cfg.sigl or st.v_center != 0.0
+
+    est = LOSVDErrorEstimator(fit, cfg)
+    assert est.is_joint is True
+
+    boot = est.residual_bootstrap(n_bootstrap=6, n_jobs=1, seed=123)
+    assert boot["n_success"] >= 1, "every bootstrap replicate failed"
+    assert boot["b_samples"].shape[1] == st.nl
+    assert boot["w_samples"].shape[1] == st.nt
+    assert np.all(np.isfinite(boot["gh_samples"]["gh_vherm"]))
+
+    summary = est.summarize(bootstrap_result=boot)
+    assert "b_map" in summary and "gh_map" in summary
