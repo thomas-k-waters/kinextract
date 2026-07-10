@@ -118,3 +118,26 @@ supergiants) closes the gap without needing E-MILES, for completeness: (2)
 root-cause the remaining E-MILES high-sigma bias; (3) move to finalizing
 E-MILES as the primary template recommendation and rebuilding notebook 02
 around it.
+
+### Checkpoint 3: root-caused (partially) the residual E-MILES high-sigma bias; prioritization decision
+
+Chased the sigma>=250 residual E-MILES bias directly on a reproducible bad
+case (sigma=350, seed=42): neither xlam (tried 1655 to 500000, a 300x range)
+nor v_center recentering (on/off) changes the wrong answer -- chi2_red stays
+~0.86-0.92 throughout, i.e. the optimizer is finding a stable, self-consistent
+*local optimum that isn't the true answer*, not failing to converge or
+picking a bad regularization/pivot. This points to genuine multi-modality in
+the fit's objective landscape at very broad sigma -- likely fixable only by
+multi-start optimization (try several initial guesses, keep the best chi2)
+or a deeper reparametrization, not a hyperparameter tweak.
+
+**Prioritization decision**: given checkpoint 1's finding that NGC 4751's
+actual real data needs sigma~43-70 km/s, not 350, I'm deliberately not
+sinking more time into the sigma>=250 problem right now. E-MILES already
+gives strong, small-bias-with-tight-scatter results through sigma~160-200,
+which covers both real targets (N5102: 35-47, N4751: 43-70) with large
+margin. Moving to: (1) full bootstrap-coverage verification in the
+sigma~30-160 regime (the real bar the user set: does truth actually fall
+within the *reported* error bars, not just "is the point estimate close");
+(2) rebuilding notebook 02 around E-MILES; (3) the kinextract-vs-pPXF
+comparison notebook. Will return to sigma>=250/multi-start if time remains.
