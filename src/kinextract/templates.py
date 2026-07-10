@@ -257,3 +257,201 @@ def build_template_matrix_fortran(
             T_err[:, k] = te
     outside_all = outside_each.all(axis=1)
     return T, T_err, outside_each, outside_all
+
+
+def reduce_templates_svd(
+    T: np.ndarray, n_components: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce a template library to ``n_components`` orthogonal eigen-templates.
+
+    A large stellar library assembled from individual real stars (as
+    opposed to a dense, physically-smooth grid of synthetic SSP/stellar
+    models, e.g. E-MILES) has no smooth structure between templates --
+    each one is an idiosyncratic individual spectrum. Fitting all of them
+    simultaneously with independent, non-negative weights gives the
+    optimizer far more freedom than the data can actually constrain:
+    confirmed directly (see the notebooks/conversation this was built for)
+    by refitting the identical synthetic spectrum at several different
+    noise realizations and finding wildly different recovered velocities
+    (over 100 km/s of scatter) even though every fit converged to a
+    similar, plausible chi-squared -- a genuine, reproducible degeneracy,
+    not an optimizer failure.
+
+    Truncated SVD (no mean-subtraction) replaces the ``nt`` raw templates
+    with the top ``n_components`` right-singular vectors of the
+    (rescaled) template matrix, which span the same dominant subspace at
+    a fraction of the free parameters. This is the standard remedy used
+    for exactly this failure mode with large template libraries in the
+    literature (e.g. Cappellari 2017, pPXF); it works best combined with
+    a spectral-type-restricted starting library (physically implausible
+    templates -- e.g. wildly wrong luminosity classes for the science
+    target -- should be excluded *before* this reduction, not relied on
+    to be down-weighted by it).
+
+    **Fitting with these eigen-templates requires template weights to be
+    allowed negative values** (unlike ordinary per-star templates, which
+    are fit with a non-negative-weight convention): only the dominant,
+    most positive-definite component behaves like an ordinary flux
+    spectrum; higher-order components are orthogonal correction terms
+    that generically have both positive- and negative-going regions, so
+    reconstructing the true template mixture legitimately needs
+    mixed-sign coefficients on them. Pass a FitConfig with
+    ``template_w_bounds`` set to something like ``(-1.0, 1.0)`` when
+    fitting with eigen-templates -- the ordinary default (non-negative)
+    bounds will silently distort the fit by disallowing the sign
+    corrections these templates need.
+
+    Parameters
+    ----------
+    T : ndarray, shape (npix, ntemplates)
+        Template matrix, e.g. from :func:`build_template_matrix_fortran`
+        (same ``(npix, ntemplates)`` column convention).
+    n_components : int
+        Number of eigen-templates to keep, capped at ``min(npix, ntemplates)``.
+
+    Returns
+    -------
+    eigen_templates : ndarray, shape (npix, n_components)
+        Reduced template matrix, median-normalized the same way ordinary
+        templates are (see :func:`build_template_matrix_fortran`), with
+        each component's sign oriented so its dominant contribution to
+        reconstructing the (positive) input templates is positive.
+    explained_variance : ndarray, shape (n_components,)
+        Fraction of the input matrix's total variance captured by each
+        kept component, in decreasing order -- a diagnostic for how much
+        of the library's real diversity survives the reduction (and,
+        conversely, how much residual template-mismatch risk remains).
+    """
+    T = np.asarray(T, float)
+    npix, nt = T.shape
+    n_components = int(min(n_components, npix, nt))
+
+    # Put every input template on a comparable scale first (matches this
+    # module's median~1 convention) so no single star's overall brightness
+    # dominates the SVD purely because of its normalization.
+    scale_in = np.median(np.abs(T), axis=0, keepdims=True)
+    scale_in = np.where(scale_in > 0, scale_in, 1.0)
+    T_scaled = T / scale_in
+
+    # No mean-subtraction: this keeps the dominant (first) component close
+    # to a rescaled "typical" spectrum shape (mostly positive), which is
+    # what lets it alone already explain most of the library's variance --
+    # mean-centering would instead force every component, including the
+    # first, to be a zero-mean correction term needing negative weights.
+    #
+    # T_scaled is (npix, nt), so U (npix, k) holds the wavelength-space
+    # eigen-spectra we actually want as templates; Vt (k, nt) holds each
+    # component's *template-space* loading (how much of each original star
+    # it draws on), used only below for the sign convention.
+    U, S, Vt = np.linalg.svd(T_scaled, full_matrices=False)
+    eigen_templates = U[:, :n_components].copy()  # (npix, n_components)
+
+    # Sign convention: orient each component so its dominant contribution to
+    # reconstructing the (positive) input templates is positive.
+    signs = np.sign(np.sum(Vt[:n_components], axis=1))
+    signs[signs == 0] = 1.0
+    eigen_templates *= signs[np.newaxis, :]
+
+    # Re-apply the median~1 convention to the reduced templates themselves.
+    scale_out = np.median(np.abs(eigen_templates), axis=0, keepdims=True)
+    scale_out = np.where(scale_out > 0, scale_out, 1.0)
+    eigen_templates = eigen_templates / scale_out
+
+    total_var = float(np.sum(S ** 2))
+    explained_variance = (S[:n_components] ** 2) / total_var if total_var > 0 else np.zeros(n_components)
+    return eigen_templates, explained_variance
+
+
+def write_svd_reduced_templates(
+    template_list_file: str, template_dir: str, wavelength_grid: np.ndarray,
+    n_components: int, out_dir: str,
+    continuum_smooth_sigma_pix: float = 200.0,
+) -> str:
+    """Build SVD-reduced eigen-templates from a Tlist and write them out as
+    an ordinary template set, ready to use as a new ``template_list_file``.
+
+    A convenience wrapper around :func:`reduce_templates_svd`: reads every
+    template in ``template_list_file``, resamples them onto
+    ``wavelength_grid``, reduces to ``n_components`` eigen-templates, and
+    writes each one as a 3-column (wavelength, flux, flux_err placeholder)
+    ``.dat`` file in ``out_dir`` plus a matching ``Tlist``. The returned
+    path is the new ``Tlist`` -- pass it (with ``out_dir``) as
+    ``template_list_file``/``template_dir`` in a fresh ``FitConfig``, and
+    remember to set ``template_w_bounds`` (see :func:`reduce_templates_svd`).
+
+    Parameters
+    ----------
+    template_list_file, template_dir : str
+        The original (unreduced) template list and directory, e.g.
+        ``examples/data/muse/Tlist`` and its containing directory.
+    wavelength_grid : ndarray
+        Wavelength grid to resample every template onto before reduction
+        (should cover the full range any fit using the result will need,
+        not just one fit window -- typically the galaxy's full observed
+        grid, ``wavemin_full + arange(n_pix) * step``).
+    n_components : int
+        Number of eigen-templates to keep.
+    out_dir : str
+        Directory to write the reduced template files and new Tlist into
+        (created if it doesn't exist).
+    continuum_smooth_sigma_pix : float, optional
+        Gaussian smoothing width (pixels) used to estimate and divide out
+        each raw template's own continuum shape before the SVD -- see the
+        note above on why this matters. Default 200 pixels matches this
+        package's standard stellar-continuum-normalization convention
+        (e.g. notebook 02's own template setup).
+
+    Returns
+    -------
+    str
+        Path to the newly-written ``Tlist`` in ``out_dir``.
+    """
+    from pathlib import Path
+
+    from .io import read_template_list, read_template_xy
+
+    paths = read_template_list(template_list_file, template_dir)
+    wavelength_grid = np.asarray(wavelength_grid, float)
+    T = np.empty((len(wavelength_grid), len(paths)), float)
+    for k, p in enumerate(paths):
+        wave, flux, _err = read_template_xy(p)
+        pos = flux > 0
+        med = float(np.nanmedian(flux[pos])) if pos.any() else 1.0
+        if med > 0:
+            flux = flux / med
+        # Continuum-normalize (divide by a heavily-smoothed version of itself,
+        # matching the standard library-preparation convention -- see e.g.
+        # examples/notebooks/02_realistic_mock_fit.ipynb's own template setup)
+        # *before* the SVD. Without this, each raw physical-flux template's
+        # own broadband SED shape (stellar temperature/brightness) dominates
+        # the variance the SVD sees -- confirmed directly: on the 10-star
+        # MUSE G/K-giant subset, the first *raw*-flux component alone
+        # captures 96% of the variance, essentially all of it continuum
+        # slope, none of it the absorption-line structure that actually
+        # distinguishes templates kinematically. `fit_continuum=True` fits
+        # away whatever overall shape the templates carry anyway, so that
+        # variance is not just irrelevant here, it actively starves the
+        # kept components of the line-shape diversity that matters.
+        flux_smooth = convolve_gaussian_pixels(flux, continuum_smooth_sigma_pix)
+        flux_smooth = np.where(flux_smooth > 0, flux_smooth, 1.0)
+        flux = flux / flux_smooth
+        tp, _outside = interp_template_tp_with_outside(wavelength_grid, wave, flux)
+        T[:, k] = tp
+
+    eigen_templates, explained_variance = reduce_templates_svd(T, n_components)
+
+    out_dir_p = Path(out_dir)
+    out_dir_p.mkdir(parents=True, exist_ok=True)
+    names = []
+    for i in range(eigen_templates.shape[1]):
+        name = f"eigen_{i:02d}.dat"
+        np.savetxt(
+            out_dir_p / name,
+            np.column_stack([wavelength_grid, eigen_templates[:, i],
+                              np.full(len(wavelength_grid), 0.001)]),
+            fmt="%12.4f  %14.8f  %12.8f",
+        )
+        names.append(name)
+    tlist_path = out_dir_p / "Tlist"
+    tlist_path.write_text("\n".join(names) + "\n")
+    return str(tlist_path)

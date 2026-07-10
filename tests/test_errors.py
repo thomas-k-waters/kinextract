@@ -23,7 +23,7 @@ import warnings
 import numpy as np
 import pytest
 
-from kinextract.errors import _active_bound_mask, _projected_gradient
+from kinextract.errors import _active_bound_mask, _losvd_moments, _projected_gradient
 
 
 def test_active_bound_mask_detects_lower_and_upper():
@@ -106,3 +106,68 @@ def test_laplace_covariance_no_silent_zero_for_free_bins(real_muse_fit):
         "error -- this is the bug being regression-tested; it should be "
         "a positive value or NaN, never a bare 0.0"
     )
+
+
+def test_summarize_gh_center_always_equals_map_not_a_bootstrap_derived_value(real_muse_fit):
+    """summarize()'s "recommended center" (gh_center_recommended,
+    b_center_recommended, moments_center_recommended) must always be the
+    MAP fit's own values, never a bootstrap-derived alternative -- matching
+    the original Fortran pipeline's convention (see _print_summary's
+    "Gauss-Hermite moments (MAP, consistent with pallmc.f)") and avoiding a
+    second, different "correct" central estimate for the same quantity.
+    bootstrap_result should only ever affect the *_err/_lo/_hi (spread)
+    fields, never the center.
+
+    Two earlier versions of this code got this wrong in different ways:
+    (1) fitting GH to the pointwise-averaged LOSVD *curve* across replicates
+    (a real bug -- averaging smears out each replicate's own peak
+    position/width jitter, inflating the reported sigma), and (2) using the
+    median of each replicate's own GH fit (not a bug, but still a second
+    central estimate that can legitimately drift away from the MAP fit if
+    the bootstrap ensemble itself is shifted -- confirmed happening on real
+    data, and confusing/inconsistent with the "MAP fit looked excellent"
+    diagnostic plot right next to it). This test constructs a synthetic
+    bootstrap_result whose replicate-derived values are deliberately very
+    different from the MAP fit, and checks summarize() ignores them for the
+    center and only uses the MAP fit.
+    """
+    from kinextract.errors import LOSVDErrorEstimator
+
+    fit, cfg = real_muse_fit
+    est = LOSVDErrorEstimator(fit, cfg)
+
+    xl = est.xl
+    n = len(xl)
+    # Bootstrap replicates deliberately centered far from the MAP LOSVD, so
+    # any leakage of a bootstrap-derived value into the "center" fields
+    # would be caught.
+    rng = np.random.default_rng(0)
+    b_samples = np.abs(rng.normal(loc=est.b_map * 3.0 + 1.0, scale=0.1, size=(5, n)))
+
+    bootstrap_result = {
+        "b_samples": b_samples,
+        "b_err": np.std(b_samples, axis=0, ddof=1),
+        "b_lo": np.percentile(b_samples, 16, axis=0),
+        "b_hi": np.percentile(b_samples, 84, axis=0),
+        "gh_err": {"gh_vherm": 1.0, "gh_sherm": 1.0, "gh_h3": 0.01, "gh_h4": 0.01},
+        "gh_lo": {}, "gh_hi": {},
+        "gh_med": {"gh_vherm": 9999.0, "gh_sherm": 9999.0, "gh_h3": 9.0, "gh_h4": 9.0},
+        "moments_samples": {
+            "v": np.full(5, 9999.0), "sigma": np.full(5, 9999.0),
+        },
+        "moments_err": {"v": 1.0, "sigma": 1.0},
+        "moments_lo": {}, "moments_hi": {},
+        "n_success": 5, "n_failed": 0, "confidence": 0.68,
+    }
+
+    summary = est.summarize(bootstrap_result=bootstrap_result)
+
+    assert np.array_equal(summary["b_center_recommended"], est.b_map)
+    assert summary["gh_center_recommended"] is summary["gh_map"]
+    mv_map, ms_map = _losvd_moments(est.xl, est.b_map)
+    assert summary["moments_center_recommended"]["v"] == pytest.approx(mv_map)
+    assert summary["moments_center_recommended"]["sigma"] == pytest.approx(ms_map)
+    # The spread fields, in contrast, SHOULD come straight from the
+    # (deliberately weird) bootstrap_result -- summarize() isn't supposed
+    # to touch those.
+    assert summary["gh_err_recommended"]["gh_sherm"] == 1.0

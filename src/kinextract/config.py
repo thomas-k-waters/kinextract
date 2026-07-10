@@ -137,6 +137,7 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
     "fit_global_amp": ("LOSVD/template", "Fit an overall multiplicative amplitude on the model spectrum. Not compatible with fit_continuum=True."),
     "continuum_poly_mode": ("LOSVD/template", "'none', 'additive', or 'multiplicative' low-order polynomial continuum correction (pre-normalised mode only)."),
     "continuum_poly_bound": ("LOSVD/template", "Bound on the fitted continuum_poly_mode coefficient."),
+    "template_w_bounds": ("LOSVD/template", "Per-element template-weight bounds. None = ordinary non-negative (1e-5, 1.0); set e.g. (-1.0, 1.0) when fitting with reduce_templates_svd's eigen-templates, which need mixed-sign weights."),
 
     # ── Instrumental LSF matching ─────────────────────────────────────────
     "data_fwhm_A": ("Instrumental LSF", "Instrumental line-spread-function FWHM (A) of the galaxy spectrum. Must be set together with template_fwhm_A to enable LSF matching; leave both None (default) to assume the two are already matched. See the class docstring's 'Known limitations' section for validated recovery behavior when the true sigma is comparable to this LSF."),
@@ -621,6 +622,14 @@ class FitConfig:
     fit_global_amp: bool = False
     continuum_poly_mode: str = "none"  # "none", "additive", or "multiplicative"
     continuum_poly_bound: float = 0.1
+    # Per-element bounds for template-mixture weights. None (default) keeps the
+    # ordinary non-negative convention ((1e-5, 1.0)) appropriate for ordinary,
+    # physical per-star templates. Set to something like (-1.0, 1.0) when
+    # fitting with kinextract.templates.reduce_templates_svd's eigen-templates,
+    # which are not physical flux spectra individually and generically need
+    # mixed-sign weights to reconstruct a real template mixture -- see that
+    # function's docstring.
+    template_w_bounds: Optional[tuple] = None
 
     # ── Instrumental LSF matching ────────────────────────────────────────────
     # Both fields must be set together to enable LSF matching; the sharper

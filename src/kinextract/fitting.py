@@ -1180,7 +1180,22 @@ def _fit_map_sigl0_recenter(
     Returns
     -------
     scipy.optimize.OptimizeResult
-        The final iteration's fit result.
+        The best round's fit result (see the divergence-guard note below --
+        not necessarily the final round's).
+
+    Notes
+    -----
+    **Divergence guard.** The fixed-point iteration is not guaranteed to
+    converge monotonically on every chi2(xlam) curve: on an unusually flat
+    one (confirmed on a clean, oversimplified synthetic mock -- an
+    under-constrained problem for regularization selection in general, see
+    ``examples/notebooks/01_basic_mock_fit.ipynb``), each round's recovered
+    sigma can land *farther* from that round's ``sigl0`` input than the
+    previous round did, instead of converging -- a positive feedback loop
+    rather than a fixed point. This function tracks the smallest
+    ``|sigl0_input - recovered_sigma|`` gap seen across all rounds and
+    reverts to that round's fit/``sigl0``/``xlam`` if the final round's gap
+    is worse, rather than returning a compounded-drift result.
     """
     if bool(getattr(cfg, "joint_recenter_v", True)):
         st.v_center = estimate_velocity_xcorr(st)
@@ -1189,17 +1204,35 @@ def _fit_map_sigl0_recenter(
     tol = float(getattr(cfg, "joint_sigl0_tol", 2.0))
 
     res = None
+    best = None  # (gap, res, xlam, sigl0_input)
+    last_gap = None
     for _ in range(n_iter):
+        sigl0_in = float(st.sigl0)
         res = fit_state_map_with_optional_clean(st, cfg, a0, bounds)
         gp, b, *_ = evaluate_model_gp(res.x, st)
         gh = fit_losvd_gauss_hermite(st.xl, b, fit_h3h4=True)
         recovered_sigma = float(gh["sherm"])
         if not np.isfinite(recovered_sigma) or recovered_sigma <= 0:
             break
-        reached = abs(st.sigl0 - recovered_sigma) <= tol
+        gap = abs(sigl0_in - recovered_sigma)
+        if best is None or gap < best[0]:
+            best = (gap, res, float(st.xlam), sigl0_in)
+        reached = gap <= tol
         st.sigl0 = recovered_sigma
+        last_gap = gap
         if reached:
             break
+
+    if best is not None and last_gap is not None and best[0] < last_gap:
+        gap_best, res, xlam_best, sigl0_best = best
+        st.xlam = xlam_best
+        st.sigl0 = sigl0_best
+        log(
+            f"sigl0 fixed-point iteration diverged (final gap {last_gap:.2f} > "
+            f"best gap {gap_best:.2f} km/s); reverting to the round with the "
+            f"smallest |sigl0 - recovered_sigma| (sigl0={sigl0_best:.2f}, "
+            f"xlam={xlam_best:.4g})"
+        )
     return res
 
 
@@ -1378,7 +1411,8 @@ def run_spectral_fit(
     )
     log(
         f"fit_continuum={cfg.fit_continuum} "
-        f"prenorm={not cfg.fit_continuum}"
+        f"prenorm={not cfg.fit_continuum} "
+        f"joint_prenorm={cfg.joint_prenorm}"
     )
 
     with Timer("build FitState"):
@@ -1402,7 +1436,14 @@ def run_spectral_fit(
         # slowing down every default pre-normalized fit package-wide.
         from .joint import run_joint_fit
 
-        log("Continuum method: joint (P-spline continuum-in-the-model)")
+        if cfg.fit_continuum:
+            log("Continuum method: joint (P-spline continuum co-fit in the model)")
+        else:
+            log(
+                "Continuum method: none (prenormalized; joint_prenorm=True uses "
+                "the joint engine's sigl0/v_center self-convergence, but the "
+                "continuum stays fixed at 1.0, not co-fit)"
+            )
         outputs = run_joint_fit(st, cfg, write_outputs=write_outputs, outdir=cfg.outdir, prefix=prefix)
         res = outputs["result"]
         if not res.success:
@@ -1426,7 +1467,10 @@ def run_spectral_fit(
             "gal_file": gal_file,
         }
 
-    a0, xlb, xub = build_initial_guess_nonparam(st, cfg.coff, cfg.coff2)
+    a0, xlb, xub = build_initial_guess_nonparam(
+        st, cfg.coff, cfg.coff2,
+        w_bounds=cfg.template_w_bounds if cfg.template_w_bounds is not None else (1e-5, 1.0),
+    )
     bounds = list(zip(xlb, xub))
 
     res = _fit_map_sigl0_recenter(st, cfg, a0, bounds)

@@ -70,6 +70,7 @@ import numpy as np
 from scipy.interpolate import BSpline
 from scipy.optimize import minimize
 
+from ._utils import log
 from .fitting import _discrepancy_principle_search, compute_losvd_n_peaks, compute_losvd_roughness
 from .io import write_fitlov_outputs_from_model
 from .losvd import fit_losvd_gauss_hermite
@@ -521,6 +522,7 @@ def fit_joint(
     use_jax: bool = True,
     auto_recenter_v: bool = False,
     fit_continuum: bool = True,
+    w_bounds: tuple = (1e-5, 1.0),
 ):
     """Run the joint LOSVD + template + continuum-P-spline MAP fit.
 
@@ -567,6 +569,11 @@ def fit_joint(
         Use this for pre-normalized input, where the data's own continuum
         has already been divided out and there is nothing genuine for a
         free P-spline to fit.
+    w_bounds : tuple, optional
+        Per-element template-weight bounds, passed through to
+        :func:`build_initial_guess`. Default non-negative; widen to allow
+        negative values (e.g. ``(-1.0, 1.0)``) when fitting with
+        :func:`kinextract.templates.reduce_templates_svd` eigen-templates.
 
     Returns
     -------
@@ -579,7 +586,7 @@ def fit_joint(
         st = dataclasses.replace(st, v_center=estimate_velocity_xcorr(st))
 
     x0, bounds, xscale, design = build_initial_guess(
-        st, n_interior_knots, degree, fit_continuum=fit_continuum)
+        st, n_interior_knots, degree, fit_continuum=fit_continuum, w_bounds=w_bounds)
     t_norm, _template_scale = normalize_template_matrix(st)
     u0 = x0 / xscale
     u_bounds = [(lo / s if np.isfinite(lo) else lo, hi / s if np.isfinite(hi) else hi)
@@ -635,6 +642,7 @@ def fit_joint_auto_xlam(
     fit_continuum: bool = True,
     xlam_criterion: str = "chi2",
     xlam_discrepancy_nsigma: float = 1.0,
+    w_bounds: tuple = (1e-5, 1.0),
 ):
     """Automatically select the joint model's LOSVD regularization strength.
 
@@ -725,6 +733,7 @@ def fit_joint_auto_xlam(
             xlam_cont=xlam_cont, cont_diff_order=cont_diff_order,
             maxiter=maxiter, ftol=ftol, maxfun=maxfun, use_jax=use_jax,
             fit_continuum=fit_continuum, nsigma=xlam_discrepancy_nsigma,
+            w_bounds=w_bounds,
         )
 
     records = []
@@ -736,6 +745,7 @@ def fit_joint_auto_xlam(
             st_try, n_interior_knots, degree, xlam_cont=xlam_cont,
             cont_diff_order=cont_diff_order, maxiter=maxiter, ftol=ftol,
             maxfun=maxfun, use_jax=use_jax, auto_recenter_v=False,
+            w_bounds=w_bounds,
             fit_continuum=fit_continuum,
         )
         t_norm, _ = normalize_template_matrix(st_try)
@@ -820,6 +830,7 @@ def _fit_joint_discrepancy_xlam(
     xlam_cont: float, cont_diff_order: int,
     maxiter: int, ftol: float, maxfun: int, use_jax: bool,
     fit_continuum: bool, nsigma: float,
+    w_bounds: tuple = (1e-5, 1.0),
 ):
     """Joint-model discrepancy-principle xlam selector -- the
     ``xlam_criterion="discrepancy"`` branch of :func:`fit_joint_auto_xlam`,
@@ -850,7 +861,7 @@ def _fit_joint_discrepancy_xlam(
             st_try, n_interior_knots, degree, xlam_cont=xlam_cont,
             cont_diff_order=cont_diff_order, maxiter=maxiter, ftol=ftol,
             maxfun=maxfun, use_jax=use_jax, auto_recenter_v=False,
-            fit_continuum=fit_continuum,
+            fit_continuum=fit_continuum, w_bounds=w_bounds,
         )
         t_norm, _ = normalize_template_matrix(st_try)
         gp, b, w, cont_coeffs, cont = evaluate_model_gp_joint(result.x, st_try, design, t_norm)
@@ -894,6 +905,7 @@ def fit_joint_auto_xlam_sigl0(
     fit_continuum: bool = True,
     xlam_criterion: str = "chi2",
     xlam_discrepancy_nsigma: float = 1.0,
+    w_bounds: tuple = (1e-5, 1.0),
 ):
     """Self-consistent fixed-point refinement of the wing-taper's ``sigl0``.
 
@@ -964,21 +976,40 @@ def fit_joint_auto_xlam_sigl0(
     Returns
     -------
     result : scipy.optimize.OptimizeResult
-        The final iteration's fit (physical units).
+        The best round's fit (physical units) -- see the divergence-guard
+        note below, not necessarily the final round's.
     design : ndarray
-        Continuum B-spline design matrix for the final fit.
+        Continuum B-spline design matrix for the returned fit.
     best_xlam : float
-        The final iteration's selected xlam.
+        The returned fit's selected xlam.
     sigl0_trace : list of float
         ``[sigl0_init, sigl0_after_iter_1, sigl0_after_iter_2, ...]`` --
         the sequence of sigl0 values used/produced, for diagnosing
         convergence.
+
+    Notes
+    -----
+    **Divergence guard.** This iteration is not guaranteed to converge
+    monotonically on every chi2(xlam) curve: on an unusually flat one
+    (confirmed on a clean, oversimplified synthetic mock -- an
+    under-constrained problem for regularization selection in general, see
+    ``examples/notebooks/01_basic_mock_fit.ipynb`` and
+    :func:`kinextract.fitting._fit_map_sigl0_recenter`, the shipped-path
+    analogue of this function), each round's recovered sigma can land
+    *farther* from that round's ``sigl0`` input than the previous round
+    did -- a positive feedback loop, not a fixed point. This function
+    tracks the smallest ``|sigl0 - recovered_sigma|`` gap seen across all
+    rounds and returns that round's fit instead of the final round's if
+    the final round's gap is worse.
     """
     sigl0 = float(sigl0_init)
     sigl0_trace = [sigl0]
     result = design = best_xlam = None
+    best = None  # (gap, result, design, best_xlam, sigl0_input)
+    last_gap = None
 
     for _ in range(max(1, n_sigl0_iter)):
+        sigl0_in = sigl0
         st_try = dataclasses.replace(st, sigl0=sigl0)
         result, design, best_xlam, _records = fit_joint_auto_xlam(
             st_try, n_interior_knots, degree, xlam_grid=xlam_grid,
@@ -989,6 +1020,7 @@ def fit_joint_auto_xlam_sigl0(
             maxiter=maxiter, ftol=ftol, maxfun=maxfun, use_jax=use_jax,
             fit_continuum=fit_continuum,
             xlam_criterion=xlam_criterion, xlam_discrepancy_nsigma=xlam_discrepancy_nsigma,
+            w_bounds=w_bounds,
         )
         t_norm, _ = normalize_template_matrix(st_try)
         _, b, *_ = evaluate_model_gp_joint(result.x, st_try, design, t_norm)
@@ -996,9 +1028,23 @@ def fit_joint_auto_xlam_sigl0(
         recovered_sigma = float(gh["sherm"])
         sigl0_trace.append(recovered_sigma)
 
-        if abs(sigl0 - recovered_sigma) <= sigl0_tol:
+        gap = abs(sigl0_in - recovered_sigma)
+        if best is None or gap < best[0]:
+            best = (gap, result, design, best_xlam, sigl0_in)
+        last_gap = gap
+
+        if gap <= sigl0_tol:
             break
         sigl0 = recovered_sigma
+
+    if best is not None and last_gap is not None and best[0] < last_gap:
+        gap_best, result, design, best_xlam, sigl0_best = best
+        log(
+            f"joint sigl0 fixed-point iteration diverged (final gap "
+            f"{last_gap:.2f} > best gap {gap_best:.2f} km/s); reverting to "
+            f"the round with the smallest |sigl0 - recovered_sigma| "
+            f"(sigl0={sigl0_best:.2f}, xlam={best_xlam:.4g})"
+        )
 
     return result, design, best_xlam, sigl0_trace
 
@@ -1078,6 +1124,7 @@ def run_joint_fit(st: FitState, cfg, write_outputs: bool = False, outdir: str = 
         fit_continuum=cfg.fit_continuum,
         xlam_criterion=getattr(cfg, "xlam_criterion", "discrepancy"),
         xlam_discrepancy_nsigma=getattr(cfg, "xlam_discrepancy_nsigma", 0.3),
+        w_bounds=cfg.template_w_bounds if getattr(cfg, "template_w_bounds", None) is not None else (1e-5, 1.0),
     )
 
     t_norm, _ = normalize_template_matrix(st)
