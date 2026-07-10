@@ -141,3 +141,28 @@ sigma~30-160 regime (the real bar the user set: does truth actually fall
 within the *reported* error bars, not just "is the point estimate close");
 (2) rebuilding notebook 02 around E-MILES; (3) the kinextract-vs-pPXF
 comparison notebook. Will return to sigma>=250/multi-start if time remains.
+
+### CORRECTION (user-flagged, verified): sigma~350 IS the real NGC 4751 target after all
+
+The user corrected my checkpoint-1 recalibration: Gultekin et al. (2011) reports
+sigma=349 km/s for NGC 4751 (used for the 1.4e9 Msun M-sigma BH mass estimate).
+I verified this independently via web search, and further checked WISDOM Project
+XXVI (Ruffa/Davis et al., arxiv 2404.11260): Campbell et al. (2014) report
+sigma_0 = 357.6+/-17.7 km/s, Rusli et al. (2013) report sigma_e = 355.4+/-13.6
+km/s -- THREE independent studies agree on ~349-358 km/s, and Campbell's is
+explicitly the *central* (not large-aperture) value. So this is genuinely
+NGC 4751's real, resolved, near-nuclear stellar velocity dispersion, not a
+large-aperture integrated artifact as I'd wrongly assumed.
+
+This means my checkpoint-1 "recalibration" was wrong, and the local
+`misc/pallmc.out` (42.7-69.5 km/s across 40 bins) does NOT reflect this
+galaxy's true kinematics -- most likely explanation, not yet confirmed: the
+*legacy Fortran pipeline itself* suffered the same kind of high-sigma
+degeneracy/bias this stress test has been characterizing in kinextract, and
+under-recovered a badly biased, too-low sigma for this exact reason. If true,
+this is directly why the user needs kinextract's high-sigma regime to be
+solid -- not a hypothetical edge case, but the actual, current, unresolved
+problem with their real target galaxy's real data.
+
+**Re-prioritizing: sigma~250-350 is now the primary goal, not secondary.**
+Reopening the multi-start-optimization investigation immediately.
