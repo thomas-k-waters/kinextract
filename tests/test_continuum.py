@@ -1,4 +1,4 @@
-"""Tests for ALS continuum utilities (continuum.py).
+"""Tests for standalone continuum utilities (continuum.py).
 
 Covers standalone mathematical properties — no FitState needed.
 """
@@ -9,7 +9,6 @@ import pytest
 
 from kinextract.continuum import (
     asymmetric_least_squares_continuum,
-    fit_als_target,
     grow_boolean_mask,
     grow_boolean_mask_A,
     robust_sigma,

@@ -1,16 +1,15 @@
 """Tests for the joint continuum-in-the-model fit (kinextract.joint).
 
-See kinextract/joint.py's module docstring for the motivation: the shipped
-ALS/polynomial continuum's hyperparameter search was found to fall back to
-an oversmoothed continuum on real data
-(examples/notebooks/03_real_data_muse.ipynb), a structural issue with
-fitting the continuum as a separate sub-problem rather than a bug specific
-to either continuum family. The joint method folds a continuum directly
-into the joint LOSVD/template optimization instead, using a penalized
-B-spline (P-spline) basis -- an earlier raw-polynomial prototype was found
-(via a dedicated stress test) to lack the flexibility to match realistic
-continuum shapes, and to suffer from Vandermonde ill-conditioning at higher
-order, motivating the switch.
+See kinextract/joint.py's module docstring for the motivation: the retired
+ALS/polynomial continuum-cofitting's hyperparameter search was found to
+fall back to an oversmoothed continuum on real data, a structural issue
+with fitting the continuum as a separate sub-problem rather than a bug
+specific to either continuum family. The joint method folds a continuum
+directly into the joint LOSVD/template optimization instead, using a
+penalized B-spline (P-spline) basis -- an earlier raw-polynomial prototype
+was found (via a dedicated stress test) to lack the flexibility to match
+realistic continuum shapes, and to suffer from Vandermonde ill-conditioning
+at higher order, motivating the switch.
 """
 from __future__ import annotations
 
@@ -57,7 +56,7 @@ def real_muse_state():
         wavefitmin=8400.0, wavefitmax=8750.0,
         zgal=0.001556,
         losvd_vmin=-300.0, losvd_vmax=300.0,
-        fit_als_continuum=False,  # not using the shipped continuum machinery
+        fit_continuum=False,  # not using the shipped continuum machinery
         use_spectrum_errors=False,
         xlam=10000.0, xlam_auto=False,
         sigl=100.0, clean=False,
@@ -258,9 +257,8 @@ def test_build_initial_guess_produces_finite_sane_guess(real_muse_state):
 
 
 def test_run_spectral_fit_dispatches_to_joint_by_default():
-    """continuum_method defaults to "joint": run_spectral_fit(cfg) with
-    fit_als_continuum=True should route through kinextract.joint.run_joint_fit
-    rather than the shipped ALS/polynomial outer loop, and return an
+    """fit_continuum=True should route through kinextract.joint.run_joint_fit
+    (the only continuum-cofitting method), and return an
     "outputs" dict with the same keys the shipped path produces (so
     downstream consumers that only look at "outputs" -- plotting, etc. --
     don't need to know which continuum method actually ran), with neutral
@@ -282,13 +280,12 @@ def test_run_spectral_fit_dispatches_to_joint_by_default():
         wavefitmin=8400.0, wavefitmax=8750.0,
         zgal=0.001556,
         losvd_vmin=-300.0, losvd_vmax=300.0,
-        fit_als_continuum=True,  # continuum_method left at its "joint" default
+        fit_continuum=True,
         use_spectrum_errors=False,
         sigl=100.0, clean=False,
         joint_n_sigl0_iter=1,  # keep the test fast; convergence itself is covered elsewhere
         map_maxiter=2000,
     )
-    assert cfg.continuum_method == "joint"
 
     fit = run_spectral_fit(cfg, gal_file=str(SPEC_FILE), gal_errors=ferr)
 
@@ -320,10 +317,9 @@ def test_run_spectral_fit_dispatches_to_joint_by_default():
 
 
 def test_prenormalized_mode_defaults_to_shipped_path_not_joint():
-    """fit_als_continuum=False (pre-normalized mode) must NOT go through
-    kinextract.joint by default, even though continuum_method="joint" is
-    itself the default -- joint's sigl0 fixed-point iteration costs up to
-    n_sigl0_iter * len(xlam_auto_grid) full optimizations per fit, so
+    """fit_continuum=False (pre-normalized mode) must NOT go through
+    kinextract.joint by default -- joint's sigl0 fixed-point iteration
+    costs up to n_sigl0_iter * len(xlam_auto_grid) full optimizations per fit, so
     silently applying it to every ordinary pre-normalized fit would be an
     unrequested ~15x slowdown. Confirmed here via the "outputs" dict shape:
     the shipped path's coff/coff2/A are real fitted values (not the joint
@@ -347,8 +343,7 @@ def test_prenormalized_mode_defaults_to_shipped_path_not_joint():
         sigl=100.0, clean=False,
         map_maxiter=2000,
     )
-    assert cfg.fit_als_continuum is False
-    assert cfg.continuum_method == "joint"
+    assert cfg.fit_continuum is False
     assert cfg.joint_prenorm is False
 
     fit = run_spectral_fit(cfg, gal_file=str(SPEC_FILE), gal_errors=ferr)
@@ -358,7 +353,7 @@ def test_prenormalized_mode_defaults_to_shipped_path_not_joint():
 
 
 def test_joint_prenorm_opt_in_fixes_continuum_at_one():
-    """cfg.joint_prenorm=True routes a pre-normalized (fit_als_continuum=False)
+    """cfg.joint_prenorm=True routes a pre-normalized (fit_continuum=False)
     fit through kinextract.joint anyway, for its v_center/sigl0/xlam-selection
     improvements -- with the continuum fixed at 1.0 rather than co-fit, since
     pre-normalized input has no genuine continuum left to fit.
@@ -383,7 +378,7 @@ def test_joint_prenorm_opt_in_fixes_continuum_at_one():
         joint_n_sigl0_iter=1,  # keep the test fast
         map_maxiter=2000,
     )
-    assert cfg.fit_als_continuum is False
+    assert cfg.fit_continuum is False
 
     fit = run_spectral_fit(cfg, gal_file=str(SPEC_FILE), gal_errors=ferr)
     assert "sigl0_trace" in fit["outputs"], "joint_prenorm=True should route through kinextract.joint"
@@ -418,7 +413,7 @@ def test_residual_bootstrap_works_on_joint_mode_fit():
         wavefitmin=8400.0, wavefitmax=8750.0,
         zgal=0.001556,
         losvd_vmin=-300.0, losvd_vmax=300.0,
-        fit_als_continuum=True,  # continuum_method left at its "joint" default
+        fit_continuum=True,
         use_spectrum_errors=False,
         sigl=100.0, clean=False,
         joint_n_sigl0_iter=1,  # keep the fixture fit fast

@@ -56,8 +56,8 @@ def read_norm_spectrum(path: str) -> dict:
 
     ``.norm`` files store a continuum-normalized spectrum (flux divided by
     an independently-derived continuum estimate) alongside the original
-    un-normalized flux and continuum, so the LOSVD fit can skip the
-    ALS-continuum co-fit and instead work directly with normalized flux
+    un-normalized flux and continuum, so the LOSVD fit can skip
+    continuum-cofitting and instead work directly with normalized flux
     (``prenormalized=True`` in :class:`kinextract.state.FitState`).
 
     Parameters
@@ -555,13 +555,13 @@ def write_fitlov_outputs_from_model(
     # Write .ascii file (per-pixel data for plotting with pspecfit).
     # Format: wavelength  data  model  continuum  template  ierr
     # Columns 1-3: standard spectrum/model vectors.
-    # Column 4: ALS continuum (drawn in green by pspecfit as the baseline).
+    # Column 4: fitted continuum (drawn in green by pspecfit as the baseline).
     # Column 5: template-only spectrum (model without continuum scaling).
     # Column 6: integer pixel mask (0=good, 1=masked).
     # pspecfit.f reads: read(2,*) x1,x2,x3,x4,x5,i6  (5 reals + 1 integer).
     with open(ascii_path, "w") as f:
         for i in range(st.iskip, st.npix - st.iskip):
-            tt_out = tt[i] * cont[i] if st.fit_als_continuum else tt[i]
+            tt_out = tt[i] * cont[i] if st.fit_continuum else tt[i]
             f.write(
                 f" {st.x[i]:12.5f}  {st.g[i]:15.8E}  {gp[i]:15.8E}"
                 f"  {cont[i]:15.8E}  {tt_out:15.8E} {ierr[i]:1d}\n"

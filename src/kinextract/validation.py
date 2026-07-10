@@ -17,6 +17,15 @@ analytic :func:`kinextract.errors.bias_corrected_losvd`, it makes no
 linearization assumption -- it just directly measures what the real
 pipeline does to a spectrum with a known answer.
 
+:func:`assess_recovery_bias` only supports pre-normalized-mode fits
+(``cfg.fit_continuum=False`` and ``cfg.joint_prenorm=False``): it raises
+``NotImplementedError`` for continuum-cofit fits, since
+``build_matched_mock``/``evaluate_model_gp`` don't understand a joint
+fit's ``[LOSVD, template weights, continuum P-spline]`` parameter
+layout. Pre-normalize first (see
+:func:`kinextract.continuum.asymmetric_least_squares_continuum` and
+``examples/notebooks/06_prenormalized_workflow.ipynb``).
+
 :func:`correct_recovered_losvd` then interpolates that empirical bias
 table at a real fit's own recovered (V, sigma) to produce a
 bias-corrected point estimate with an inflated uncertainty; this
@@ -33,7 +42,6 @@ from scipy.interpolate import griddata
 
 from ._utils import log
 from .config import FitConfig
-from .continuum import init_als_continuum
 from .errors import _fit_state_to_fields
 from .fitting import fit_state_map_with_optional_clean
 from .losvd import fit_losvd_gauss_hermite
@@ -113,18 +121,18 @@ def assess_recovery_bias(
         `n_seeds` if some replicates fail). Grid points where every
         replicate failed are omitted (logged, not raised).
     """
-    joint_active = getattr(cfg, "continuum_method", "als") == "joint" and (
-        cfg.fit_als_continuum or getattr(cfg, "joint_prenorm", False)
-    )
+    joint_active = cfg.fit_continuum or getattr(cfg, "joint_prenorm", False)
     if joint_active:
         raise NotImplementedError(
-            "assess_recovery_bias does not yet support fits made with "
-            "continuum_method='joint' (kinextract.joint): fit['a_map']'s "
+            "assess_recovery_bias only supports pre-normalized-mode fits "
+            "(cfg.fit_continuum=False, cfg.joint_prenorm=False): fit['a_map']'s "
             "layout -- [LOSVD bins, template weights, continuum P-spline "
-            "coefficients] -- is not what build_matched_mock/evaluate_model_gp "
-            "expect, so mock generation would silently use the wrong model. "
-            "Use cfg.continuum_method='als' or 'polynomial' for recovery-bias "
-            "validation until joint-mode support is added."
+            "coefficients] for a joint fit -- is not what "
+            "build_matched_mock/evaluate_model_gp expect, so mock generation "
+            "would silently use the wrong model. Pre-normalize the spectrum "
+            "first (see kinextract.continuum.asymmetric_least_squares_continuum "
+            "and examples/notebooks/06_prenormalized_workflow.ipynb) and fit "
+            "with fit_continuum=False before calling assess_recovery_bias."
         )
 
     st_ref = fit["state"]
@@ -155,9 +163,13 @@ def assess_recovery_bias(
                 st.g = g_mock
                 st.gerr = base_gerr.copy()
                 st.ntot = 0
-                st.als_records = []
-                if st.fit_als_continuum:
-                    init_als_continuum(st, cfg, templates=getattr(st, "t", None))
+                # Zero-centered regardless of st_ref.v_center: a dedicated
+                # validation sweep found data-driven recentering (now the
+                # default for a real single fit via
+                # kinextract.fitting._fit_map_sigl0_recenter) introduces
+                # *worse* bias than a fixed zero point across this grid --
+                # see test_assess_recovery_bias_uses_zero_centered_map_objective.
+                st.v_center = 0.0
 
                 try:
                     res = fit_state_map_with_optional_clean(st, cfg, a_fit.copy(), bounds)

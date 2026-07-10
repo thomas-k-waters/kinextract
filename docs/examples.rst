@@ -16,8 +16,9 @@ templates used by several of these live alongside them in
      - Full pipeline on a normalized synthetic spectrum; all key outputs;
        ``FitConfig.describe()`` for config introspection
    * - ``02_realistic_mock_fit.ipynb``
-     - Fitting a raw (non-normalized) spectrum using the ALS/polynomial
-       continuum fitters, plus Laplace + bootstrap uncertainty estimation
+     - Fitting a raw (non-normalized) spectrum with the joint
+       continuum-cofitting method (``fit_continuum=True``), plus Laplace +
+       bootstrap uncertainty estimation
    * - ``03_real_data_muse.ipynb``
      - Real NGC 5102 MUSE central bin -- bundled data, runs out of the box,
        plus error estimation
@@ -26,6 +27,11 @@ templates used by several of these live alongside them in
    * - ``05_recovery_validation.ipynb``
      - Measuring empirical recovery bias with ``assess_recovery_bias``/
        ``correct_recovered_losvd`` on matched mock spectra
+   * - ``06_prenormalized_workflow.ipynb``
+     - Manually pre-normalizing a raw spectrum with the standalone ALS
+       utility (``kinextract.continuum.asymmetric_least_squares_continuum``),
+       then fitting the resulting ``.norm`` spectrum with
+       ``fit_continuum=False`` (joint mode off)
 
 Supplementary notebooks (``S0_losvd_recovery_diagnostics.ipynb``,
 ``S1_regularization_demo.ipynb``) dig into non-obvious tool assumptions --

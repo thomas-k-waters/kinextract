@@ -29,9 +29,10 @@ class FitState:
     A single `FitState` instance is built once per spatial bin (spaxel or
     aperture) being fit and is threaded through every stage of the
     pipeline: the chi-squared objective function, the roughness-penalty
-    regularization, the ALS continuum co-fit, and the final output
-    writers. It bundles the observed spectrum, the stellar/SSP template
-    matrix, the non-parametric LOSVD velocity grid, and precomputed index
+    regularization, the continuum co-fit (see :mod:`kinextract.joint`),
+    and the final output writers. It bundles the observed spectrum, the
+    stellar/SSP template matrix, the non-parametric LOSVD velocity grid,
+    and precomputed index
     maps that make the template-LOSVD convolution fast to evaluate
     repeatedly inside the optimizer.
 
@@ -117,7 +118,7 @@ class FitState:
         interpreted according to `icoff`.
     prenormalized : bool
         True if the input spectrum was already continuum-normalized on
-        disk (a ``.norm`` file), in which case the ALS continuum co-fit is
+        disk (a ``.norm`` file), in which case the continuum co-fit is
         skipped.
     fortran_template_mixture : bool
         True to reproduce the original Fortran convention for how
@@ -156,18 +157,14 @@ class FitState:
         and pixels, used as a floor/inflation term for effective flux
         errors in the fit.
     continuum_mult : ndarray or None, shape (npix,)
-        Multiplicative continuum model (from the ALS baseline co-fit)
-        applied to the template-only model spectrum to reproduce the
-        observed continuum shape.
-    continuum_mask, continuum_mask_init : ndarray or None
-        Boolean masks marking pixels treated as continuum (vs.
-        absorption-dominated) during the ALS baseline fit;
-        `continuum_mask_init` freezes the mask determined at
-        initialization when `als_abs_clean_init_only` is enabled.
-    fit_als_continuum : bool
-        True to co-fit an asymmetric-least-squares (ALS) continuum
-        baseline alongside the LOSVD and template weights, rather than
-        relying on a pre-normalized input spectrum.
+        Multiplicative continuum model (from the joint P-spline continuum
+        co-fit, see :mod:`kinextract.joint`) applied to the template-only
+        model spectrum to reproduce the observed continuum shape. Left at
+        all-ones when `fit_continuum` is False (pre-normalized mode).
+    fit_continuum : bool
+        True to co-fit a continuum baseline (via :mod:`kinextract.joint`)
+        alongside the LOSVD and template weights, rather than relying on a
+        pre-normalized input spectrum.
     v_center : float
         Velocity (km/s) to recenter the LOSVD wing-taper smoothness
         penalty on (see :func:`kinextract.numerics._compute_smoothness`).
@@ -217,15 +214,9 @@ class FitState:
     ip_mask: Optional[np.ndarray] = None
     t_err: Optional[np.ndarray] = None          # template error matrix (npix × nt)
     f_template: float = 0.0                    # pooled median fractional template error
-    als_caii_refine_shift_A: float = 0.0       # Ca II measured wavelength shift (masking only)
     emission_pre_mask: Optional[np.ndarray] = None   # pixels pre-masked for emission lines
     continuum_mult: Optional[np.ndarray] = None
-    continuum_mask: Optional[np.ndarray] = None
-    continuum_mask_init: Optional[np.ndarray] = None   # absorption mask from init (for als_abs_clean_init_only)
-    fit_als_continuum: bool = False
-    als_lam_current: Optional[float] = None
-    als_p_current: Optional[float] = None
-    als_records: list = field(default_factory=list)
+    fit_continuum: bool = False
     continuum_poly_mode: str = "none"
     continuum_poly_x: Optional[np.ndarray] = None
     continuum_poly_bound: float = 0.1

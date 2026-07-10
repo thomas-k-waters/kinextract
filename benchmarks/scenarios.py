@@ -118,9 +118,18 @@ def build_scenario_grid() -> list[Scenario]:
     return scenarios
 
 
-def scenario_to_fitconfig(scenario: Scenario, continuum_mode: Literal["als", "poly_amp", "none"],
-                           outdir: str, template_list_file: str, template_dir: str) -> FitConfig:
-    """Translate one Scenario + continuum_mode into a concrete FitConfig."""
+def scenario_to_fitconfig(scenario: Scenario, continuum_mode: Literal["joint", "poly_amp", "none"],
+                           outdir: str, template_list_file: str, template_dir: str,
+                           xlam_criterion: str = "chi2",
+                           xlam_discrepancy_nsigma: float = 1.0) -> FitConfig:
+    """Translate one Scenario + continuum_mode into a concrete FitConfig.
+
+    `xlam_criterion`/`xlam_discrepancy_nsigma` default to the package
+    default ("chi2") so the existing continuum-mode comparison suite
+    (run_suite.py/report.py) is unaffected; passed through explicitly by
+    calibrate_xlam.py's xlam-method comparison, which holds continuum_mode
+    fixed at "none" instead and varies these two.
+    """
     inst = scenario.instrument
     sigma_true = scenario.sigma_true
     sigl = scenario.sigl_override if scenario.sigl_override is not None else sigma_true
@@ -144,7 +153,8 @@ def scenario_to_fitconfig(scenario: Scenario, continuum_mode: Literal["als", "po
         wavemin_full=inst.wavemin_full, step=inst.step,
         wavefitmin=wavefitmin, wavefitmax=wavefitmax, zgal=0.0,
         sigl=sigl, losvd_vmin=-vgrid_half, losvd_vmax=vgrid_half,
-        xlam_auto=True, xlam_criterion="chi2", xlam_chi2_tolerance=0.02,
+        xlam_auto=True, xlam_criterion=xlam_criterion, xlam_chi2_tolerance=0.02,
+        xlam_discrepancy_nsigma=xlam_discrepancy_nsigma,
         xlam_auto_grid=xlam_auto_grid,
         xlam_max_peaks=scenario.xlam_max_peaks_override or 1,
         clean=False, use_spectrum_errors=True,
@@ -152,12 +162,12 @@ def scenario_to_fitconfig(scenario: Scenario, continuum_mode: Literal["als", "po
         mask_emission_lines_in_fit=True,
     )
 
-    if continuum_mode == "als":
-        mode_kwargs = dict(fit_als_continuum=True, fit_global_amp=False, continuum_poly_mode="none")
+    if continuum_mode == "joint":
+        mode_kwargs = dict(fit_continuum=True, fit_global_amp=False, continuum_poly_mode="none")
     elif continuum_mode == "poly_amp":
-        mode_kwargs = dict(fit_als_continuum=False, fit_global_amp=True,
+        mode_kwargs = dict(fit_continuum=False, fit_global_amp=True,
                             continuum_poly_mode="multiplicative", continuum_poly_bound=0.1)
     else:  # "none" -- oracle/ceiling case, mock is pre-divided by true continuum by the caller
-        mode_kwargs = dict(fit_als_continuum=False, fit_global_amp=False, continuum_poly_mode="none")
+        mode_kwargs = dict(fit_continuum=False, fit_global_amp=False, continuum_poly_mode="none")
 
     return FitConfig(**common, **mode_kwargs)

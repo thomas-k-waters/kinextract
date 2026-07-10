@@ -64,16 +64,30 @@ Continuum
    :nosignatures:
 
    kinextract.asymmetric_least_squares_continuum
-   kinextract.optimize_als_hyperparams_for_target
-   kinextract.fit_als_target
-   kinextract.fit_als_target_absorption_clean
-   kinextract.init_als_continuum
-   kinextract.update_als_continuum
-   kinextract.build_als_line_mask
    kinextract.grow_boolean_mask
    kinextract.grow_boolean_mask_A
-   kinextract.score_als_target
    kinextract.robust_sigma
+
+``asymmetric_least_squares_continuum``/``robust_sigma`` are standalone,
+one-time pre-normalization utilities -- not part of the main fitting
+pipeline. See ``examples/notebooks/06_prenormalized_workflow.ipynb``.
+
+Joint continuum-in-the-model fit
+---------------------------------
+
+The continuum-cofitting method (``FitConfig.fit_continuum = True``). See
+:mod:`kinextract.joint` for the full rationale.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.run_joint_fit
+   kinextract.fit_joint
+   kinextract.fit_joint_auto_xlam
+   kinextract.fit_joint_auto_xlam_sigl0
+   kinextract.build_pspline_design
+   kinextract.evaluate_model_gp_joint
 
 LOSVD analysis
 --------------
@@ -133,7 +147,7 @@ Plotting
 
    kinextract.plot_fit
    kinextract.plot_losvd
-   kinextract.plot_als_continuum
+   kinextract.plot_continuum
 
 Error estimation
 -----------------

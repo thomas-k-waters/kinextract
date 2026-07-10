@@ -10,11 +10,12 @@ for real spectral features such as the Ca II triplet
 (:func:`run_iterative_clean_map`), LOSVD shape diagnostics used to judge
 whether a fit is over- or under-regularised (:func:`compute_losvd_roughness`,
 :func:`compute_losvd_n_peaks`), an automatic regularisation-strength
-(``xlam``) grid search (:func:`_auto_select_xlam`), and an outer loop that
-alternates LOSVD/template fitting with re-estimating the ALS continuum
-baseline (:func:`fit_state_map_with_optional_clean`). The top-level entry
-point :func:`run_spectral_fit` ties all of this together into the primary
-public API for fitting a single galaxy spectrum end-to-end, given a
+(``xlam``) grid search (:func:`_auto_select_xlam`), and the sigma-clipped
+MAP fit itself (:func:`fit_state_map_with_optional_clean`), used for
+pre-normalized-mode fits (continuum-cofit fits are dispatched to
+:mod:`kinextract.joint` instead). The top-level entry point
+:func:`run_spectral_fit` ties all of this together into the primary public
+API for fitting a single galaxy spectrum end-to-end, given a
 :class:`~kinextract.config.FitConfig`.
 """
 from __future__ import annotations
@@ -26,7 +27,6 @@ from scipy.optimize import minimize
 
 from ._utils import BIG, Timer, log
 from .config import FitConfig
-from .continuum import update_als_continuum
 from .io import infer_output_prefix, write_fitlov_outputs
 
 # fit_losvd_gauss_hermite is not used inside this module, but is re-exported
@@ -38,6 +38,7 @@ from .losvd import fit_losvd_gauss_hermite  # noqa: F401
 from .masking import _bloom_rejected, _update_clean_mask, build_clean_protect_mask
 from .numerics import (
     _get_or_build_jax_vg,
+    estimate_velocity_xcorr,
     evaluate_model_gp,
     jax,  # module-level jax reference (may be None)
     objective_map,
@@ -108,8 +109,7 @@ def _fit_map_once(
     `bounds`. This is the single-shot optimisation call used as a building
     block by :func:`run_iterative_clean_map` (once per sigma-clip
     iteration) and :func:`_auto_select_xlam` (once per candidate ``xlam``);
-    the top-level looping/cleaning/ALS logic lives in those callers, not
-    here.
+    the top-level looping/cleaning logic lives in those callers, not here.
 
     Parameters
     ----------
@@ -626,7 +626,7 @@ def _auto_select_xlam(
     auto_maxiter = int(cfg.xlam_auto_maxiter or cfg.map_maxiter)
     max_peaks = int(getattr(cfg, "xlam_max_peaks", 1))
     min_prominence = float(getattr(cfg, "xlam_peak_min_prominence", 0.1))
-    criterion = str(getattr(cfg, "xlam_criterion", "chi2")).lower()
+    criterion = str(getattr(cfg, "xlam_criterion", "discrepancy")).lower()
     chi2_tolerance = float(getattr(cfg, "xlam_chi2_tolerance", 0.02))
 
     log(
@@ -708,16 +708,347 @@ def _auto_select_xlam(
     return best_xlam
 
 
+def _v_recovery_is_sane(
+    candidate_xlam: float,
+    trials: dict,
+    v_center_est: float,
+    max_peaks: int,
+) -> bool:
+    """Guard against a candidate xlam landing in a spurious local optimum.
+
+    Adapted from :func:`kinextract.joint.fit_joint_auto_xlam`'s
+    ``_candidate_ok`` (same two checks, same rationale -- found on a real
+    MUSE bin near the resolution limit, where one xlam trial's optimizer
+    landed on a genuinely different, lower-chi2 local optimum with V off by
+    >40 km/s, indistinguishable from the correct answer by chi2 alone):
+
+    1. Compare the candidate's recovered V against the pre-fit
+       cross-correlation velocity estimate `v_center_est`.
+    2. Compare against the *other* trials' own median V (robustly, via
+       MAD) -- what actually catches the failure, since the spurious trial
+       is typically an outlier relative to every other trial regardless of
+       whether the external xcorr estimate itself can be trusted.
+
+    Parameters
+    ----------
+    candidate_xlam : float
+        The trial xlam being checked.
+    trials : dict
+        ``{xlam: trial_dict}`` for every xlam evaluated so far (each
+        trial_dict has ``"v_rec"``, ``"sigma_rec"``, ``"n_peaks"`` keys).
+    v_center_est : float
+        Pre-fit cross-correlation velocity estimate (km/s).
+    max_peaks : int
+        Unimodality threshold; only unimodal trials count as "other"
+        candidates for the MAD comparison.
+
+    Returns
+    -------
+    bool
+        True if `candidate_xlam` passes both checks (or there are too few
+        other trials to run the MAD check).
+    """
+    cand = trials[candidate_xlam]
+    v_candidate = cand["v_rec"]
+    sigma_candidate = max(cand.get("sigma_rec", 1.0), 1.0)
+
+    if abs(v_candidate - v_center_est) > 5.0 * sigma_candidate:
+        return False
+
+    other_vs = [
+        t["v_rec"] for xlam, t in trials.items()
+        if xlam != candidate_xlam and t["n_peaks"] <= max_peaks
+    ]
+    if len(other_vs) >= 2:
+        median_other_v = float(np.median(other_vs))
+        mad_other_v = float(np.median(np.abs(np.asarray(other_vs) - median_other_v)))
+        scale = max(mad_other_v, 3.0)
+        if abs(v_candidate - median_other_v) > 5.0 * scale:
+            return False
+    return True
+
+
+def _discrepancy_principle_search(
+    evaluate_xlam,
+    xlam_lo: float,
+    xlam_hi: float,
+    max_peaks: int,
+    v_center_est: float,
+    nsigma: float = 1.0,
+    log_label: str = "auto-xlam (discrepancy)",
+    max_bracket_expansions: int = 6,
+    max_bisections: int = 8,
+    log_tol_dex: float = 0.05,
+):
+    """Generic pPXF-style discrepancy-principle 1-D search over ``xlam``.
+
+    Adapted from Cappellari (2017, MNRAS 466, 798, "Improving the full
+    spectrum fitting method: accurate convolution with Gauss-Hermite
+    functions", Sec. 3.5)'s ``REGUL`` regularization-strength procedure for
+    pPXF (Cappellari & Emsellem 2004, PASP 116, 138): increase the
+    regularization strength until the total chi2 rises by ``nsigma * sqrt(2
+    * ngood)`` above the chi2 achieved at (near-)zero regularization -- the
+    standard deviation of a chi-squared distribution with ``ngood`` degrees
+    of freedom, i.e. "regularize until the fit degrades by about one sigma
+    of the noise's own chi2 fluctuation." Unlike a tolerance-from-minimum
+    rule evaluated over a
+    fixed grid (:func:`_auto_select_xlam`'s ``"chi2"``/``"roughness"``
+    criteria), this target is tied to the *known noise level* rather than
+    to the shape of the chi2(xlam) curve, so it degrades gracefully when
+    that curve is nearly flat over many orders of magnitude of xlam -- the
+    failure mode that motivated this function (see module docstring).
+
+    This is a generic, fit-mechanics-agnostic search: the caller supplies
+    `evaluate_xlam`, a callable ``xlam -> dict`` that runs one trial fit at
+    that `xlam` and returns a dict with (at least) keys ``"chi2_total"``
+    (float, *not* reduced), ``"ngood"`` (int), ``"n_peaks"`` (int, via
+    :func:`compute_losvd_n_peaks`), ``"v_rec"`` (float, recovered velocity),
+    and ``"sigma_rec"`` (float, recovered dispersion). This lets both the
+    shipped MAP path (:func:`_auto_select_xlam_discrepancy`, below) and
+    :func:`kinextract.joint.fit_joint_auto_xlam` share this exact search
+    algorithm despite having entirely different fit mechanics (different
+    objective functions and flat-parameter-vector layouts).
+
+    Parameters
+    ----------
+    evaluate_xlam : callable
+        ``xlam -> dict`` as described above. Expected to be expensive (a
+        full MAP refit per call); every call is logged and cached in the
+        returned `trials` dict, so no `xlam` is ever evaluated twice.
+    xlam_lo, xlam_hi : float
+        Initial bracket. `xlam_lo` should be small enough to be a good
+        proxy for "negligible regularization" (used to establish the
+        discrepancy-principle target); `xlam_hi` is expanded geometrically
+        (x10, up to `max_bracket_expansions` times) if the target chi2 rise
+        hasn't been reached by `xlam_hi` yet.
+    max_peaks : int
+        Unimodality constraint (:func:`compute_losvd_n_peaks`); candidates
+        exceeding this are rejected in favor of a smaller (more
+        regularized) xlam, same convention as :func:`_auto_select_xlam`.
+    v_center_est : float
+        Pre-fit cross-correlation velocity estimate, used by
+        :func:`_v_recovery_is_sane` to guard against a spurious local
+        optimum.
+    nsigma : float, optional
+        Multiplier on the ``sqrt(2*ngood)`` discrepancy-principle target
+        (1.0 = Cappellari's own stated convention). Larger values select
+        more regularization (a bigger allowed chi2 rise).
+    log_label : str, optional
+        Prefix for log lines, so callers (shipped vs. joint) can
+        distinguish their search in the log.
+    max_bracket_expansions : int, optional
+        Cap on how many times `xlam_hi` is multiplied by 10 while
+        searching for a bracket that reaches the target.
+    max_bisections : int, optional
+        Cap on bisection iterations once a bracket containing the target
+        is found.
+    log_tol_dex : float, optional
+        Bisection convergence tolerance, in decades of `xlam`.
+
+    Returns
+    -------
+    best_xlam : float
+        The selected xlam.
+    trials : dict
+        ``{xlam: trial_dict}`` for every xlam evaluated, for diagnostics.
+    """
+    trials: dict = {}
+
+    def _eval(xlam: float) -> dict:
+        xlam = float(xlam)
+        if xlam not in trials:
+            trials[xlam] = evaluate_xlam(xlam)
+            t = trials[xlam]
+            log(
+                f"  {log_label} xlam={xlam:10.4g}  chi2_total={t['chi2_total']:.4g}  "
+                f"ngood={t['ngood']}  peaks={t['n_peaks']}  "
+                f"V={t['v_rec']:+.2f}  sigma={t.get('sigma_rec', float('nan')):.2f}"
+            )
+        return trials[xlam]
+
+    lo, hi = float(xlam_lo), float(xlam_hi)
+    t_lo = _eval(lo)
+    chi2_min = t_lo["chi2_total"]
+    ngood = max(t_lo["ngood"], 1)
+    # Cappellari (2017, Sec 3.5)'s stated procedure first rescales the input
+    # errors so the *unregularized* fit has chi2/ngood == 1 exactly, then
+    # targets chi2_rescaled = ngood + sqrt(2*ngood). Converting that target
+    # back to this call's own (possibly miscalibrated) error scale without
+    # literally mutating st.gerr: if errors are off by a factor `s` (chi2_min
+    # = s^2 * ngood, i.e. s^2 = chi2_min/ngood = chi2_red_min), the same
+    # rescaled-units target becomes chi2_min * (1 + nsigma*sqrt(2/ngood)) in
+    # this call's own units -- reduces to the textbook chi2_min +
+    # nsigma*sqrt(2*ngood) exactly when chi2_red_min == 1 (errors already
+    # well calibrated), and scales the allowed chi2 rise down/up
+    # proportionally when they are not.
+    chi2_red_min = chi2_min / ngood
+    target = chi2_min * (1.0 + nsigma * float(np.sqrt(2.0 / ngood)))
+    log(f"{log_label}: chi2_min={chi2_min:.4g} (xlam={lo:.4g})  chi2_red_min={chi2_red_min:.4g}  "
+        f"target={target:.4g}  (chi2_min * (1 + {nsigma:.2f}*sqrt(2/{ngood})))")
+
+    t_hi = _eval(hi)
+    expansions = 0
+    while t_hi["chi2_total"] < target and expansions < max_bracket_expansions:
+        lo = hi  # tighten: previous hi is still below target, so it's a valid new lower bound
+        hi *= 10.0
+        t_hi = _eval(hi)
+        expansions += 1
+
+    if t_hi["chi2_total"] < target:
+        log(f"{log_label}: target not reached even at xlam={hi:.4g} after "
+            f"{max_bracket_expansions} bracket expansions; using largest xlam tried")
+        best_xlam = hi
+    else:
+        # Bisect in log10(xlam) space: lo always chi2 < target, hi always chi2 >= target.
+        for _ in range(max_bisections):
+            if np.log10(hi) - np.log10(lo) < log_tol_dex:
+                break
+            mid = float(10.0 ** (0.5 * (np.log10(lo) + np.log10(hi))))
+            t_mid = _eval(mid)
+            if t_mid["chi2_total"] < target:
+                lo = mid
+            else:
+                hi = mid
+        best_xlam = hi
+
+    # Unimodality: if the converged answer is multi-peaked, fall back to the
+    # smallest *evaluated* xlam that is both unimodal and meets the target;
+    # expand further if no such trial exists yet.
+    if trials[best_xlam]["n_peaks"] > max_peaks:
+        candidates = sorted(
+            (x for x, t in trials.items() if t["n_peaks"] <= max_peaks and t["chi2_total"] >= target),
+        )
+        if candidates:
+            best_xlam = candidates[0]
+            log(f"{log_label}: discrepancy-target xlam was multi-peaked; "
+                f"using smallest unimodal candidate meeting target, xlam={best_xlam:.4g}")
+        else:
+            expand_hi = hi
+            extra = 0
+            while trials[best_xlam]["n_peaks"] > max_peaks and extra < max_bracket_expansions:
+                expand_hi *= 10.0
+                _eval(expand_hi)
+                if trials[expand_hi]["n_peaks"] <= max_peaks:
+                    best_xlam = expand_hi
+                extra += 1
+            if trials[best_xlam]["n_peaks"] > max_peaks:
+                log(f"{log_label}: WARNING no unimodal candidate found up to "
+                    f"xlam={expand_hi:.4g}; returning best available (still multi-peaked)")
+
+    # Spurious-local-optimum guard: fall back through decreasing-chi2-rise
+    # (i.e. smaller-xlam) candidates that still meet the target until one
+    # passes, mirroring kinextract.joint.fit_joint_auto_xlam's own fallback.
+    if not _v_recovery_is_sane(best_xlam, trials, v_center_est, max_peaks):
+        fallback_pool = sorted(
+            (x for x, t in trials.items()
+             if t["n_peaks"] <= max_peaks and x != best_xlam),
+            reverse=True,
+        )
+        for x in fallback_pool:
+            if _v_recovery_is_sane(x, trials, v_center_est, max_peaks):
+                log(f"{log_label}: xlam={best_xlam:.4g}'s recovered V failed the "
+                    f"sanity check; falling back to xlam={x:.4g}")
+                best_xlam = x
+                break
+        else:
+            log(f"{log_label}: WARNING xlam={best_xlam:.4g}'s recovered V failed "
+                f"the sanity check and no fallback candidate passed either; "
+                f"using it anyway")
+
+    log(f"{log_label}: selected xlam={best_xlam:.4g}")
+    return best_xlam, trials
+
+
+def _auto_select_xlam_discrepancy(
+    st: FitState,
+    cfg: FitConfig,
+    a0: np.ndarray,
+    bounds: list,
+    xlam_grid: tuple,
+    map_kwargs: dict,
+    nsigma: float = 1.0,
+) -> float:
+    """Shipped (non-joint) MAP path's discrepancy-principle ``xlam``
+    selector (``cfg.xlam_criterion="discrepancy"``) -- see
+    :func:`_discrepancy_principle_search` for the algorithm and rationale.
+
+    Recenters the wing-taper's ``v_center`` on
+    :func:`kinextract.numerics.estimate_velocity_xcorr` once, up front
+    (matching :func:`kinextract.joint.fit_joint_auto_xlam`'s own
+    ``recenter_v`` -- high-xlam solutions are exactly where a
+    zero-centered wing taper biases V the most, so recentering before the
+    search removes that asymmetry regardless of where the search lands).
+
+    Parameters
+    ----------
+    st : FitState
+        Fit state whose ``xlam``/``v_center`` are overwritten with the
+        selected values on return.
+    cfg : FitConfig
+        Run configuration; ``cfg.xlam_max_peaks``, ``cfg.xlam`` (overwritten
+        on return) are used.
+    a0 : ndarray
+        Initial guess for the flat parameter vector.
+    bounds : list of tuple
+        Per-parameter bounds passed to :func:`_fit_map_once`.
+    xlam_grid : tuple of float
+        Only its min/max are used, as the search's initial bracket (kept as
+        a grid-shaped argument so existing ``cfg.xlam_auto_grid`` configs
+        need no changes to opt into this criterion).
+    map_kwargs : dict
+        Extra kwargs forwarded to every :func:`_fit_map_once` call.
+    nsigma : float, optional
+        See :func:`_discrepancy_principle_search`.
+
+    Returns
+    -------
+    float
+        The selected xlam. Also stored in ``st.xlam``/``cfg.xlam``.
+    """
+    v_center_est = estimate_velocity_xcorr(st)
+    st.v_center = v_center_est
+
+    max_peaks = int(getattr(cfg, "xlam_max_peaks", 1))
+    min_prominence = float(getattr(cfg, "xlam_peak_min_prominence", 0.1))
+    auto_maxiter = int(cfg.xlam_auto_maxiter or cfg.map_maxiter)
+    a0 = np.asarray(a0, float)
+
+    def evaluate_xlam(xlam: float) -> dict:
+        st.xlam = float(xlam)
+        res = _fit_map_once(
+            st, a0, bounds, auto_maxiter, cfg.map_ftol, cfg.map_maxfun, cfg.print_every,
+            f"auto-xlam(discrepancy) {xlam:.4g}", **map_kwargs,
+        )
+        b = np.asarray(res.x[: st.nl], float)
+        chi2_total, ngood = _chi2_stats(st, res.x)
+        n_peaks = compute_losvd_n_peaks(b, min_prominence)
+        gh = fit_losvd_gauss_hermite(st.xl, b, fit_h3h4=True)
+        return dict(chi2_total=chi2_total, ngood=ngood, n_peaks=n_peaks,
+                     v_rec=float(gh["vherm"]), sigma_rec=float(gh["sherm"]))
+
+    grid = sorted(float(v) for v in xlam_grid)
+    best_xlam, _trials = _discrepancy_principle_search(
+        evaluate_xlam, xlam_lo=grid[0], xlam_hi=grid[-1],
+        max_peaks=max_peaks, v_center_est=v_center_est, nsigma=nsigma,
+        log_label="Auto-xlam (discrepancy)",
+    )
+
+    st.xlam = best_xlam
+    cfg.xlam = best_xlam
+    return best_xlam
+
+
 def fit_state_map_with_optional_clean(
     st: FitState, cfg: FitConfig, a0: np.ndarray, bounds: list,
 ):
-    """Run the MAP fit, optionally with sigma-clipping and/or an ALS outer loop.
+    """Run the MAP fit, optionally with sigma-clipping.
 
-    This is ``run_spectral_fit``'s primary fit path: a bound-constrained
-    L-BFGS-B optimisation of ``chi2 + wing-tapered smoothness penalty +
-    LOSVD normalisation penalty`` (:func:`kinextract.numerics.objective_map`),
-    the same objective minimised by the original Fortran implementation
-    this package is a port of. It is also used internally by
+    This is the shipped (non-joint) fit path: a bound-constrained L-BFGS-B
+    optimisation of ``chi2 + wing-tapered smoothness penalty + LOSVD
+    normalisation penalty`` (:func:`kinextract.numerics.objective_map`), the
+    same objective minimised by the original Fortran implementation this
+    package is a port of. Used directly by pre-normalized-mode fits
+    (``cfg.fit_continuum=False``) and internally by
     :mod:`kinextract.errors`'s residual-bootstrap error estimation, which
     needs hundreds to thousands of fast independent refits per fit -- a
     cost only a point-estimate optimisation, not full posterior sampling,
@@ -731,27 +1062,21 @@ def fit_state_map_with_optional_clean(
 
     This is the mid-level orchestration function: it optionally runs the
     automatic ``xlam`` grid search (:func:`_auto_select_xlam`) once up
-    front, then either
-    performs a single (optionally sigma-clipped) MAP fit, or, when
-    ``cfg.fit_als_continuum`` is set, alternates MAP fitting with
-    re-estimating the ALS (asymmetric least squares) continuum baseline
-    over up to ``cfg.als_outer_iter`` outer iterations until the continuum
-    update is smaller than ``cfg.als_outer_tol`` or the iteration budget is
-    exhausted, finishing with one final MAP refit at the converged
-    continuum.
+    front, then performs a single (optionally sigma-clipped) MAP fit.
+    Continuum-cofit fits (``cfg.fit_continuum=True``) never reach this
+    function -- :func:`run_spectral_fit` dispatches those to
+    :mod:`kinextract.joint` instead.
 
     Parameters
     ----------
     st : FitState
         Fit state to optimise; ``st.xlam`` may be overwritten by the
-        automatic regularisation search, and ``st.clean_good_mask`` /
-        ``st.continuum_mult`` are updated as a side effect when cleaning
-        and/or ALS continuum fitting are enabled.
+        automatic regularisation search, and ``st.clean_good_mask`` is
+        updated as a side effect when cleaning is enabled.
     cfg : FitConfig
         Run configuration controlling regularisation search
-        (``xlam_auto`` and related settings), cleaning (``clean`` and
-        related settings), and ALS continuum fitting (``fit_als_continuum``,
-        ``als_outer_iter``, ``als_outer_tol``).
+        (``xlam_auto`` and related settings) and cleaning (``clean`` and
+        related settings).
     a0 : ndarray
         Initial guess for the flat parameter vector.
     bounds : list of tuple
@@ -760,17 +1085,7 @@ def fit_state_map_with_optional_clean(
     Returns
     -------
     scipy.optimize.OptimizeResult
-        The optimisation result from the final MAP fit (after any cleaning
-        and/or ALS continuum convergence).
-
-    Notes
-    -----
-    In ALS-continuum mode, full iterative sigma-clipping is only performed
-    on the first outer iteration; later ALS iterations reuse the resulting
-    good-pixel mask and perform ordinary (non-clipping) MAP fits. This
-    avoids repeating a full ``clean_maxiter``-iteration clean on every ALS
-    outer iteration, which would be far more expensive without materially
-    changing the mask once early outliers are removed.
+        The optimisation result from the MAP fit (after any cleaning).
     """
     kwargs = dict(
         map_gtol=cfg.map_gtol,
@@ -782,17 +1097,25 @@ def fit_state_map_with_optional_clean(
 
     original_clean = bool(cfg.clean)
 
-    # Per-spectrum automatic smoothing: run before the first MAP fit so that
-    # st.xlam is correct for the entire ALS outer loop that follows.
-    # Bootstrap refits skip this (xlam_auto=False in cfg_frozen; see
-    # losvd_errors._make_frozen_cfg) so they use the xlam selected here.
+    # Per-spectrum automatic smoothing: run before the MAP fit so that
+    # st.xlam is correct for it. Bootstrap refits skip this
+    # (xlam_auto=False in cfg_frozen; see losvd_errors._make_frozen_cfg) so
+    # they use the xlam selected here.
     if getattr(cfg, "xlam_auto", False):
-        _auto_select_xlam(
-            st, cfg, np.asarray(a0, float), bounds,
-            xlam_grid=getattr(cfg, "xlam_auto_grid", (20., 50., 100., 250., 600., 1500., 4000.)),
-            smooth_threshold=float(getattr(cfg, "xlam_smooth_threshold", 0.25)),
-            map_kwargs=kwargs,
-        )
+        xlam_grid = getattr(cfg, "xlam_auto_grid", (20., 50., 100., 250., 600., 1500., 4000.))
+        if str(getattr(cfg, "xlam_criterion", "discrepancy")).lower() == "discrepancy":
+            _auto_select_xlam_discrepancy(
+                st, cfg, np.asarray(a0, float), bounds,
+                xlam_grid=xlam_grid, map_kwargs=kwargs,
+                nsigma=float(getattr(cfg, "xlam_discrepancy_nsigma", 0.3)),
+            )
+        else:
+            _auto_select_xlam(
+                st, cfg, np.asarray(a0, float), bounds,
+                xlam_grid=xlam_grid,
+                smooth_threshold=float(getattr(cfg, "xlam_smooth_threshold", 0.25)),
+                map_kwargs=kwargs,
+            )
 
     def one_fit(a_start, do_clean: bool, label: str = "MAP optimize"):
         if do_clean:
@@ -814,49 +1137,70 @@ def fit_state_map_with_optional_clean(
             cfg.map_maxiter, cfg.map_ftol, cfg.map_maxfun, cfg.print_every,
             label, **kwargs,
         )
-    # Non-ALS mode: keep previous behavior.
-    if not cfg.fit_als_continuum:
-        return one_fit(a0, do_clean=original_clean)
-    # ALS outer loop: alternate LOSVD fit and continuum update
-    a_start = np.asarray(a0, float).copy()
-    best = None
-    last_delta = np.inf
 
-    for k in range(cfg.als_outer_iter):
-        log(f"ALS outer iteration {k + 1}/{cfg.als_outer_iter}")
+    return one_fit(a0, do_clean=original_clean)
 
-        # If you implemented "clean only first outer", keep that logic here.
-        do_clean_this_iter = cfg.clean and (k == 0)
 
-        best = one_fit(
-            a_start,
-            do_clean=do_clean_this_iter,
-            label=f"MAP optimize ALS outer {k + 1}",
-        )
+def _fit_map_sigl0_recenter(
+    st: FitState, cfg: FitConfig, a0: np.ndarray, bounds: list,
+):
+    """Self-consistent ``sigl0``/``v_center`` fixed-point wrapper around
+    :func:`fit_state_map_with_optional_clean`.
 
-        last_delta = update_als_continuum(st, cfg, best.x)
-        log(f"  ALS continuum median fractional change = {last_delta:.4g}")
+    Ports :func:`kinextract.joint.fit_joint_auto_xlam_sigl0`'s validated
+    fixed-point iteration to the shipped (non-joint) MAP path -- see that
+    function's docstring for the full rationale, validation history, and
+    citations. Root cause: a real-data comparison between this path and the
+    joint path's ``joint_prenorm=True`` mode (otherwise matched settings,
+    same pre-normalized spectrum) found a large, unexplained V/sigma
+    discrepancy, traced to this exact gap. The wing-tapered smoothness
+    penalty (:func:`kinextract.numerics._wing_taper_lam_vec`) depends on
+    both ``st.sigl0`` (where the taper begins ramping up) and ``st.v_center``
+    (its pivot); the joint path always self-corrects both before returning,
+    while this path previously left them at their initial values
+    (``cfg.sigl``, 0.0) for the entire fit, however wrong those turned out to
+    be -- most consequential at high ``xlam``, exactly where kinextract's own
+    regularization search tends to land.
 
-        a_start = np.asarray(best.x, float).copy()
+    Parameters
+    ----------
+    st : FitState
+        Fit state to optimize; ``st.sigl0``, ``st.v_center``, and ``st.xlam``
+        are overwritten as a side effect of the final iteration.
+    cfg : FitConfig
+        ``cfg.joint_recenter_v``, ``cfg.joint_n_sigl0_iter``, and
+        ``cfg.joint_sigl0_tol`` control this wrapper exactly as they control
+        :func:`kinextract.joint.fit_joint_auto_xlam_sigl0` -- shared fields,
+        since the underlying wing-taper penalty and fixed-point rationale
+        are identical between the two paths.
+    a0, bounds :
+        Passed through to :func:`fit_state_map_with_optional_clean` on every
+        iteration.
 
-        if last_delta < cfg.als_outer_tol:
-            log(
-                f"  ALS outer loop converged "
-                f"(delta={last_delta:.2e} < tol={cfg.als_outer_tol:.2e})"
-            )
+    Returns
+    -------
+    scipy.optimize.OptimizeResult
+        The final iteration's fit result.
+    """
+    if bool(getattr(cfg, "joint_recenter_v", True)):
+        st.v_center = estimate_velocity_xcorr(st)
+
+    n_iter = max(1, int(getattr(cfg, "joint_n_sigl0_iter", 3)))
+    tol = float(getattr(cfg, "joint_sigl0_tol", 2.0))
+
+    res = None
+    for _ in range(n_iter):
+        res = fit_state_map_with_optional_clean(st, cfg, a0, bounds)
+        gp, b, *_ = evaluate_model_gp(res.x, st)
+        gh = fit_losvd_gauss_hermite(st.xl, b, fit_h3h4=True)
+        recovered_sigma = float(gh["sherm"])
+        if not np.isfinite(recovered_sigma) or recovered_sigma <= 0:
             break
-
-    # After the final ALS continuum update, do one final fit with that continuum
-    # fixed. Otherwise the returned parameters correspond to the previous
-    # continuum, while the output model uses the newly updated continuum.
-    log("Final MAP refit with final ALS continuum fixed")
-    best = one_fit(
-        a_start,
-        do_clean=False,
-        label="MAP final after ALS continuum update",
-    )
-
-    return best
+        reached = abs(st.sigl0 - recovered_sigma) <= tol
+        st.sigl0 = recovered_sigma
+        if reached:
+            break
+    return res
 
 
 # =============================================================================
@@ -882,20 +1226,28 @@ def run_spectral_fit(
     runs a bound-constrained MAP optimisation
     (:func:`fit_state_map_with_optional_clean`) over that same flat
     parameter vector, with optional automatic regularisation (``xlam``)
-    selection, sigma-clipping, and an ALS continuum outer loop as
-    configured; and finally computes summary statistics and (by default)
-    writes the standard fitlov/ascii/rms/template output files. It supports
-    both notebook usage (set ``cfg.gal_file`` and call
-    ``run_spectral_fit(cfg)``) and command-line/scripted usage (pass
-    `gal_file` explicitly, overriding `cfg`).
+    selection and sigma-clipping as configured -- or, when
+    ``cfg.fit_continuum=True`` (or ``cfg.joint_prenorm=True``), dispatches
+    to :mod:`kinextract.joint`'s continuum-cofit engine instead; and
+    finally computes summary statistics and (by default) writes the
+    standard fitlov/ascii/rms/template output files. It supports both
+    notebook usage (set ``cfg.gal_file`` and call ``run_spectral_fit(cfg)``)
+    and command-line/scripted usage (pass `gal_file` explicitly, overriding
+    `cfg`).
 
-    The LOSVD's wing-tapered smoothness penalty is always zero-centered
-    (``st.v_center = 0.0``), matching the original Fortran convention,
-    rather than recentered per-fit on a data-driven velocity estimate --
-    a fixed zero point is more robust whenever the velocity estimate
-    itself is imprecise (routinely the case, since it comes from a coarse
-    cross-correlation, not a precision measurement). A full-posterior
-    (NUTS/HMC) alternative to this MAP
+    The non-joint MAP path (``cfg.fit_continuum=False`` and
+    ``cfg.joint_prenorm=False``) self-corrects the wing-tapered smoothness
+    penalty's ``v_center`` (recentered on a cross-correlation velocity
+    estimate) and ``sigl0`` (fixed-point iteration toward the recovered
+    sigma) via :func:`_fit_map_sigl0_recenter`, mirroring
+    :func:`kinextract.joint.fit_joint_auto_xlam_sigl0`'s validated approach
+    -- see its docstring for the rationale. This replaced an earlier
+    zero-centered/fixed-``sigl0`` default after a real-data comparison found
+    it caused a large, spurious V/sigma discrepancy against the joint path
+    on otherwise-matched settings. Both corrections are controlled by
+    ``cfg.joint_recenter_v``/``cfg.joint_n_sigl0_iter``/``cfg.joint_sigl0_tol``
+    (shared fields with the joint path). A full-posterior (NUTS/HMC)
+    alternative to this MAP
     point estimate is available via
     :func:`kinextract.bayesian.fit_state_bayesian` for users who want a
     sampled posterior instead; call it directly in place of this function
@@ -921,7 +1273,7 @@ def run_spectral_fit(
     ----------
     cfg : FitConfig
         Configuration object specifying the wavelength/redshift window,
-        kinematic grid, regularisation, cleaning, and ALS continuum
+        kinematic grid, regularisation, cleaning, and continuum-cofit
         settings for the fit. In notebook usage, you may set
         ``cfg.gal_file`` directly and call ``run_spectral_fit(cfg)``.
     gal_file : str, optional
@@ -971,9 +1323,9 @@ def run_spectral_fit(
             (``"gp"``), recovered LOSVD (``"b"``), template weights
             (``"w"`` and fractional ``"wfrac"``), weighted template
             spectrum (``"tt"``), continuum parameters (``"coff"``,
-            ``"coff2"``, ``"A"``), fit RMS (``"rms"``, ``"nrms"``), the ALS
-            continuum (``"continuum"``), and, when `write_outputs` is True,
-            the paths of the files written (``"paths"``).
+            ``"coff2"``, ``"A"``), fit RMS (``"rms"``, ``"nrms"``), the
+            co-fit continuum (``"continuum"``), and, when `write_outputs`
+            is True, the paths of the files written (``"paths"``).
         ``"chi2"``
             Final chi-squared over good pixels (float; see
             :func:`_chi2_stats`).
@@ -1025,8 +1377,8 @@ def run_spectral_fit(
         f"sigl={cfg.sigl} xlam={cfg.xlam}"
     )
     log(
-        f"fit_als_continuum={cfg.fit_als_continuum} "
-        f"prenorm={not cfg.fit_als_continuum}"
+        f"fit_continuum={cfg.fit_continuum} "
+        f"prenorm={not cfg.fit_continuum}"
     )
 
     with Timer("build FitState"):
@@ -1034,16 +1386,16 @@ def run_spectral_fit(
 
     prefix = output_prefix if output_prefix is not None else infer_output_prefix(gal_file)
 
-    use_joint = cfg.continuum_method == "joint" and (cfg.fit_als_continuum or cfg.joint_prenorm)
+    use_joint = cfg.fit_continuum or cfg.joint_prenorm
     if use_joint:
-        # The joint continuum-in-the-model fit (kinextract.joint) has its own
-        # parameter-vector layout and its own initial-guess/optimization
-        # driver, so it bypasses build_initial_guess_nonparam/
-        # fit_state_map_with_optional_clean/evaluate_model_gp entirely rather
-        # than trying to fit through machinery specific to the shipped
-        # layout. See kinextract.joint.run_joint_fit's docstring.
+        # kinextract.joint has its own parameter-vector layout and its own
+        # initial-guess/optimization driver, so it bypasses
+        # build_initial_guess_nonparam/fit_state_map_with_optional_clean/
+        # evaluate_model_gp entirely rather than trying to fit through
+        # machinery specific to the shipped layout. See
+        # kinextract.joint.run_joint_fit's docstring.
         #
-        # Only triggered in pre-normalized mode (fit_als_continuum=False) if
+        # Only triggered in pre-normalized mode (fit_continuum=False) if
         # cfg.joint_prenorm is explicitly set -- joint's sigl0 fixed-point
         # iteration costs up to n_sigl0_iter * len(xlam_auto_grid) full
         # optimizations per fit, so this stays opt-in rather than silently
@@ -1077,7 +1429,7 @@ def run_spectral_fit(
     a0, xlb, xub = build_initial_guess_nonparam(st, cfg.coff, cfg.coff2)
     bounds = list(zip(xlb, xub))
 
-    res = fit_state_map_with_optional_clean(st, cfg, a0, bounds)
+    res = _fit_map_sigl0_recenter(st, cfg, a0, bounds)
     if not res.success:
         log(f"WARNING: optimizer reported: {res.message}")
 

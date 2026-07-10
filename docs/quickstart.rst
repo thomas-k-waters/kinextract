@@ -15,9 +15,17 @@ Quick start
    print(f"chi2_red = {chi2_red:.3f}")
 
    # Plot
-   from kinextract import plot_fit, plot_als_continuum
+   from kinextract import plot_fit, plot_continuum
    plot_fit(fit)
-   plot_als_continuum(fit)   # only if cfg.fit_als_continuum = True
+   plot_continuum(fit)   # only if cfg.fit_continuum = True
+
+``cfg.fit_continuum = True`` co-fits the continuum baseline: a
+penalized-B-spline continuum is folded directly into the same optimization
+as the LOSVD and template weights (see :mod:`kinextract.joint`).
+Alternatively, pre-normalize the spectrum once (e.g. via the standalone
+:func:`kinextract.continuum.asymmetric_least_squares_continuum` utility --
+see ``examples/notebooks/06_prenormalized_workflow.ipynb``) and fit with
+``fit_continuum = False``.
 
 See :meth:`~kinextract.config.FitConfig.describe` (or ``help(FitConfig)``)
 for every tunable field, grouped by subsystem, e.g.

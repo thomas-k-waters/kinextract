@@ -3,7 +3,7 @@ Command-line entry point: ``python -m kinextract <spectrum> [config.toml]``.
 
 Runs the full non-parametric LOSVD fit on a single spectrum using
 :func:`~kinextract.fitting.run_spectral_fit`, then displays the standard
-diagnostic plots (spectral fit or ALS continuum, plus the recovered
+diagnostic plots (spectral fit or co-fit continuum, plus the recovered
 LOSVD). Intended for quick interactive checks of a single spectrum; for
 batch processing or notebook use, call :func:`~kinextract.run_spectral_fit`
 directly with a :class:`~kinextract.FitConfig` instead.
@@ -57,10 +57,10 @@ def main() -> None:
 
     log(f"chi2={fit['chi2']:.4g}  ngood={fit['ngood']}  chi2_red={fit['outputs']['chi2_red']:.4g}")
 
-    from .plotting import plot_als_continuum, plot_fit, plot_losvd
+    from .plotting import plot_continuum, plot_fit, plot_losvd
 
-    if cfg.fit_als_continuum:
-        plot_als_continuum(fit)
+    if cfg.fit_continuum:
+        plot_continuum(fit)
     else:
         plot_fit(fit)
 

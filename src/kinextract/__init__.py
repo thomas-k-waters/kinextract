@@ -6,8 +6,8 @@ The top-level namespace (``import kinextract`` / ``from kinextract import
 main entry point (:func:`run_spectral_fit`), error estimation
 (:class:`LOSVDErrorEstimator`), empirical recovery-bias validation
 (:func:`assess_recovery_bias`), plotting, and commonly reused standalone
-utilities (ALS continuum fitting, Gauss-Hermite LOSVD characterization,
-legacy-format file I/O).
+utilities (asymmetric-least-squares continuum normalization,
+Gauss-Hermite LOSVD characterization, legacy-format file I/O).
 
 Internal implementation helpers (leading-underscore names such as
 ``_fit_map_once`` or ``_update_clean_mask``) are intentionally *not*
@@ -30,16 +30,9 @@ from .config import FitConfig, load_config_from_toml
 # ── Continuum ──────────────────────────────────────────────────────────────
 from .continuum import (
     asymmetric_least_squares_continuum,
-    build_als_line_mask,
-    fit_als_target,
-    fit_als_target_absorption_clean,
     grow_boolean_mask,
     grow_boolean_mask_A,
-    init_als_continuum,
-    optimize_als_hyperparams_for_target,
     robust_sigma,
-    score_als_target,
-    update_als_continuum,
 )
 
 # ── Error estimation ───────────────────────────────────────────────────────
@@ -118,7 +111,7 @@ from .numerics import (
 # ── Plotting ───────────────────────────────────────────────────────────────
 from .plotting import (
     PROMINENT_STELLAR_LINES,
-    plot_als_continuum,
+    plot_continuum,
     plot_fit,
     plot_losvd,
 )
@@ -172,10 +165,8 @@ __all__ = [
     "interp_template_tp_with_outside", "build_template_matrix_fortran",
     "resolution_mismatch_sigma_A", "convolve_gaussian_pixels",
     # continuum
-    "robust_sigma", "asymmetric_least_squares_continuum", "score_als_target",
-    "optimize_als_hyperparams_for_target", "fit_als_target", "grow_boolean_mask",
-    "grow_boolean_mask_A", "fit_als_target_absorption_clean",
-    "build_als_line_mask", "init_als_continuum", "update_als_continuum",
+    "robust_sigma", "asymmetric_least_squares_continuum",
+    "grow_boolean_mask", "grow_boolean_mask_A",
     # numerics
     "evaluate_model_gp", "objective_map", "objective_components",
     "compute_weighted_template_spectrum", "jax",
@@ -193,7 +184,7 @@ __all__ = [
     "gauss_hermite_losvd_model_ho", "fit_losvd_gauss_hermite",
     "fit_losvd_gauss_hermite_higher", "getfwhm_fortran_like",
     # plotting
-    "plot_fit", "plot_losvd", "plot_als_continuum", "PROMINENT_STELLAR_LINES",
+    "plot_fit", "plot_losvd", "plot_continuum", "PROMINENT_STELLAR_LINES",
     # errors
     "LOSVDErrorEstimator", "estimate_losvd_errors",
     # recovery-bias validation

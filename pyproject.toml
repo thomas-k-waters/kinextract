@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kinextract"
-version = "0.2.1"
+version = "0.3.0"
 description = "Non-parametric binned-LOSVD spectral fitter for galaxy kinematics"
 readme = "README.md"
 license = { file = "LICENSE" }

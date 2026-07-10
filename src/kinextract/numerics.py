@@ -141,7 +141,7 @@ def _get_or_build_jax_vg(st):
     key = (
         int(st.nl), int(st.nt), int(st.npix), int(st.nlosvd),
         int(st.icoff), bool(st.fit_global_amp),
-        bool(st.fortran_template_mixture), bool(st.fit_als_continuum),
+        bool(st.fortran_template_mixture), bool(st.fit_continuum),
         float(st.xlam), float(st.sigl0), float(getattr(st, "v_center", 0.0)),
         float(st.coffi)  if int(st.icoff) in (0, 2) else 0.0,
         float(st.coff2i) if int(st.icoff) == 0       else 0.0,
@@ -205,18 +205,45 @@ def _compute_chi2(
     return chi2
 
 
+def _representative_template_for_xcorr(st: FitState, good: np.ndarray, detrend_fn) -> np.ndarray:
+    """Build an NNLS-weighted reference template for :func:`estimate_velocity_xcorr`.
+
+    Runs a quick, cheap non-negative least-squares fit of the detrended
+    template matrix against the detrended galaxy spectrum -- deliberately
+    ignoring LOSVD broadening entirely (this only needs a rough idea of
+    which templates actually dominate the fit, not a real kinematic
+    measurement) -- and returns the resulting weighted template
+    combination. Falls back to the unweighted mean if the fit fails or
+    collapses to zero weight.
+
+    See :func:`estimate_velocity_xcorr`'s docstring for why an unweighted
+    mean was found to carry a real velocity bias here, and why this
+    construction (previously tried and abandoned for the analogous
+    width-domain estimator) is safe to reuse for a position estimate.
+    """
+    from scipy.optimize import nnls
+
+    t_detrended = np.column_stack([detrend_fn(st.t[:, i]) for i in range(st.t.shape[1])])
+    g_detrended = detrend_fn(st.g)
+    try:
+        w, _ = nnls(t_detrended[good], g_detrended[good])
+    except Exception:
+        return st.t.mean(axis=1)
+    if np.sum(w) <= 0:
+        return st.t.mean(axis=1)
+    return st.t @ w / np.sum(w)
+
+
 def estimate_velocity_xcorr(st: FitState, detrend_deg: int = 3) -> float:
     """Cross-correlate the galaxy spectrum against the template to estimate
     a velocity shift.
 
-    Used only by the optional Bayesian/NUTS path
-    (:func:`kinextract.bayesian.fit_state_bayesian`) to recenter its
-    wing-taper smoothness prior. The default MAP path does **not** use
-    this estimate -- it always leaves the wing taper's `v_center`
-    (:func:`_compute_smoothness`) at 0.0, matching the original Fortran
-    convention, since this estimate is a coarse, pixel-lag
-    cross-correlation (not a precision measurement) and a fixed zero
-    point is more robust across a broad range of targets.
+    Used by the optional Bayesian/NUTS path
+    (:func:`kinextract.bayesian.fit_state_bayesian`), by
+    :mod:`kinextract.joint`'s ``recenter_v``/``joint_recenter_v`` option, and
+    by the shipped MAP path's
+    :func:`kinextract.fitting._fit_map_sigl0_recenter` to recenter the
+    wing-taper smoothness prior/penalty's ``v_center`` pivot.
 
     Both the galaxy spectrum and template are detrended (each has a
     degree-`detrend_deg` polynomial, fit over the good pixels, subtracted)
@@ -233,15 +260,56 @@ def estimate_velocity_xcorr(st: FitState, detrend_deg: int = 3) -> float:
     cases where the true shift was several pixels), while the detrended
     version recovers the correct sign and rough magnitude of the shift.
 
-    Uses a simple pixel-lag cross-correlation on the detrended residuals:
-    the fit window is narrow enough (typically a few hundred Angstrom
+    Uses a pixel-lag cross-correlation on the detrended residuals, refined
+    to sub-pixel precision by a parabolic (3-point) fit to the correlation
+    values immediately around the integer-lag peak (the standard
+    quadratic-interpolation convention for cross-correlation peak-finding).
+    The fit window is narrow enough (typically a few hundred Angstrom
     around one reference wavelength) that a locally-linear pixel-to-
     velocity conversion is already used elsewhere in this package (e.g.
-    ``facnew0`` in :func:`kinextract.spectrum.make_fit_state`), and this
-    estimate only needs to be good enough to recenter a regularization
-    term, not to be the final measurement -- so an integer-pixel-lag
-    resolution (no sub-pixel interpolation of the correlation peak) is
-    sufficient.
+    ``facnew0`` in :func:`kinextract.spectrum.make_fit_state`).
+
+    **Sub-pixel refinement matters here.** An earlier, integer-lag-only
+    version of this function could only return multiples of one MUSE pixel
+    step (~43.6 km/s at the Ca II triplet) -- coarse enough that on real
+    N5102 MUSE bins with a true velocity of a few km/s (well under half a
+    pixel step), the estimate would sometimes land exactly on the correct
+    lag (0) and sometimes snap to an adjacent, wrong one (e.g. -43.7 km/s
+    for a true velocity of -4.5 km/s), with no way to represent anything
+    in between -- confirmed directly against real bins compared against
+    the original Fortran pipeline's own recovered velocities. Since this
+    value sets the wing-taper's ``v_center`` regularization pivot
+    (:mod:`kinextract.joint`), a wrong-by-a-full-pixel pivot measurably
+    biased the recovered LOSVD (V and, via the wing-taper's asymmetric
+    treatment of the blue/red wings around a mismatched pivot, h3) for
+    whichever bins happened to land on the wrong side of a quantization
+    boundary. The parabolic refinement removes the quantization itself,
+    though it does not fully eliminate the separate, rarer failure mode of
+    the *integer* lag itself being wrong (e.g. a genuinely comparable-height
+    neighboring peak tipped by noise) -- that failure mode is why
+    :mod:`kinextract.joint`'s xlam auto-selector cross-checks the
+    recentered fit against multiple xlam candidates rather than trusting
+    this estimate blindly (see ``fit_joint_auto_xlam``'s ``_candidate_ok``).
+
+    **Reference template matters here too.** For a multi-template library
+    (``st.t.ndim == 2``), the correlation reference is an NNLS-weighted
+    combination of the templates (:func:`_representative_template_for_xcorr`),
+    not an unweighted mean. An unweighted mean of the bundled 35-template
+    MUSE library was found to carry a real, roughly constant ~20 km/s
+    velocity bias on real N5102 bins (confirmed against the original
+    Fortran pipeline's own recovered velocities) -- plausibly a small
+    net wavelength-calibration offset between the library's per-star
+    average and whichever templates actually dominate a given fit. Since
+    this is a *position* (not width) estimate, it does not carry the
+    failure mode that ruled out an analogous NNLS-weighted reference for
+    the width-domain analogue of this function (an earlier,
+    since-abandoned ``estimate_sigma_xcorr``): there, letting the
+    quick NNLS pre-fit ignore LOSVD broadening could let it absorb
+    broadening-like structure into the reference and corrupt a width
+    deconvolution; a position (correlation-lag) estimate has no such
+    coupling to template width, so the same construction is safe to reuse
+    here and removes the bias almost entirely on tested real bins (e.g.
+    -19.7 km/s -> +0.5 km/s against a true velocity of -0.5 km/s).
 
     Parameters
     ----------
@@ -268,17 +336,38 @@ def estimate_velocity_xcorr(st: FitState, detrend_deg: int = 3) -> float:
     good = (st.gerr < BIG) & np.isfinite(st.g) & np.isfinite(st.gerr) & (st.gerr > 0.0)
     if good.sum() < max(10, 2 * detrend_deg + 3):
         return 0.0
-    tpl = st.t.mean(axis=1) if st.t.ndim == 2 else np.ravel(st.t)
 
     def _detrend(sig: np.ndarray) -> np.ndarray:
         idx = np.arange(len(sig), dtype=float)
         coefs = np.polyfit(idx[good], sig[good], detrend_deg)
         return np.where(good, sig - np.polyval(coefs, idx), 0.0)
 
+    if st.t.ndim == 2:
+        tpl = _representative_template_for_xcorr(st, good, _detrend)
+    else:
+        tpl = np.ravel(st.t)
+
     g = _detrend(st.g)
     t = _detrend(tpl)
     xcorr = np.correlate(g, t, mode="full")
-    lag_pix = int(np.argmax(xcorr)) - (len(t) - 1)
+    peak_idx = int(np.argmax(xcorr))
+    lag_pix = float(peak_idx - (len(t) - 1))
+
+    # Parabolic (3-point) sub-pixel refinement: fit a parabola through the
+    # peak and its immediate neighbors and use its vertex, rather than the
+    # bare integer-lag argmax -- see this function's docstring for why the
+    # integer-only version was a real, measured source of bias. Skipped (falls
+    # back to the integer lag) at either edge of the correlation array, or if
+    # the local curvature is degenerate (e.g. a flat-topped or non-peaked
+    # neighborhood), since the vertex formula is undefined/unreliable there.
+    if 0 < peak_idx < len(xcorr) - 1:
+        y_m1, y_0, y_p1 = xcorr[peak_idx - 1], xcorr[peak_idx], xcorr[peak_idx + 1]
+        denom = y_m1 - 2.0 * y_0 + y_p1
+        if denom < 0.0:  # concave down at the peak, as a real maximum should be
+            delta = 0.5 * (y_m1 - y_p1) / denom
+            if np.isfinite(delta) and abs(delta) <= 1.0:
+                lag_pix += float(delta)
+
     lam_ref = float(st.x[len(st.x) // 2])
     v_est = lag_pix * st.scale * CEE / lam_ref
     return float(np.clip(v_est, st.xl[0], st.xl[-1]))
@@ -481,8 +570,8 @@ def evaluate_model_gp(
         Precomputed fit state holding the data, template matrix, velocity
         grids, and configuration flags needed to evaluate the model.
     apply_continuum : bool, optional
-        If True (default), multiply the model by the current ALS continuum
-        (``st.continuum_mult``) when ``st.fit_als_continuum`` is set. Set to
+        If True (default), multiply the model by the current continuum
+        (``st.continuum_mult``) when ``st.fit_continuum`` is set. Set to
         False to obtain the continuum-free model, e.g. for diagnostics.
 
     Returns
@@ -569,7 +658,7 @@ def evaluate_model_gp(
     elif st.continuum_poly_mode == "multiplicative" and st.continuum_poly_x is not None:
         gp = gp * (1.0 + poly * st.continuum_poly_x)
 
-    if apply_continuum and st.fit_als_continuum:
+    if apply_continuum and st.fit_continuum:
         cont = getattr(st, "continuum_mult", None)
         if cont is not None:
             gp = gp * cont
@@ -651,7 +740,7 @@ def _build_jax_objective_value_and_grad(st: FitState):
         static structure (array shapes, dtype-relevant flags, and
         currently-fixed scalars such as ``coffi``/``coff2i``, ``xlam``,
         ``sigl0``) is baked into the compiled kernel; genuinely dynamic
-        per-call data (the observed spectrum `g`, its errors, and the ALS
+        per-call data (the observed spectrum `g`, its errors, and the
         continuum) are passed as explicit runtime arguments instead (see
         Notes).
 
@@ -665,11 +754,12 @@ def _build_jax_objective_value_and_grad(st: FitState):
 
     Notes
     -----
-    Both `g` (observed spectrum) and `cont` (ALS continuum) are explicit
+    Both `g` (observed spectrum) and `cont` (continuum) are explicit
     arguments, not closure variables. This is critical for performance:
 
-    * `cont` changes between ALS outer iterations, so making it explicit
-      lets the same compiled kernel serve all outer iterations without
+    * `cont` changes between refits (e.g. bootstrap replicates, or
+      :mod:`kinextract.joint`'s internal xlam/sigl0 search), so making it
+      explicit lets the same compiled kernel serve all of them without
       recompilation.
     * `g` changes between bootstrap replicates, so making it explicit means
       the module-level ``_JAX_VG_CACHE`` (see :func:`_get_or_build_jax_vg`)
@@ -690,7 +780,7 @@ def _build_jax_objective_value_and_grad(st: FitState):
     icoff = int(st.icoff)
     fit_global_amp = bool(st.fit_global_amp)
     fortran_template_mixture = bool(st.fortran_template_mixture)
-    fit_als_continuum = bool(st.fit_als_continuum)
+    fit_continuum = bool(st.fit_continuum)
 
     t = jnp.asarray(st.t, dtype=jnp.float64)
     outside_tpl = jnp.asarray(st.outside_tpl, dtype=bool)
@@ -785,7 +875,7 @@ def _build_jax_objective_value_and_grad(st: FitState):
         gp = jnp.where(xs != 0.0, gp * suml / xs, gp)
         gp = gp * A
 
-        if fit_als_continuum:
+        if fit_continuum:
             gp = gp * cont
 
         valid = (

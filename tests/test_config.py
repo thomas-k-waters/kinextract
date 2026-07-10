@@ -22,7 +22,7 @@ def test_fitconfig_instantiates_with_defaults():
     cfg = FitConfig()
     assert cfg.icoff == 1
     assert cfg.xlam_auto is False        # default off; TOML config enables it
-    assert cfg.fit_als_continuum is False # default off; TOML config enables it
+    assert cfg.fit_continuum is False # default off; TOML config enables it
     assert isinstance(cfg.xlam_auto_grid, (list, tuple))
 
 

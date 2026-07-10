@@ -17,18 +17,17 @@ estimate (:func:`estimate_velocity_xcorr`) rather than the fixed grid's
 zero point, so it doesn't asymmetrically suppress whichever tail of the
 LOSVD happens to sit farther from grid-zero for a nonzero true velocity.
 
-The ALS continuum co-fit uses the same outer-loop structure as
-:func:`kinextract.continuum.update_als_continuum` (which only ever sees a
-flat parameter vector) -- the *inner* "get me a good current LOSVD/
-template/continuum-offset estimate" step is a cheap MAP point-estimate
-refit, not a full NUTS run, since the continuum is a nuisance parameter
-here, not the reported measurement. Regularization-strength (``xlam``)
-selection similarly uses a cheap MAP-based grid search
+Continuum-cofitting (``cfg.fit_continuum=True``) is not supported here --
+:func:`fit_state_bayesian` raises ``NotImplementedError`` up front for
+that case. Only pre-normalized-mode fits (``cfg.fit_continuum=False``)
+are supported: the continuum multiplier passed into the model is fixed at
+all-ones, so it's a nuisance-free constant rather than something this
+module needs to converge via an outer loop. Regularization-strength
+(``xlam``) selection uses a cheap MAP-based grid search
 (:func:`kinextract.fitting._auto_select_xlam`) as an internal heuristic --
 picking a regularization strength is a hyperparameter-search problem, not
 the final reported measurement -- so only *one* full NUTS posterior is
-run per fit, at the very end, once the continuum and ``xlam`` have
-converged.
+run per fit, at the very end, once ``xlam`` has converged.
 """
 from __future__ import annotations
 
@@ -43,7 +42,6 @@ from numpyro.infer import MCMC, NUTS
 
 from ._utils import log
 from .config import FitConfig
-from .continuum import update_als_continuum
 from .numerics import _wing_taper_lam_vec, estimate_velocity_xcorr
 from .state import FitState
 
@@ -79,7 +77,7 @@ def build_numpyro_model(st: FitState, v_center: float):
 
     The forward-model math (template mixture, LOSVD interpolation via the
     precomputed ``losvd_j0/j1/w`` tables, pixel-scatter convolution via
-    ``ip_map``/``ip_mask``, ALS continuum multiplication, and the
+    ``ip_map``/``ip_mask``, continuum multiplication, and the
     ``continuum_poly_mode`` additive/multiplicative correction) is reframed
     as a log-joint-density: the negative log-posterior (up to an additive
     constant) is ``0.5*chi2 + 0.5*smooth`` -- the ``0.5`` on both terms
@@ -94,11 +92,14 @@ def build_numpyro_model(st: FitState, v_center: float):
     ``sum(b) == 1`` already holds exactly by construction via the softmax
     parameterization above.
 
-    The ALS continuum is a runtime *argument* of the returned model
-    (``model(cont)``), not a value baked into the closure: it changes every
-    ALS outer iteration, and passing it as an argument (with a fixed array
-    shape) lets JAX/NumPyro reuse one compiled trace across iterations
-    instead of recompiling from scratch each time.
+    The continuum multiplier is a runtime *argument* of the returned model
+    (``model(cont)``), not a value baked into the closure -- passing it as
+    an argument (with a fixed array shape) lets JAX/NumPyro reuse one
+    compiled trace across calls instead of recompiling from scratch each
+    time. In practice ``cont`` is always all-ones here (only
+    pre-normalized-mode fits, ``cfg.fit_continuum=False``, are supported
+    by :func:`fit_state_bayesian`), but the model still accepts it as an
+    explicit argument for the (unsupported) continuum-cofit case.
 
     Parameters
     ----------
@@ -107,8 +108,7 @@ def build_numpyro_model(st: FitState, v_center: float):
         LOSVD/pixel-shift interpolation tables.
     v_center : float
         Velocity to recenter the wing-taper regularization on (see
-        :func:`estimate_velocity_xcorr`). Fixed for the whole fit (does
-        not change between ALS outer iterations).
+        :func:`estimate_velocity_xcorr`). Fixed for the whole fit.
 
     Returns
     -------
@@ -120,7 +120,7 @@ def build_numpyro_model(st: FitState, v_center: float):
     icoff = int(st.icoff)
     fit_global_amp = bool(st.fit_global_amp)
     fortran_template_mixture = bool(st.fortran_template_mixture)
-    fit_als_continuum = bool(st.fit_als_continuum)
+    fit_continuum = bool(st.fit_continuum)
     poly_mode = str(getattr(st, "continuum_poly_mode", "none"))
     poly_bound = float(getattr(st, "continuum_poly_bound", 0.1))
     poly_x = (
@@ -217,7 +217,7 @@ def build_numpyro_model(st: FitState, v_center: float):
             elif poly_mode == "multiplicative":
                 gp = gp * (1.0 + poly * poly_x)
 
-        if fit_als_continuum:
+        if fit_continuum:
             gp = gp * cont_arr
 
         valid = (
@@ -250,7 +250,6 @@ def _assemble_flat_vector(st: FitState, b, w, coff: float = 0.0, coff2: float = 
     (``b``, ``w``, then the icoff-dependent continuum-offset block, then
     an optional global amplitude, then an optional polynomial-continuum
     coefficient), for feeding a posterior-mean vector into
-    :func:`kinextract.continuum.update_als_continuum` and
     :func:`kinextract.numerics.evaluate_model_gp`.
     """
     parts = [np.asarray(b, float), np.asarray(w, float)]
@@ -269,8 +268,8 @@ def _nudge_inside(x: np.ndarray, lo: float, hi: float, frac: float = 1e-3) -> np
     """Clip ``x`` to lie strictly inside ``(lo, hi)``, margined by ``frac``
     of the interval width.
 
-    L-BFGS-B (used for the ALS continuum's cheap MAP refits, and for
-    ``cfg.clean``/xlam auto-selection) very commonly converges with one or
+    L-BFGS-B (used for ``cfg.clean``/xlam auto-selection's cheap MAP
+    refits) very commonly converges with one or
     more box constraints *active* -- a parameter sitting exactly at its
     bound is a normal, expected outcome for a bound-constrained optimizer,
     not a bug. NumPyro's constrained-to-unconstrained initialization
@@ -383,7 +382,8 @@ def run_nuts_fit(mcmc: MCMC, cont, g, gerr, *, seed: int = 0):
     mcmc : numpyro.infer.MCMC
         Built by :func:`build_mcmc` for this iteration's init_params.
     cont : ndarray
-        Current ALS continuum estimate, passed through to the model.
+        Current continuum multiplier, passed through to the model (always
+        all-ones in the supported pre-normalized-mode case).
     g, gerr : ndarray
         Observed spectrum and per-pixel error, passed through to the
         model (``gerr`` already encodes any masking via the ``BIG``
@@ -438,9 +438,8 @@ def run_nuts_fit(mcmc: MCMC, cont, g, gerr, *, seed: int = 0):
 
 def _posterior_mean_vector(st: FitState, samples: dict) -> tuple[np.ndarray, dict]:
     """Reduce posterior samples to a flat point-estimate vector (posterior
-    mean of every site) plus the per-site mean arrays, for feeding into
-    :func:`kinextract.continuum.update_als_continuum` or as the final
-    reported best-fit parameters.
+    mean of every site) plus the per-site mean arrays, for use as the
+    final reported best-fit parameters.
     """
     b_mean = np.asarray(samples["b"]).mean(axis=0)
     w_mean = np.asarray(samples["w"]).mean(axis=0)
@@ -457,6 +456,15 @@ def fit_state_bayesian(st: FitState, cfg: FitConfig, a0: np.ndarray, bounds: lis
     """Run the full Bayesian LOSVD/template/continuum fit, called from
     :func:`kinextract.fitting.run_spectral_fit`.
 
+    Only pre-normalized-mode fits are supported (``cfg.fit_continuum=False``):
+    this raises ``NotImplementedError`` immediately if ``cfg.fit_continuum``
+    is True, since continuum-cofitting has no NUTS-compatible implementation
+    here (see the module docstring). Pre-normalize the spectrum first (see
+    :func:`kinextract.continuum.asymmetric_least_squares_continuum` and
+    ``examples/notebooks/06_prenormalized_workflow.ipynb``), or use the MAP
+    joint path (:mod:`kinextract.joint`) if a cofit continuum with
+    bootstrap uncertainty estimates is needed instead.
+
     ``cfg.clean=True`` (iterative sigma-clipping of outlier pixels) is
     handled as a one-time MAP-based preprocessing pass
     (:func:`kinextract.fitting.run_iterative_clean_map`) before any
@@ -464,14 +472,9 @@ def fit_state_bayesian(st: FitState, cfg: FitConfig, a0: np.ndarray, bounds: lis
     data-quality step, not the scientific measurement, so it doesn't need
     full posterior sampling.
 
-    The ALS continuum outer loop (:func:`kinextract.continuum.update_als_continuum`)
-    is driven by cheap MAP point-estimate refits, not a full NUTS run per
-    outer iteration, since the continuum is a nuisance parameter here, not
-    the scientific measurement (same reasoning as the ``cfg.clean``
-    handling above). Regularization-strength (``xlam``) auto-selection
-    also uses a cheap MAP-based grid search for the same reason (see the
-    module docstring). One full NUTS posterior is run at the very end,
-    once the continuum has converged, at ``cfg``'s configured (fast)
+    Regularization-strength (``xlam``) auto-selection uses a cheap
+    MAP-based grid search (see the module docstring). One full NUTS
+    posterior is run at the very end, at ``cfg``'s configured (fast)
     sampling budget -- if that posterior fails the reliability gate (poor
     R-hat or too many divergences, more likely for real data with more
     structure than a smooth synthetic mock), it is retried once at a
@@ -485,9 +488,10 @@ def fit_state_bayesian(st: FitState, cfg: FitConfig, a0: np.ndarray, bounds: lis
         Fit state to update in place (``st.xlam``, ``st.continuum_mult``,
         etc.).
     cfg : FitConfig
-        Run configuration. NUTS-specific fields (``nuts_num_warmup``,
-        ``nuts_num_samples``, ``nuts_num_chains``, ``nuts_seed``) fall
-        back to sensible defaults if unset.
+        Run configuration. Must have ``cfg.fit_continuum=False``.
+        NUTS-specific fields (``nuts_num_warmup``, ``nuts_num_samples``,
+        ``nuts_num_chains``, ``nuts_seed``) fall back to sensible defaults
+        if unset.
     a0 : ndarray
         Initial flat parameter vector (from
         :func:`kinextract.spectrum.build_initial_guess_nonparam`), used
@@ -515,14 +519,26 @@ def fit_state_bayesian(st: FitState, cfg: FitConfig, a0: np.ndarray, bounds: lis
         transition -- a direct measure of posterior geometry difficulty),
         and ``setup_wall_time_s``/``nuts_wall_time_s`` (wall-clock split
         between everything before the final NUTS call -- cleaning, xlam
-        selection, ALS continuum convergence -- and the final NUTS call(s)
-        themselves, which typically dominate total runtime; the latter
-        includes the retry time if a budget escalation happened).
+        selection -- and the final NUTS call(s) themselves, which
+        typically dominate total runtime; the latter includes the retry
+        time if a budget escalation happened).
     """
     from types import SimpleNamespace
 
-    from .fitting import _auto_select_xlam, _fit_map_once, run_iterative_clean_map
+    from .fitting import _auto_select_xlam, _auto_select_xlam_discrepancy, run_iterative_clean_map
     from .masking import build_clean_protect_mask
+
+    if getattr(cfg, "fit_continuum", False):
+        raise NotImplementedError(
+            "kinextract.bayesian does not support continuum-cofitting "
+            "(cfg.fit_continuum=True): only pre-normalized-mode fits "
+            "(cfg.fit_continuum=False) are supported for the Bayesian/NUTS "
+            "path. Pre-normalize the spectrum first (see "
+            "kinextract.continuum.asymmetric_least_squares_continuum and "
+            "examples/notebooks/06_prenormalized_workflow.ipynb), or use "
+            "the MAP joint path (kinextract.joint) if you need a cofit "
+            "continuum with bootstrap uncertainty estimates."
+        )
 
     t_start = time.perf_counter()
 
@@ -566,12 +582,20 @@ def fit_state_bayesian(st: FitState, cfg: FitConfig, a0: np.ndarray, bounds: lis
         st.clean_good_mask = good_mask
 
     if getattr(cfg, "xlam_auto", False):
-        _auto_select_xlam(
-            st, cfg, np.asarray(a0, float), bounds,
-            xlam_grid=getattr(cfg, "xlam_auto_grid", (1e2, 1e3, 1e4, 1e5, 1e6, 1e7)),
-            smooth_threshold=float(getattr(cfg, "xlam_smooth_threshold", 0.25)),
-            map_kwargs=map_kwargs,
-        )
+        xlam_grid = getattr(cfg, "xlam_auto_grid", (1e2, 1e3, 1e4, 1e5, 1e6, 1e7))
+        if str(getattr(cfg, "xlam_criterion", "discrepancy")).lower() == "discrepancy":
+            _auto_select_xlam_discrepancy(
+                st, cfg, np.asarray(a0, float), bounds,
+                xlam_grid=xlam_grid, map_kwargs=map_kwargs,
+                nsigma=float(getattr(cfg, "xlam_discrepancy_nsigma", 0.3)),
+            )
+        else:
+            _auto_select_xlam(
+                st, cfg, np.asarray(a0, float), bounds,
+                xlam_grid=xlam_grid,
+                smooth_threshold=float(getattr(cfg, "xlam_smooth_threshold", 0.25)),
+                map_kwargs=map_kwargs,
+            )
 
     # Recomputed here (post-cleaning/xlam-selection) rather than reused from
     # st.v_center (set once, pre-cleaning, in make_fit_state): cleaning can
@@ -588,27 +612,6 @@ def fit_state_bayesian(st: FitState, cfg: FitConfig, a0: np.ndarray, bounds: lis
     )
 
     a_start = np.asarray(a0, float).copy()
-    if st.fit_als_continuum:
-        # Converge the ALS continuum via cheap MAP point-estimate refits,
-        # not full NUTS runs per outer iteration -- same reasoning as the
-        # cfg.clean preprocessing above: the continuum is a nuisance
-        # parameter here, not the scientific measurement, and re-deriving
-        # it doesn't need posterior sampling. The reported kinematics come
-        # from the single full NUTS posterior below, evaluated once the
-        # continuum has stopped changing.
-        for k in range(cfg.als_outer_iter):
-            res = _fit_map_once(
-                st, a_start, bounds, cfg.map_maxiter, cfg.map_ftol, cfg.map_maxfun,
-                cfg.print_every, f"MAP ALS outer {k + 1}/{cfg.als_outer_iter} (continuum convergence)",
-                **map_kwargs,
-            )
-            last_delta = update_als_continuum(st, cfg, res.x)
-            a_start = np.asarray(res.x, float).copy()
-            log(f"ALS continuum outer {k + 1}/{cfg.als_outer_iter}: "
-                f"median fractional change = {last_delta:.4g}")
-            if last_delta < cfg.als_outer_tol:
-                log(f"ALS continuum converged after {k + 1} outer iterations")
-                break
 
     model = build_numpyro_model(st, v_center)
     init_params = _init_params_from_flat(st, a_start)

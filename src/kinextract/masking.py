@@ -1,5 +1,4 @@
-"""Pixel-masking layers for kinextract, distinct from (but complementary to)
-the ALS continuum masking in ``continuum.py``.
+"""Pixel-masking layers for kinextract.
 
 This module implements two separate masking systems used by the LOSVD fit.
 The first is emission-line pre-masking (`build_emission_line_mask`,
@@ -29,6 +28,14 @@ from ._utils import BIG, CEE, log
 from .config import FitConfig
 from .state import FitState
 
+# Ca II triplet rest-frame centers/half-widths (Å), used to exclude the
+# triplet's absorption troughs from the flanking-continuum estimate in
+# emission-line detection (their troughs would otherwise pull the local
+# continuum estimate down, producing false-positive emission detections
+# just redward of the triplet).
+_CAII_CENTERS_A = (8498.02, 8542.09, 8662.14)
+_CAII_HALF_WIDTHS_A = (8.0, 8.0, 8.0)
+
 # =============================================================================
 # Section 9 - Sigma-clipping / cleaning (masking functions)
 # =============================================================================
@@ -38,8 +45,7 @@ def _clean_center_to_fit_frame(center: float, frame: str, cfg: FitConfig) -> flo
     Convert cleaning-protection line center into st.x frame.
 
     st.x is rest-frame for raw .spec files, so observed-frame centers are
-    divided by 1 + zgal.  als_mask_center_shift_A (set by als_auto_caii_shift)
-    is also applied so the protection window tracks the actual line position.
+    divided by 1 + zgal.
     """
     frame = frame.lower().strip()
     c = float(center)
@@ -49,7 +55,6 @@ def _clean_center_to_fit_frame(center: float, frame: str, cfg: FitConfig) -> flo
     elif frame != "rest":
         raise ValueError(f"clean frame must be 'rest' or 'observed', got {frame!r}")
 
-    c += float(getattr(cfg, "als_mask_center_shift_A", 0.0))
     return c
 
 
@@ -215,9 +220,9 @@ def build_emission_line_mask(
         Fit configuration; supplies ``mask_emission_lines_in_fit``,
         ``mask_emission_line_half_width_A``, ``mask_emission_line_snr_threshold``,
         ``mask_emission_line_snr_context_A``, ``mask_paschen_lines_in_fit``,
-        ``wavefitmin``/``wavefitmax``, and the Ca II window settings
-        (``als_ca_centers``, ``als_ca_half_widths``) used to protect the
-        flanking-continuum estimate.
+        and ``wavefitmin``/``wavefitmax``. The fixed Ca II triplet window
+        used to protect the flanking-continuum estimate is not
+        configurable (see ``_CAII_CENTERS_A``/``_CAII_HALF_WIDTHS_A``).
 
     Returns
     -------
@@ -269,12 +274,8 @@ def build_emission_line_mask(
             # Exclude Ca II triplet absorption from the flank window.  Their
             # troughs pull cont_est down, making adjacent continuum pixels look
             # like emission (false positive for lines just redward of Ca II).
-            abs_ctrs = np.asarray(
-                getattr(cfg, "als_ca_centers", (8498.02, 8542.09, 8662.14)), float
-            )
-            abs_hws = np.asarray(
-                getattr(cfg, "als_ca_half_widths", (14.0, 16.0, 18.0)), float
-            )
+            abs_ctrs = np.asarray(_CAII_CENTERS_A, float)
+            abs_hws = np.asarray(_CAII_HALF_WIDTHS_A, float)
             for _ac, _ahw in zip(abs_ctrs, abs_hws):
                 flanks &= ~((x >= _ac - _ahw) & (x <= _ac + _ahw))
 
@@ -336,8 +337,8 @@ def build_clean_protect_mask(st: FitState, cfg: FitConfig) -> np.ndarray:
         ``st.npix``.
     cfg : FitConfig
         Fit configuration; supplies ``clean_protect_ca_triplet``,
-        ``clean_protect_windows``, ``clean_protect_windows_frame``,
-        ``extra_absorption_lines``, and ``als_mask_center_shift_A``.
+        ``clean_protect_windows``, ``clean_protect_windows_frame``, and
+        ``extra_absorption_lines``.
 
     Returns
     -------
@@ -369,11 +370,10 @@ def build_clean_protect_mask(st: FitState, cfg: FitConfig) -> np.ndarray:
     for item in getattr(cfg, "extra_absorption_lines", ()):
         c_raw = float(item[0])
         hw = float(item[1])
-        c_fit = c_raw + float(getattr(cfg, "als_mask_center_shift_A", 0.0))
-        m = (st.x >= c_fit - hw) & (st.x <= c_fit + hw)
+        m = (st.x >= c_raw - hw) & (st.x <= c_raw + hw)
         protect |= m
         name = item[2] if len(item) >= 3 else f"{c_raw:.2f} Å"
-        log(f"  protecting extra line {name} [{c_fit - hw:.1f}, {c_fit + hw:.1f}] npix={m.sum()}")
+        log(f"  protecting extra line {name} [{c_raw - hw:.1f}, {c_raw + hw:.1f}] npix={m.sum()}")
 
     return protect
 
@@ -449,8 +449,8 @@ def _segment_emission_mask(
 
     This catches:
     - Emission line wings that fall just below the SNR threshold used by
-      build_emission_line_mask (the most common cause of ALS elevation in
-      spectra with grouped emission near the blue/red edge).
+      build_emission_line_mask (a common source of spurious continuum
+      elevation in spectra with grouped emission near the blue/red edge).
     - Emission features entirely absent from the known line table.
 
     Controlled by cfg fields:
@@ -468,12 +468,8 @@ def _segment_emission_mask(
     n_sigma = float(getattr(cfg, "segment_emission_n_sigma", 3.0))
     win_A = float(getattr(cfg, "segment_emission_win_A", 50.0))
 
-    ca_centers = np.asarray(
-        getattr(cfg, "als_ca_centers", (8498.02, 8542.09, 8662.14)), float
-    )
-    ca_hw_arr = np.asarray(
-        getattr(cfg, "als_ca_half_widths", (14.0, 16.0, 18.0)), float
-    )
+    ca_centers = np.asarray(_CAII_CENTERS_A, float)
+    ca_hw_arr = np.asarray(_CAII_HALF_WIDTHS_A, float)
     # Use 1.5× the broadest Ca mask half-width as the margin around each line
     # so that the strong Ca II absorption troughs do not inflate the rolling
     # median or the MAD in their respective segments.

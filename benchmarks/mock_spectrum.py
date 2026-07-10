@@ -155,6 +155,68 @@ def build_synthetic_caii_template(wavelength: np.ndarray,
     return template
 
 
+# Loosely modeled on the weak Fe I/Ti I/Mg I blends flanking the Ca II
+# triplet in a real cool-giant spectrum (not a literal line list -- centers
+# and depths are illustrative, not measured). (center_A, depth, width_A).
+DEFAULT_WEAK_LINE_FOREST: tuple[tuple[float, float, float], ...] = (
+    (8420.0, 0.05, 2.5), (8468.0, 0.04, 2.0), (8514.0, 0.06, 2.5),
+    (8611.0, 0.05, 2.0), (8621.0, 0.05, 2.5), (8688.0, 0.04, 2.0),
+    (8710.0, 0.05, 2.5), (8730.0, 0.03, 2.0), (8760.0, 0.04, 2.5),
+    (8807.0, 0.05, 2.5),
+)
+
+
+def build_realistic_synthetic_template(
+    wavelength: np.ndarray,
+    ca_centers=(8498.02, 8542.09, 8662.14),
+    ca_depths=(0.55, 0.70, 0.65),
+    ca_width_A: float = 5.0,
+    weak_lines: tuple[tuple[float, float, float], ...] = DEFAULT_WEAK_LINE_FOREST,
+) -> np.ndarray:
+    """From-scratch synthetic Ca II-region template with a richer weak-line
+    forest layered on top of :func:`build_synthetic_caii_template`'s 3
+    isolated Gaussian troughs.
+
+    Motivated by a real finding (2026-07 validation review): the 3-trough
+    template's chi2-vs-xlam curve is nearly flat over several decades of
+    xlam -- chi2_red moves from 0.956 to 1.008 across xlam=1e3 to 1e6 on a
+    S/N~50 realization -- because it has essentially no genuine spectral
+    information content beyond the triplet's own width to constrain the
+    recovered LOSVD's width. That flatness breaks *any* xlam-vs-chi2-shape
+    based selector (grid+tolerance or the discrepancy-principle root-find
+    in :func:`kinextract.fitting._discrepancy_principle_search` alike),
+    not because the selector is wrong, but because the mock itself is
+    under-informative. Layering ~10 additional weaker, narrower absorption
+    features (`weak_lines`, defaulting to `DEFAULT_WEAK_LINE_FOREST`) across
+    the fit window gives chi2(xlam) genuine curvature without introducing
+    real template data (still a fully controlled, from-scratch mock with an
+    exactly known ground truth) -- closer to how a real stellar spectrum's
+    many weak lines jointly constrain the LOSVD width, rather than relying
+    on 3 isolated strong troughs alone.
+
+    Parameters
+    ----------
+    wavelength : ndarray
+        Wavelength grid (Å) to evaluate the template on.
+    ca_centers, ca_depths, ca_width_A : optional
+        Passed through to :func:`build_synthetic_caii_template` for the
+        strong Ca II triplet.
+    weak_lines : tuple of (center_A, depth, width_A), optional
+        Additional Gaussian absorption features layered on top of the
+        triplet. Defaults to :data:`DEFAULT_WEAK_LINE_FOREST`.
+
+    Returns
+    -------
+    ndarray
+        Normalized template (continuum = 1) with the Ca II triplet plus
+        the weak-line forest.
+    """
+    template = build_synthetic_caii_template(wavelength, ca_centers, ca_depths, ca_width_A)
+    for cen, depth, width_A in weak_lines:
+        template -= depth * np.exp(-0.5 * ((wavelength - cen) / width_A) ** 2)
+    return template
+
+
 # =============================================================================
 # LOSVD truth generation and convolution
 # =============================================================================
@@ -228,7 +290,7 @@ def apply_gaussian_losvd(template: np.ndarray, v_true: float, sigma_true: float,
 def realistic_galaxy_continuum(wavelength: np.ndarray, cont_level: float = 12_000.0,
                                 fringe_amplitude: float = 0.01) -> np.ndarray:
     """Cubic-polynomial + broad Gaussian hump (+ optional fringe) SED shape
-    (02_realistic_mock_fit.ipynb cell 3). Used only for ALS-mode mocks,
+    (02_realistic_mock_fit.ipynb cell 3). Used only for joint-mode mocks,
     which expect a full-amplitude, un-normalized broadband continuum shape.
     """
     x_norm = (wavelength - wavelength.mean()) / (0.5 * (wavelength[-1] - wavelength[0]))
@@ -246,7 +308,7 @@ def mild_linear_tilt(wavelength: np.ndarray, slope_frac: float = 0.05) -> np.nda
     the fit window. Used for poly_amp-mode mocks, so that mode is stress-tested
     inside the regime `continuum_poly_mode="multiplicative"` (a single linear
     coefficient, bound +/-0.1 by default) is actually designed for -- NOT the
-    full factor-~4 ALS-oriented SED, which would be an unfair/uninformative
+    full factor-~4 joint-mode-oriented SED, which would be an unfair/uninformative
     comparison for a mode that was never meant to remove that much shape.
     """
     x_norm = (wavelength - wavelength.mean()) / (0.5 * (wavelength[-1] - wavelength[0]))
@@ -360,7 +422,7 @@ def build_mock_spectrum(
     v_true: float,
     sigma_true: float,
     snr_target: float,
-    continuum_mode: Literal["als", "poly_amp", "none"],
+    continuum_mode: Literal["joint", "poly_amp", "none"],
     template_role: Literal["matched", "mismatched"],
     losvd_shape: Literal["gaussian", "gh_moderate", "gh_strong", "double_peak"],
     h3: float = 0.0,
@@ -443,7 +505,7 @@ def build_mock_spectrum(
                                           instrument.lam_center, instrument.step)
 
     # --- Continuum -------------------------------------------------------------
-    if continuum_mode == "als":
+    if continuum_mode == "joint":
         true_continuum = realistic_galaxy_continuum(wavelength, fringe_amplitude=0.01)
     elif continuum_mode == "poly_amp":
         true_continuum = mild_linear_tilt(wavelength) * float(np.median(np.abs(broadened))) * 1000.0

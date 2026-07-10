@@ -61,39 +61,42 @@ def mock_templates(rng, wavelength_grid):
 
 @pytest.fixture(scope="session")
 def real_muse_fit():
-    """A real MAP fit on the bundled MUSE example spectrum.
+    """A real MAP fit on the bundled, pre-normalized MUSE example spectrum.
 
-    Skipped if the bundled example data isn't present (e.g. a minimal
-    install without the examples/ directory). Session-scoped since it's an
-    expensive real fit, reused across any test that needs a realistic
-    (rather than synthetic) FitState/result pair.
+    Uses the real ``.norm`` file (produced by the user's own Greatlakes
+    pipeline) rather than a raw ``.spec`` file, so this exercises the
+    genuinely non-joint, pre-normalized-mode (``fit_continuum=False``) MAP
+    path -- the shipped ``a_map`` parameter layout that
+    :mod:`kinextract.errors`/:mod:`kinextract.validation`'s
+    Laplace/bias-correction/recovery-bias machinery requires (all of which
+    refuse continuum-cofit/joint-mode fits). Skipped if the bundled example
+    data isn't present (e.g. a minimal install without the examples/
+    directory). Session-scoped since it's an expensive real fit, reused
+    across any test that needs a realistic (rather than synthetic)
+    FitState/result pair.
     """
     import tempfile
     from kinextract import FitConfig, run_spectral_fit
 
     muse_dir = Path(__file__).parent.parent / "examples" / "data" / "muse"
-    spec_file = muse_dir / "bin0105sp.spec"
-    if not spec_file.exists():
+    norm_file = muse_dir / "bin0105sp.norm"
+    if not norm_file.exists():
         pytest.skip("bundled MUSE example data not found")
 
-    data = np.loadtxt(spec_file)
-    flux = data[:, 1]
-    ferr = flux / 50.0
     outdir = tempfile.mkdtemp(prefix="kinextract_test_muse_")
 
     cfg = FitConfig(
         template_list_file=str(muse_dir / "Tlist"),
         template_dir=str(muse_dir),
         outdir=outdir,
-        wavemin_full=4750.0, step=1.25,
+        step=1.25,
         wavefitmin=8400.0, wavefitmax=8750.0,
         zgal=0.001556,
         losvd_vmin=-300.0, losvd_vmax=300.0,
-        fit_als_continuum=True, continuum_method="als",
-        use_spectrum_errors=False,
+        fit_continuum=False,
         xlam_auto=True, xlam_criterion="roughness", xlam_smooth_threshold=0.25,
         sigl=100.0, clean=True,
         map_maxiter=20000, print_every=0,
     )
-    fit = run_spectral_fit(cfg, gal_file=str(spec_file), gal_errors=ferr)
+    fit = run_spectral_fit(cfg, gal_file=str(norm_file))
     return fit, cfg

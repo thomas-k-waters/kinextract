@@ -5,10 +5,16 @@ specific spectrum, without needing a full end-to-end fit.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from kinextract.fitting import compute_losvd_roughness, compute_losvd_n_peaks
+
+
+MUSE_DIR = Path(__file__).parent.parent / "examples" / "data" / "muse"
+SPEC_FILE = MUSE_DIR / "bin0105sp.spec"
 
 
 # ── Metamorphic: roughness monotonicity ─────────────────────────────────────
@@ -89,3 +95,69 @@ def test_roughness_returns_inf_for_all_zero():
 def test_roughness_returns_inf_for_near_zero():
     b = np.full(51, 1e-12)
     assert compute_losvd_roughness(b) == np.inf
+
+
+# ── estimate_velocity_xcorr: sub-pixel refinement ───────────────────────────
+
+def test_estimate_velocity_xcorr_recovers_subpixel_shift_continuously():
+    """A fractional-pixel injected shift should recover a continuous
+    estimate, not snap to a multiple of one pixel's velocity step.
+
+    Regression test for a real, measured bias (see estimate_velocity_xcorr's
+    docstring): the pre-fix, integer-lag-only version could only return
+    multiples of one MUSE pixel step (~43.6 km/s at the Ca II triplet),
+    which on real N5102 bins with true |V| well under half a pixel step
+    sometimes snapped to a neighboring, wrong lag entirely -- directly
+    biasing the wing-taper's v_center regularization pivot. Injects a
+    small, realistic fractional-pixel shift (0.5 pixels -- deliberately
+    modest: this estimator is only ever used in production for small,
+    near-systemic velocity residuals of order a few to a few tens of
+    km/s, not large offsets, and the NNLS-weighted reference template it
+    now also uses (see the "Reference template matters here too" section
+    of estimate_velocity_xcorr's docstring) isn't designed to handle a
+    large galaxy-vs-template position mismatch when only the galaxy, not
+    the templates, is shifted -- a large synthetic shift here would test
+    an unrealistic regime, not the real one) into the bundled real MUSE
+    spectrum's own flux via linear interpolation, keeping the (unshifted)
+    template matrix as the correlation reference, exactly like production
+    usage on real data with a small residual velocity.
+    """
+    if not SPEC_FILE.exists():
+        pytest.skip("bundled MUSE example data not found")
+    from kinextract import FitConfig
+    from kinextract.numerics import CEE, estimate_velocity_xcorr
+    from kinextract.spectrum import make_fit_state
+
+    data = np.loadtxt(SPEC_FILE)
+    flux = data[:, 1]
+    ferr = flux / 50.0
+    cfg = FitConfig(
+        template_list_file=str(MUSE_DIR / "Tlist"),
+        template_dir=str(MUSE_DIR),
+        wavemin_full=4750.0, step=1.25,
+        wavefitmin=8400.0, wavefitmax=8750.0,
+        zgal=0.001556,
+        losvd_vmin=-300.0, losvd_vmax=300.0,
+        fit_continuum=False,
+        use_spectrum_errors=False,
+        sigl=100.0, clean=False,
+    )
+    st, _ = make_fit_state(cfg, gal_file=str(SPEC_FILE), gal_errors=ferr)
+
+    shift_pix = 0.5
+    idx = np.arange(st.npix, dtype=float)
+    st.g = np.interp(idx - shift_pix, idx, st.g, left=st.g[0], right=st.g[-1])
+
+    lam_ref = float(st.x[st.npix // 2])
+    true_v = shift_pix * st.scale * CEE / lam_ref
+    pixel_step_v = st.scale * CEE / lam_ref
+
+    v_est = estimate_velocity_xcorr(st)
+
+    # A quantized, integer-only estimator could only answer a multiple of
+    # pixel_step_v here -- never within half a pixel step of the injected
+    # 2.5-pixel truth. The sub-pixel-refined estimator should land closer.
+    assert abs(v_est - true_v) < 0.5 * pixel_step_v, (
+        f"v_est={v_est:.2f} not within half a pixel step "
+        f"({0.5 * pixel_step_v:.2f} km/s) of the injected true_v={true_v:.2f}"
+    )

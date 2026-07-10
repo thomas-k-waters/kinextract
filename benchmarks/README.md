@@ -5,11 +5,18 @@ known ground-truth kinematics across many astrophysical regimes (star
 clusters, low/high-mass black holes, different S/N, different instruments,
 emission contamination, non-Gaussian/double-peaked LOSVDs) and fits them with
 kinextract, comparing recovered V/sigma/h3/h4 against truth. Its central
-purpose is a head-to-head comparison between the two continuum-fitting modes
-(`fit_als_continuum=True` vs. the newer raw-flux + multiplicative-polynomial
-+ global-amplitude mode), since real cross-validation against the legacy
-Fortran pipeline found the ALS approach can create a genuine identifiability
-degeneracy with the simultaneously-fit LOSVD.
+purpose is a head-to-head comparison between two continuum-fitting modes --
+`fit_continuum=True` (the joint P-spline-in-the-model method, see
+`kinextract.joint`) vs. a raw-flux + multiplicative-polynomial +
+global-amplitude mode (`continuum_poly_mode="multiplicative"` +
+`fit_global_amp=True`) -- plus an oracle/ceiling "none" arm (mock pre-divided
+by its own true continuum). An older separate-continuum-sub-fit approach
+(asymmetric least squares, "ALS") was compared here too before it was
+retired from the fitting pipeline entirely (see `kinextract.joint`'s module
+docstring); the standalone ALS math still exists as
+`kinextract.continuum.asymmetric_least_squares_continuum`, a one-time
+pre-normalization utility, but is no longer a continuum-cofitting mode this
+suite exercises.
 
 This is a diagnostic/reporting tool, distinct from and independent of the
 pytest suite in `tests/` (which only tests `benchmarks/mock_spectrum.py`'s
@@ -28,10 +35,11 @@ completed `(scenario, continuum_mode, replicate_seed)` triples and only
 remaining jobs are (re-)run.
 
 Useful flags:
+
 - `--only-axis sigma` -- restrict to one scenario axis (see `scenarios.py`
   for the full axis list: `sigma`, `snr`, `instrument`, `template`,
   `emission`, `losvd_shape`, `bug`), for quick reruns/debugging.
-- `--continuum-modes als` -- restrict to one continuum mode.
+- `--continuum-modes joint` -- restrict to one continuum mode.
 - `--replicates 2` -- fewer noise realizations per scenario, for a fast smoke test.
 
 ## Generating the report

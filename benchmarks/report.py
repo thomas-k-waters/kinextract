@@ -51,7 +51,7 @@ def build_plots(agg_df: pd.DataFrame, plots_dir: Path) -> list[Path]:
         fig, axs = plt.subplots(2, 2, figsize=(10, 8))
         fig.suptitle(f"Recovery bias vs. axis: {axis}")
         for ax, moment in zip(axs.flat, ("v", "sigma", "h3", "h4")):
-            for mode, color in (("als", "tab:blue"), ("poly_amp", "tab:orange")):
+            for mode, color in (("joint", "tab:blue"), ("poly_amp", "tab:orange")):
                 m = sub[sub["continuum_mode"] == mode].sort_values("sigma_true")
                 if m.empty:
                     continue
@@ -72,12 +72,12 @@ def build_plots(agg_df: pd.DataFrame, plots_dir: Path) -> list[Path]:
         plt.close(fig)
         paths.append(out)
 
-    # Head-to-head bar chart: |bias_V|/sigma and |bias_sigma|/sigma, als vs poly_amp
+    # Head-to-head bar chart: |bias_V|/sigma and |bias_sigma|/sigma, joint vs poly_amp
     fig, axs = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     scenario_order = [s for s in agg_df["scenario_id"].unique() if s != "base"] + ["base"]
     width = 0.35
     for ax, moment, label in ((axs[0], "v", "|bias_V| / sigma_true"), (axs[1], "sigma", "|bias_sigma| / sigma_true")):
-        for i, mode in enumerate(("als", "poly_amp")):
+        for i, mode in enumerate(("joint", "poly_amp")):
             vals = []
             for sid in scenario_order:
                 row = agg_df[(agg_df["scenario_id"] == sid) & (agg_df["continuum_mode"] == mode)]
@@ -92,7 +92,7 @@ def build_plots(agg_df: pd.DataFrame, plots_dir: Path) -> list[Path]:
     axs[1].set_xticks(range(len(scenario_order)))
     axs[1].set_xticklabels(scenario_order, rotation=60, ha="right", fontsize=7)
     plt.tight_layout()
-    out = plots_dir / "head_to_head_als_vs_poly.png"
+    out = plots_dir / "head_to_head_joint_vs_poly.png"
     fig.savefig(out, dpi=120)
     plt.close(fig)
     paths.append(out)
@@ -111,24 +111,24 @@ def write_markdown_report(agg_df: pd.DataFrame, flagged_df: pd.DataFrame, header
     ]
 
     lines += ["## Headline continuum-mode comparison", ""]
-    lines += ["| scenario | sigma_true | |bias_V|/sigma (als) | |bias_V|/sigma (poly) | "
-              "|bias_sigma|/sigma (als) | |bias_sigma|/sigma (poly) | chi2_red (als) | "
+    lines += ["| scenario | sigma_true | |bias_V|/sigma (joint) | |bias_V|/sigma (poly) | "
+              "|bias_sigma|/sigma (joint) | |bias_sigma|/sigma (poly) | chi2_red (joint) | "
               "chi2_red (poly) | winner |",
               "|---|---|---|---|---|---|---|---|---|"]
     for sid in agg_df["scenario_id"].unique():
         rows = {m: agg_df[(agg_df["scenario_id"] == sid) & (agg_df["continuum_mode"] == m)]
-                for m in ("als", "poly_amp")}
+                for m in ("joint", "poly_amp")}
         if any(r.empty for r in rows.values()):
             continue
-        sigma_true = rows["als"]["sigma_true"].iloc[0]
+        sigma_true = rows["joint"]["sigma_true"].iloc[0]
         bv = {m: abs(rows[m]["mean_bias_v"].iloc[0]) / max(sigma_true, 1e-6) for m in rows}
         bs = {m: abs(rows[m]["mean_bias_sigma"].iloc[0]) / max(sigma_true, 1e-6) for m in rows}
         c2 = {m: rows[m]["mean_chi2_red"].iloc[0] for m in rows}
         score = {m: bv[m] + bs[m] for m in rows}
-        winner = "tie" if abs(score["als"] - score["poly_amp"]) < 1e-6 else min(score, key=score.get)
+        winner = "tie" if abs(score["joint"] - score["poly_amp"]) < 1e-6 else min(score, key=score.get)
         lines.append(
-            f"| {sid} | {sigma_true:.0f} | {bv['als']:.1%} | {bv['poly_amp']:.1%} | "
-            f"{bs['als']:.1%} | {bs['poly_amp']:.1%} | {c2['als']:.2f} | {c2['poly_amp']:.2f} | {winner} |"
+            f"| {sid} | {sigma_true:.0f} | {bv['joint']:.1%} | {bv['poly_amp']:.1%} | "
+            f"{bs['joint']:.1%} | {bs['poly_amp']:.1%} | {c2['joint']:.2f} | {c2['poly_amp']:.2f} | {winner} |"
         )
     lines.append("")
 

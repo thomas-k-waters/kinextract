@@ -16,9 +16,10 @@ Three complementary methods are provided and can be combined:
   2. Residual bootstrap  (moderate cost, ~minutes with parallelism)
        Draws B synthetic spectra by adding rescaled, block-shuffled
        residuals to the best-fit model, then refits each one through the
-       full pipeline (LOSVD + templates, optionally ALS).  Gives
-       frequentist intervals that automatically propagate regularization
-       bias, continuum uncertainty, and template-weight uncertainty.
+       full pipeline (LOSVD + templates, optionally the joint continuum
+       co-fit).  Gives frequentist intervals that automatically propagate
+       regularization bias, continuum uncertainty, and template-weight
+       uncertainty.
        This is the statistically most honest approach.
 
   3. Bias-corrected LOSVD  (analytic, nearly free once Hessian is known)
@@ -65,10 +66,11 @@ Design notes
   preserves the correlated noise structure that arises from sky subtraction
   and interpolation onto a regular wavelength grid.
 
-- The ALS continuum is re-estimated from scratch on each bootstrap replicate
-  when cfg.fit_als_continuum=True, which is the correct thing to do: the
-  continuum is a nuisance estimated from the data, so its uncertainty must
-  be propagated.
+- Continuum-cofit bootstrap replicates (cfg.fit_continuum=True) refit via a
+  single frozen-hyperparameter kinextract.joint.fit_joint call at the main
+  fit's own converged xlam/sigl0/v_center rather than re-running the
+  expensive auto-selecting drivers per replicate -- see
+  _refit_one_bootstrap_joint's docstring.
 
 - All results are in the native units of b (the LOSVD vector on the xl grid)
   and of the GH moments (km/s for V and sigma, dimensionless for h3/h4).
@@ -105,7 +107,6 @@ except ImportError:
 # These are imported at use-time inside functions so this module can be
 # imported even if spectral_fitting is not on the path yet.
 # ---------------------------------------------------------------------------
-from .continuum import init_als_continuum
 from .fitting import fit_state_map_with_optional_clean
 from .losvd import fit_losvd_gauss_hermite, fit_losvd_gauss_hermite_higher
 from .numerics import (
@@ -243,48 +244,31 @@ def _require_not_joint(estimator: "LOSVDErrorEstimator", method_name: str) -> No
     """
     if getattr(estimator, "is_joint", False):
         raise NotImplementedError(
-            f"{method_name} does not yet support fits made with "
-            f"continuum_method='joint' (kinextract.joint): it needs a "
-            f"Hessian/hat-matrix of the shipped objective_map at a_map, "
-            f"which doesn't apply to the joint model's own objective. "
-            f"residual_bootstrap() is unaffected and works directly on "
-            f"this fit."
+            f"{method_name} does not yet support joint-mode fits "
+            f"(cfg.fit_continuum=True or cfg.joint_prenorm=True; "
+            f"kinextract.joint): it needs a Hessian/hat-matrix of the "
+            f"shipped objective_map at a_map, which doesn't apply to the "
+            f"joint model's own objective. residual_bootstrap() is "
+            f"unaffected and works directly on this fit."
         )
 
 
-def _make_frozen_cfg(cfg, st=None):
+def _make_frozen_cfg(cfg):
     """
-    Return a copy of cfg with ALS hyperparameter optimisation disabled.
+    Return a copy of cfg with relaxed tolerances for fast bootstrap refits.
 
-    During bootstrap refits we want to reuse the lam/p found on the real
-    data rather than re-running the expensive grid search on each replicate.
-    This is conservative (slightly underestimates continuum uncertainty) but
-    much faster and avoids pathological hyperparameter jumps on noisy draws.
-
-    Pass the MAP FitState as ``st`` so that the MAP-optimized ALS hyperparameters
-    (stored in ``st.als_lam_current`` / ``st.als_p_current``) are propagated to
-    each bootstrap refit.  Without this, workers fall back to the config-file
-    defaults which may differ substantially from the values the optimizer chose.
+    Bootstrap refits start from the MAP warm-start and just need a
+    good-enough solution, not MAP-level precision -- tight tolerances cause
+    slowdowns on pathological bootstrap spectra without improving error
+    estimates.
     """
     c = copy.deepcopy(cfg)
-    c.als_optimize = False
-    c.als_optimize_init_only = False
     c.print_every = 0
-    # Bootstrap refits start from the MAP warm-start and just need a good-enough
-    # solution, not MAP-level precision.  Tight tolerances cause slowdowns on
-    # pathological bootstrap spectra without improving error estimates.
     c.map_ftol = max(float(getattr(cfg, "map_ftol", 1e-12)), 1e-8)
     c.map_gtol = max(float(getattr(cfg, "map_gtol", 1e-10)), 1e-6)
-    # Cap ALS outer iterations. Also relax als_outer_tol so warm-started
-    # refits exit early once the continuum barely moves (the MAP continuum is
-    # already near-optimal, so the loop often converges in 1-2 iterations).
-    c.als_outer_iter = min(int(getattr(cfg, "als_outer_iter", 15)), 5)
-    c.als_outer_tol = max(float(getattr(cfg, "als_outer_tol", 1e-12)), 1e-4)
-    # Absorption cleaning in bootstrap: mask is already stable from the MAP fit,
-    # so 5 iterations is more than sufficient. The config default (25) is
-    # appropriate for the initial MAP fit but wastes time on bootstrap draws.
-    c.als_abs_clean_iter = min(int(getattr(cfg, "als_abs_clean_iter", 25)), 5)
-    # Similarly, sigma-clipping converges in 1-2 passes from a warm start.
+    # Sigma-clipping converges in 1-2 passes from a warm start; the config
+    # default (25) is appropriate for the initial MAP fit but wastes time
+    # on bootstrap draws.
     c.clean_maxiter = min(int(getattr(cfg, "clean_maxiter", 25)), 3)
     # Auto-xlam selection runs once per spectrum on the real data.  Bootstrap
     # refits must use the same xlam (already stored in cfg.xlam after the main
@@ -293,15 +277,6 @@ def _make_frozen_cfg(cfg, st=None):
     # Workers never call JAX (use_jax_objective=False), so forked XLA locks are
     # never acquired and the inherited lock state cannot deadlock.  Keep False.
     c.use_jax_objective = False
-    # Use the MAP-fitted ALS hyperparameters so bootstrap samples use the same
-    # continuum smoothing as the real-data fit.  cfg.als_lam / cfg.als_p hold
-    # the config-file defaults; only st.als_lam_current reflects what the grid
-    # search actually chose.
-    if st is not None:
-        if getattr(st, "als_lam_current", None) is not None:
-            c.als_lam = float(st.als_lam_current)
-        if getattr(st, "als_p_current", None) is not None:
-            c.als_p = float(st.als_p_current)
     return c
 
 
@@ -310,9 +285,8 @@ def _make_frozen_cfg_joint(cfg):
 
     Relaxes optimizer tolerances for speed on bootstrap replicates (a
     good-enough solution is fine; MAP-level precision on every one of
-    hundreds of replicates isn't). Unlike the shipped path, there is no
-    ALS-specific state to freeze here, and no xlam/sigl0/v_center grid
-    search to disable -- those are frozen implicitly by reusing the
+    hundreds of replicates isn't). There is no xlam/sigl0/v_center grid
+    search to disable here -- those are frozen implicitly by reusing the
     already-converged ``st.xlam``/``st.sigl0``/``st.v_center`` from the
     main fit (see :func:`kinextract.joint.run_joint_fit`) and calling
     :func:`kinextract.joint.fit_joint` directly (a single fit at fixed
@@ -779,7 +753,7 @@ def _refit_one_bootstrap(
     Parameters (packed into args tuple for pickling)
     -------------------------------------------------
     g_boot  : ndarray (npix,)  Synthetic spectrum.
-    cfg     : FitConfig        Configuration (with ALS optimization disabled).
+    cfg     : FitConfig        Configuration (relaxed tolerances; see _make_frozen_cfg).
     st_ref  : FitState         Reference FitState (used to copy fixed arrays;
                                g and gerr are replaced with g_boot and base_gerr).
     a_map   : ndarray          MAP solution (used as warm start).
@@ -804,13 +778,6 @@ def _refit_one_bootstrap(
         st.g = np.asarray(g_boot, float).copy()
         st.gerr = np.asarray(base_gerr, float).copy()
         st.ntot = 0
-        st.als_records = []
-
-        # Re-initialise ALS continuum from the bootstrap spectrum if needed.
-        if st.fit_als_continuum:
-            # Pass template matrix if present so ALS hyperparameter selection
-            # can consider template-aware BIC during bootstrap refits.
-            init_als_continuum(st, cfg_frozen, templates=getattr(st, 't', None))
 
         # Warm-start from the MAP solution with a small random perturbation
         a0 = np.asarray(a_map_ref, float).copy()
@@ -873,7 +840,7 @@ def _refit_one_bootstrap_joint(args: tuple) -> Optional[dict]:
     extra hyperparameter-selection noise into the error bars rather than
     reflecting genuine data noise at fixed, already-decided regularization
     -- exactly the same rationale :func:`_make_frozen_cfg` already applies
-    to the shipped path's ``xlam_auto``/ALS-hyperparameter search.
+    to the shipped path's ``xlam_auto`` search.
 
     Parameters (packed into args tuple for pickling)
     -------------------------------------------------
@@ -1013,7 +980,7 @@ class LOSVDErrorEstimator:
        resampled residuals (optionally in contiguous blocks, to preserve
        correlated noise from sky subtraction/resampling) to the best-fit
        model, refits each synthetic spectrum through the *full* pipeline
-       (including, optionally, re-estimating the ALS continuum), and uses
+       (including, for continuum-cofit fits, the joint continuum), and uses
        the resulting ensemble of recovered LOSVDs/GH moments to build
        frequentist error bars and percentile intervals.
 
@@ -1052,9 +1019,10 @@ class LOSVDErrorEstimator:
         (best-fit model spectrum).
     cfg : FitConfig
         Configuration object used to produce the original fit. Reused as
-        the starting point for bootstrap refits (with ALS hyperparameter
-        search disabled — see ``_make_frozen_cfg``) and to rebuild parameter
-        bounds identical to those used in the original fit.
+        the starting point for bootstrap refits (with relaxed optimizer
+        tolerances — see ``_make_frozen_cfg``/``_make_frozen_cfg_joint``)
+        and to rebuild parameter bounds identical to those used in the
+        original fit.
 
     Attributes
     ----------
@@ -1102,9 +1070,7 @@ class LOSVDErrorEstimator:
         """
         # sf is imported at module level from kinextract
 
-        self.is_joint = getattr(cfg, "continuum_method", "als") == "joint" and (
-            cfg.fit_als_continuum or getattr(cfg, "joint_prenorm", False)
-        )
+        self.is_joint = cfg.fit_continuum or getattr(cfg, "joint_prenorm", False)
 
         self.fit = fit
         self.cfg = cfg
@@ -1125,7 +1091,7 @@ class LOSVDErrorEstimator:
             from .joint import build_initial_guess as _joint_build_initial_guess
             from .joint import normalize_template_matrix as _joint_normalize_template_matrix
 
-            fit_continuum = bool(cfg.fit_als_continuum)
+            fit_continuum = bool(cfg.fit_continuum)
             _, joint_bounds, _, joint_design = _joint_build_initial_guess(
                 self.st, cfg.joint_n_interior_knots, cfg.joint_degree,
                 fit_continuum=fit_continuum,
@@ -1391,7 +1357,6 @@ class LOSVDErrorEstimator:
         n_jobs: int = 1,
         seed: int = 42,
         confidence: float = 0.68,
-        refit_als: bool = True,
     ) -> dict:
         """
         Run a residual block bootstrap to estimate LOSVD error bars.
@@ -1412,11 +1377,6 @@ class LOSVDErrorEstimator:
             Master RNG seed for reproducibility.
         confidence : float
             Confidence level for reported intervals (default 0.68 ≈ 1sigma).
-        refit_als : bool
-            If True and cfg.fit_als_continuum=True, re-estimate the ALS
-            continuum from scratch on each bootstrap replicate.  This is
-            statistically correct but ~2x slower.  Set False to fix the
-            continuum at its MAP value (faster, underestimates errors).
 
         Returns
         -------
@@ -1440,9 +1400,7 @@ class LOSVDErrorEstimator:
             cfg_frozen = _make_frozen_cfg_joint(self.cfg)
         else:
             worker_fn = _refit_one_bootstrap
-            cfg_frozen = _make_frozen_cfg(self.cfg, self.st)
-            if not refit_als:
-                cfg_frozen.fit_als_continuum = False
+            cfg_frozen = _make_frozen_cfg(self.cfg)
 
         print(f"[LOSVDErrors] Starting residual bootstrap "
               f"(n={n_bootstrap}, block={block_size}, jobs={n_jobs})...")
@@ -2700,7 +2658,6 @@ def estimate_losvd_errors(
     n_jobs: int = 1,
     bootstrap_seed: int = 42,
     confidence: float = 0.68,
-    refit_als: bool = True,
     plot: bool = True,
     write_to_files: bool = False,
     prefix: str | None = None,
@@ -2722,7 +2679,6 @@ def estimate_losvd_errors(
     n_jobs       : parallel workers for bootstrap (-1 = all CPUs)
     bootstrap_seed: RNG seed
     confidence   : confidence level for intervals (0.68 ≈ 1-sigma)
-    refit_als    : re-estimate ALS continuum on each bootstrap draw
     plot         : show plots when done
     write_to_files: write error estimates to .losvd_errs.out, .gh_errs.out files
     prefix       : output file prefix (required if write_to_files=True)
@@ -2755,7 +2711,6 @@ def estimate_losvd_errors(
             n_jobs=n_jobs,
             seed=bootstrap_seed,
             confidence=confidence,
-            refit_als=refit_als,
         )
 
     if run_bias:

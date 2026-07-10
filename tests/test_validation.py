@@ -20,11 +20,19 @@ Note: an earlier version of this module also recomputed a per-mock
 ``v_center`` to recentre the MAP objective's wing-taper smoothness prior
 on a data-driven velocity estimate. That recentering was later found (via
 real notebook usage, not just this stress test) to introduce worse bias
-than the original zero-centered convention whenever the velocity estimate
-itself was imprecise, and was reverted package-wide -- the MAP path now
-always uses v_center=0.0, matching the original Fortran implementation.
-The corresponding regression test for stale per-mock v_center reuse was
-removed along with the feature it was guarding.
+than a zero-centered convention across this function's mock-truth grid,
+so ``assess_recovery_bias`` explicitly resets each replicate's
+``v_center`` to 0.0 regardless of what the real fit passed in
+(:func:`kinextract.validation.assess_recovery_bias`), decoupling this
+function's own validated grid methodology from the real single-fit path's
+own defaults. The shipped MAP path used by a real single fit
+(:func:`kinextract.fitting.run_spectral_fit`) *does* now recenter
+``v_center`` and iterate ``sigl0`` to a fixed point by default (see
+:func:`kinextract.fitting._fit_map_sigl0_recenter`) -- a real V/sigma
+recovery bias fix found via comparison against the joint path -- but that
+change is intentionally not inherited here. The corresponding regression
+test for stale per-mock v_center reuse was removed along with the feature
+it was guarding.
 """
 from __future__ import annotations
 
@@ -88,20 +96,38 @@ def test_assess_recovery_bias_does_not_mutate_caller_cfg(real_muse_fit):
     assert cfg.clean == clean_before
 
 
-def test_assess_recovery_bias_uses_zero_centered_map_objective(real_muse_fit):
-    """The MAP path's wing-taper smoothness prior is always zero-centered
-    (matching the original Fortran convention -- see numerics.py's
-    _compute_smoothness); assess_recovery_bias's replicate FitStates should
-    inherit that (v_center left at 0.0), not reintroduce a data-driven
-    recentering that was found to introduce worse bias than not recentering
-    at all.
+def test_assess_recovery_bias_uses_zero_centered_map_objective(real_muse_fit, monkeypatch):
+    """assess_recovery_bias's replicate FitStates must be zero-centered
+    (v_center=0.0) regardless of what the real fit's own v_center is --
+    a dedicated validation sweep found data-driven recentering introduces
+    worse bias than a fixed zero point across this function's mock-truth
+    grid. The real fit passed in now typically has a nonzero, recentered
+    v_center (the shipped MAP path self-corrects this by default for a real
+    single fit -- see kinextract.fitting._fit_map_sigl0_recenter);
+    assess_recovery_bias must not inherit that into its own replicates.
     """
     fit, cfg = real_muse_fit
-    assert fit["state"].v_center == 0.0
+    # The real fit's own v_center should itself be recentered (nonzero) by
+    # kinextract.fitting._fit_map_sigl0_recenter -- otherwise this test
+    # can't distinguish "inherited 0.0 by luck" from "explicitly reset".
+    assert fit["state"].v_center != 0.0
+
+    import kinextract.validation as validation_mod
+    seen_v_centers = []
+    real_fit_fn = validation_mod.fit_state_map_with_optional_clean
+
+    def _spy(st, cfg_, a0, bounds):
+        seen_v_centers.append(st.v_center)
+        return real_fit_fn(st, cfg_, a0, bounds)
+
+    monkeypatch.setattr(validation_mod, "fit_state_map_with_optional_clean", _spy)
+
     bias_table = assess_recovery_bias(
         fit, cfg, v_true_grid=[80.0], sigma_true_grid=[90.0], n_seeds=1, seed0=777,
     )
     assert (80.0, 90.0) in bias_table
+    assert seen_v_centers, "assess_recovery_bias never called fit_state_map_with_optional_clean"
+    assert all(v == 0.0 for v in seen_v_centers)
 
 
 def test_correct_recovered_losvd_single_grid_point():

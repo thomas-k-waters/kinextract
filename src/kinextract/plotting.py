@@ -5,12 +5,13 @@ output of the main spectral-fitting pipeline: :func:`plot_fit` compares the
 observed spectrum to the best-fit model and its residuals; :func:`plot_losvd`
 shows the recovered non-parametric line-of-sight velocity distribution
 (LOSVD) together with its post-hoc Gauss-Hermite (GH) characterization; and
-:func:`plot_als_continuum` gives a detailed view of the Asymmetric
-Least-Squares (ALS) continuum fit, including masked pixel regions and
-labeled stellar/nebular absorption and emission features. The module-level
-constant :data:`PROMINENT_STELLAR_LINES` is a curated reference table of
-rest-frame wavelengths used to annotate these plots. These functions are
-purely for visual inspection and do not modify any fit results.
+:func:`plot_continuum` gives a detailed view of a continuum-cofit fit
+(``cfg.fit_continuum=True``, see :mod:`kinextract.joint`), including masked
+pixel regions and labeled stellar/nebular absorption and emission features.
+The module-level constant :data:`PROMINENT_STELLAR_LINES` is a curated
+reference table of rest-frame wavelengths used to annotate these plots.
+These functions are purely for visual inspection and do not modify any fit
+results.
 """
 
 from __future__ import annotations
@@ -97,7 +98,7 @@ A tuple of ``(center_wavelength_angstrom, label)`` pairs spanning the
 optical/near-IR range typically covered by MUSE and STIS spectra
 (H Balmer, Fe I/Lick indices, Mg b triplet, Na I D, Ca I/II, TiO molecular
 bands, K I, O I, and common nebular emission lines such as [O III], H-alpha,
-[N II], [S II]). Used by :func:`plot_als_continuum` (and available for use
+[N II], [S II]). Used by :func:`plot_continuum` (and available for use
 by other diagnostic plots) to draw thin reference tick marks and labels at
 these wavelengths, independent of which pixels are actually masked in a
 given fit. Wavelengths are rest-frame air/vacuum values as conventionally
@@ -444,40 +445,39 @@ def plot_losvd_posterior(fit: dict, confidence: float = 0.68, max_gh_draws: int 
     return summary
 
 
-def plot_als_continuum(
+def plot_continuum(
     fit: dict,
     cfg=None,
     mark_prominent_lines: bool = True,
 ) -> None:
-    """Diagnostic plot for Asymmetric Least-Squares (ALS) continuum fits.
+    """Diagnostic plot for a continuum-cofit fit (:mod:`kinextract.joint`).
 
-    Produces a three-panel figure for fits run with ``cfg.fit_als_continuum
-    = True``: the top panel shows the observed spectrum, the full best-fit
-    model, and the fitted ALS continuum baseline, with shaded spans marking
-    detected-emission and detected-absorption (ALS) pixel regions and
-    labeled reference lines; the middle panel shows the same data and model
-    divided by the ALS continuum (continuum-normalized view, useful for
-    judging line depths independent of the baseline shape); the bottom
-    panel shows fractional residuals ``(data - model) / model``. Individual
-    rejected pixels (masked for reasons other than detected emission, e.g.
-    bad regions, template coverage gaps, or sigma-clipping) are overplotted
-    as translucent red points in all three panels. If ``fit["state"]`` was
-    not run in ALS continuum mode, this function prints a notice and
-    returns without plotting.
+    Produces a three-panel figure for fits run with ``cfg.fit_continuum =
+    True``: the top panel shows the observed spectrum, the full best-fit
+    model, and the fitted continuum baseline, with shaded spans marking
+    detected-emission pixel regions and labeled reference lines; the middle
+    panel shows the same data and model divided by the continuum
+    (continuum-normalized view, useful for judging line depths independent
+    of the baseline shape); the bottom panel shows fractional residuals
+    ``(data - model) / model``. Individual rejected pixels (masked for
+    reasons other than detected emission, e.g. bad regions, template
+    coverage gaps, or sigma-clipping) are overplotted as translucent red
+    points in all three panels. If ``fit["state"]`` was not run in
+    continuum-cofit mode, this function prints a notice and returns without
+    plotting.
 
     Parameters
     ----------
     fit : dict
         Output of ``run_spectral_fit()``. Must contain ``fit["state"]``,
         ``fit["outputs"]["gp"]`` (model spectrum), and
-        ``fit["outputs"]["continuum"]`` (fitted ALS continuum baseline).
+        ``fit["outputs"]["continuum"]`` (fitted continuum baseline).
     cfg : FitConfig, optional
         When supplied, the plot additionally overlays masked regions and
-        line labels for detected emission, ALS-detected absorption, and any
-        user-specified extra mask windows/lines. Labels are drawn ONLY for
-        lines whose pixels are actually present in the corresponding mask,
-        so labeling is always consistent with the shaded regions shown.
-        If omitted, only the curated prominent-line reference ticks (see
+        line labels for detected emission lines. Labels are drawn ONLY for
+        lines whose pixels are actually masked, so labeling is always
+        consistent with the shaded regions shown. If omitted, only the
+        curated prominent-line reference ticks (see
         ``mark_prominent_lines``) are drawn.
     mark_prominent_lines : bool, optional
         When True (default), draw thin gray reference ticks and labels for
@@ -491,8 +491,8 @@ def plot_als_continuum(
         Displays the figure via ``plt.show()``; does not return a value.
     """
     st = fit["state"]
-    if not st.fit_als_continuum:
-        print("Not in ALS continuum mode — nothing to plot.")
+    if not st.fit_continuum:
+        print("Not in continuum-cofit mode — nothing to plot.")
         return
 
     gp = fit["outputs"]["gp"]
@@ -516,13 +516,6 @@ def plot_als_continuum(
     else:
         em_mask_bool = np.asarray(em_mask_bool, bool)
 
-    # ALS continuum absorption mask: pixels excluded from ALS but still in spectral fit.
-    cont_mask = getattr(st, "continuum_mask", None)
-    if cont_mask is not None:
-        als_abs_excl = ~np.asarray(cont_mask, bool) & ~pre_masked
-    else:
-        als_abs_excl = np.zeros(st.npix, dtype=bool)
-
     # "Other rejected" pixels: pre-masked for reasons other than detected emission
     # (bad regions, template coverage gaps, sigma-clipped outliers from fitting).
     other_rejected = pre_masked & ~em_mask_bool
@@ -533,10 +526,6 @@ def plot_als_continuum(
                         label="_nolegend_")
         axes[1].axvspan(x0, x1, color="tab:red", alpha=0.22, zorder=0,
                         label="_nolegend_")
-    # Panel 0 only: ALS absorption mask (purple)
-    for x0, x1 in _mask_to_spans(als_abs_excl, st.x):
-        axes[0].axvspan(x0, x1, color="tab:purple", alpha=0.22, zorder=0,
-                        label="_nolegend_")
 
     # ── Helper: is this line center actually represented in a mask? ──────────
     def _line_is_masked(cen: float, hw: float, mask: np.ndarray) -> bool:
@@ -546,7 +535,6 @@ def plot_als_continuum(
     # ── Collect line markers — ONLY for lines whose pixels are in the mask ───
     # Labels are tied to the actual mask arrays so they only appear when
     # there is corresponding shading.
-    abs_lines:   list[tuple[str, float]] = []   # (label, center_rest)
     em_lines:    list[tuple[str, float]] = []
     extra_lines: list[tuple[str, float]] = []
 
@@ -554,10 +542,7 @@ def plot_als_continuum(
         wmin = float(getattr(cfg, "wavefitmin", st.x.min()))
         wmax = float(getattr(cfg, "wavefitmax", st.x.max()))
         em_hw  = float(getattr(cfg, "mask_emission_line_half_width_A", 5.0))
-        abs_hw = float(getattr(cfg, "als_auto_mask_half_width_A", 5.0))
 
-        # Frame-conversion helper: apply the same als_mask_center_shift_A that
-        # the masking functions use, so all plotted lines land in the same place.
         def _to_plot_frame(cen_rest: float) -> float:
             return _center_to_fit_frame(cen_rest, "rest", cfg)
 
@@ -586,51 +571,15 @@ def plot_als_continuum(
                         em_lines.append((name, cen_plot))
                         seen_em.add(cen_rest)
 
-        # ALS absorption lines: label only if pixel actually in als_abs_excl.
-        if getattr(cfg, "als_auto_mask_abs_lines", True) and als_abs_excl.any():
-            mask_paschen = bool(getattr(cfg, "als_auto_mask_paschen", False))
-            seen_abs: set[float] = set()
-            for table in _STELLAR_ABSORPTION_LINE_TABLES:
-                for tag, name, cen_rest in table:
-                    if tag == "em" or cen_rest in seen_abs:
-                        continue
-                    if tag == "paschen" and not mask_paschen:
-                        continue
-                    if cen_rest < wmin or cen_rest > wmax:
-                        continue
-                    cen_plot = _to_plot_frame(cen_rest)
-                    if _line_is_masked(cen_plot, abs_hw, als_abs_excl):
-                        abs_lines.append((name, cen_plot))
-                        seen_abs.add(cen_rest)
-
-        # Extra user lines: label only if pixel in protect_extra or als_abs_excl.
-        # protect_extra covers the user-supplied als_extra_mask_windows.
-        protect_extra = np.zeros(st.npix, dtype=bool)
-        extra_frame = getattr(cfg, "als_extra_mask_frame", "rest")
-        for lo_raw, hi_raw in getattr(cfg, "als_extra_mask_windows", ()):
-            lo = float(lo_raw) / (1.0 + cfg.zgal) if extra_frame == "observed" else float(lo_raw)
-            hi = float(hi_raw) / (1.0 + cfg.zgal) if extra_frame == "observed" else float(hi_raw)
-            protect_extra |= (st.x >= lo) & (st.x <= hi)
-        seen_extra: set[float] = set()
-        extra_combined = protect_extra | als_abs_excl
-        extra_line_frame = getattr(cfg, "als_extra_mask_line_frame", "rest")
-        for item in getattr(cfg, "als_extra_mask_lines", ()):
-            c_raw = float(item[0])
-            name = item[2] if len(item) >= 3 else f"{c_raw:.1f} Å"
-            c_rest = c_raw / (1.0 + cfg.zgal) if extra_line_frame == "observed" else c_raw
-            hw = float(item[1]) if len(item) >= 2 else abs_hw
-            c_plot = _to_plot_frame(c_rest)
-            if c_rest not in seen_extra and _line_is_masked(c_plot, hw, extra_combined):
-                extra_lines.append((name, c_plot))
-                seen_extra.add(c_rest)
+        # Extra user-supplied absorption lines: label only if their pixels
+        # are actually masked out of the fit.
         for item in getattr(cfg, "extra_absorption_lines", ()):
             c_raw = float(item[0])
-            hw = float(item[1]) if len(item) >= 2 else abs_hw
+            hw = float(item[1]) if len(item) >= 2 else em_hw
             name = item[2] if len(item) >= 3 else f"{c_raw:.1f} Å"
             c_plot = _to_plot_frame(c_raw)
-            if c_raw not in seen_extra and _line_is_masked(c_plot, hw, extra_combined):
+            if _line_is_masked(c_plot, hw, pre_masked):
                 extra_lines.append((name, c_plot))
-                seen_extra.add(c_raw)
 
     else:
         def _to_plot_frame(cen_rest: float) -> float:  # type: ignore[misc]
@@ -641,7 +590,7 @@ def plot_als_continuum(
     if mark_prominent_lines:
         xlo, xhi = float(st.x.min()), float(st.x.max())
         # Avoid duplicating lines already shown as masked labels
-        already_labeled = {c for _, c in abs_lines + em_lines + extra_lines}
+        already_labeled = {c for _, c in em_lines + extra_lines}
         for cen_rest, name in PROMINENT_STELLAR_LINES:
             cen_plot = _to_plot_frame(cen_rest)
             if xlo <= cen_plot <= xhi and cen_plot not in already_labeled:
@@ -656,15 +605,13 @@ def plot_als_continuum(
         ax.fill_between(st.x, st.g - gerr_plot, st.g + gerr_plot,
                         color="0.8", step="mid", alpha=0.5, label="error")
     ax.plot(st.x, gp, color="C0", lw=1.5, label="model")
-    ax.plot(st.x, cont, color="tab:orange", lw=1.2, ls="--", label="ALS continuum")
+    ax.plot(st.x, cont, color="tab:orange", lw=1.2, ls="--", label="continuum")
 
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
     legend_patches = []
     if em_mask_bool.any():
         legend_patches.append(Patch(color="tab:red", alpha=0.4, label="Detected Emission"))
-    if als_abs_excl.any():
-        legend_patches.append(Patch(color="tab:purple", alpha=0.4, label="Detected Absorption (ALS)"))
     if other_rejected.any():
         legend_patches.append(Line2D(
             [0], [0], marker="o", color="none", markerfacecolor="tab:red",
@@ -692,10 +639,6 @@ def plot_als_continuum(
         ax.axvline(cen, color="tab:red", lw=0.8, ls=":", alpha=0.85, zorder=3)
         ax.text(cen, yhi * 1.03, name, fontsize=5, rotation=90,
                 ha="center", va="bottom", color="tab:red", clip_on=True)
-    for name, cen in abs_lines:
-        ax.axvline(cen, color="tab:purple", lw=0.8, ls=":", alpha=0.8, zorder=3)
-        ax.text(cen, yhi * 1.03, name, fontsize=5, rotation=90,
-                ha="center", va="bottom", color="tab:purple", clip_on=True)
     for name, cen in extra_lines:
         ax.axvline(cen, color="tab:green", lw=0.8, ls="--", alpha=0.85, zorder=3)
         ax.text(cen, yhi * 1.05, name, fontsize=5, rotation=90,
@@ -705,8 +648,8 @@ def plot_als_continuum(
     ax = axes[1]
     cont_safe = np.where(np.abs(cont) > 0, cont, np.nan)
     g_norm = st.g / cont_safe
-    ax.plot(st.x, g_norm, "k", lw=0.8, label="data / ALS continuum")
-    ax.plot(st.x, gp / cont_safe, color="C0", lw=1.5, label="model / ALS continuum")
+    ax.plot(st.x, g_norm, "k", lw=0.8, label="data / continuum")
+    ax.plot(st.x, gp / cont_safe, color="C0", lw=1.5, label="model / continuum")
     if _show_errs:
         ax.fill_between(st.x, (st.g - gerr_plot) / cont_safe,
                         (st.g + gerr_plot) / cont_safe,
@@ -733,8 +676,6 @@ def plot_als_continuum(
         ax.axvline(cen, color="tab:red", lw=0.8, ls=":", alpha=0.85, zorder=3)
         ax.text(cen, yhi_n * 1.03, name, fontsize=5, rotation=90,
                 ha="center", va="bottom", color="tab:red", clip_on=True)
-    for _, cen in abs_lines:
-        ax.axvline(cen, color="tab:purple", lw=0.8, ls=":", alpha=0.8, zorder=3)
     for _, cen in extra_lines:
         ax.axvline(cen, color="tab:green",  lw=0.8, ls="--", alpha=0.8, zorder=3)
 
@@ -754,15 +695,13 @@ def plot_als_continuum(
         ax.axvline(cen, color="0.65", lw=0.7, ls="--", alpha=0.6, zorder=1)
     for _, cen in em_lines:
         ax.axvline(cen, color="tab:red",    lw=0.8, ls=":", alpha=0.8, zorder=3)
-    for _, cen in abs_lines:
-        ax.axvline(cen, color="tab:purple", lw=0.8, ls=":", alpha=0.8, zorder=3)
     for _, cen in extra_lines:
         ax.axvline(cen, color="tab:green",  lw=0.8, ls="--", alpha=0.8, zorder=3)
 
     # ── Rejected-pixel scatter (all 3 panels) ────────────────────────────────
-    # Show every pixel that is flagged as bad (not part of a labeled ALS
-    # absorption or detected emission region) as a red dot so it's clear
-    # which individual pixels were removed from the fit.
+    # Show every pixel that is flagged as bad (not part of a labeled
+    # detected-emission region) as a red dot so it's clear which individual
+    # pixels were removed from the fit.
     if other_rejected.any():
         rej_x = st.x[other_rejected]
         rej_g = st.g[other_rejected]

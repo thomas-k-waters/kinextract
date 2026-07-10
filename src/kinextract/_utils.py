@@ -24,7 +24,7 @@ _VERBOSE = True
 def set_verbose(verbose: bool) -> None:
     """Enable or disable :func:`log`'s progress messages package-wide.
 
-    ``kinextract`` logs progress (stage start/end timing, xlam/ALS search
+    ``kinextract`` logs progress (stage start/end timing, xlam search
     steps, etc.) unconditionally via :func:`log` throughout the fitting
     pipeline. Call ``set_verbose(False)`` once (e.g. at the top of a
     notebook or script) to silence all of it -- useful when running many

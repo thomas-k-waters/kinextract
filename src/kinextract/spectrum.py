@@ -6,16 +6,15 @@ STIS IFU spatial-bin spectrum, either a legacy Fortran-style pre-normalized
 :class:`~kinextract.state.FitState` object consumed by the LOSVD-recovery
 optimizer. ``load_spectrum_for_fit`` reads the file and selects the
 fit-frame wavelength window, handling both continuum modes: pre-normalized
-mode reads an already continuum-divided flux column, while ALS mode
-(``cfg.fit_als_continuum=True``) reads the original (non-divided) flux so
-that ``continuum.py``'s asymmetric-least-squares baseline can be co-fit with
-the LOSVD downstream. ``make_fit_state`` orchestrates loading, applies the
+mode reads an already continuum-divided flux column, while continuum-cofit
+mode (``cfg.fit_continuum=True``) reads the original (non-divided) flux so
+that :mod:`kinextract.joint`'s P-spline continuum can be co-fit with the
+LOSVD downstream. ``make_fit_state`` orchestrates loading, applies the
 emission-line pre-masking layers from ``masking.py``
 (`~kinextract.masking.build_emission_line_mask` and the segment-wise
-rolling-median check), builds the interpolated stellar template matrix,
-constructs the LOSVD velocity grid, and initializes the ALS continuum (via
-`~kinextract.continuum.init_als_continuum`) when ALS mode is active.
-``build_initial_guess_nonparam`` then produces the starting parameter vector
+rolling-median check), builds the interpolated stellar template matrix, and
+constructs the LOSVD velocity grid. ``build_initial_guess_nonparam`` then
+produces the starting parameter vector
 and bounds for the non-parametric LOSVD optimization. If ``cfg.data_fwhm_A``
 and ``cfg.template_fwhm_A`` are both set, ``make_fit_state`` also applies
 instrumental LSF matching (see :mod:`kinextract.templates`) immediately
@@ -31,7 +30,7 @@ import numpy as np
 
 from ._utils import BIG, CEE, log
 from .config import FitConfig
-from .continuum import grow_boolean_mask_A, init_als_continuum
+from .continuum import grow_boolean_mask_A
 from .io import (
     build_wavelength_from_index,
     count_in_window,
@@ -167,18 +166,19 @@ def load_spectrum_for_fit(
     modes:
 
     - Legacy pre-normalized ``.norm`` files (`~kinextract.io.read_norm_spectrum`):
-      if ``cfg.fit_als_continuum`` is False (pre-normalized mode), the
+      if ``cfg.fit_continuum`` is False (pre-normalized mode), the
       already continuum-divided ``normflux``/``normflux_err`` columns are
-      used directly. If ``cfg.fit_als_continuum`` is True (ALS mode), the
-      original (non-divided) ``orig_flux``/``orig_flux_err`` columns are
-      used instead so the ALS baseline can be co-fit downstream; this
-      requires the ``.norm`` file to include those columns (columns 4+).
-      Optionally applies `fortran_rebin_after_redshift` to match the
-      legacy Fortran ``imfit`` uniform-grid convention, and (in
-      pre-normalized mode) an additional Fortran-style flux-range mask.
+      used directly. If ``cfg.fit_continuum`` is True (continuum-cofit
+      mode), the original (non-divided) ``orig_flux``/``orig_flux_err``
+      columns are used instead so :mod:`kinextract.joint`'s continuum can
+      be co-fit downstream; this requires the ``.norm`` file to include
+      those columns (columns 4+). Optionally applies
+      `fortran_rebin_after_redshift` to match the legacy Fortran ``imfit``
+      uniform-grid convention, and (in pre-normalized mode) an additional
+      Fortran-style flux-range mask.
     - Raw ``.spec`` files (`~kinextract.io.read_galaxy_index_flux_err`):
-      always effectively ALS-mode-compatible (the flux column is not
-      pre-divided). Supports both integer-index columns (requiring
+      always effectively continuum-cofit-compatible (the flux column is
+      not pre-divided). Supports both integer-index columns (requiring
       ``cfg.wavemin_full``/``cfg.step``) and literal wavelength columns in
       the first field, with the wavelength converted to rest-frame by
       dividing by ``1 + cfg.zgal``.
@@ -192,7 +192,7 @@ def load_spectrum_for_fit(
     Parameters
     ----------
     cfg : FitConfig
-        Fit configuration; supplies ``fit_als_continuum``, ``zgal``,
+        Fit configuration; supplies ``fit_continuum``, ``zgal``,
         ``wavefitmin``/``wavefitmax``, ``norm_wave_frame``,
         ``norm_error_mode``, ``use_spectrum_errors``, ``fortran_rebin_norm``,
         ``step``, ``wavemin_full``, ``spec_col3_is_variance``,
@@ -214,7 +214,7 @@ def load_spectrum_for_fit(
         ``[cfg.wavefitmin, cfg.wavefitmax]``.
     g_reg : ndarray
         Flux array corresponding to `x_reg` (continuum-divided in
-        pre-normalized mode, raw/undivided in ALS mode).
+        pre-normalized mode, raw/undivided in continuum-cofit mode).
     ge_reg : ndarray
         Flux uncertainty array corresponding to `x_reg`; pixels flagged
         bad by range or flux masks are set to ``BIG``.
@@ -222,7 +222,7 @@ def load_spectrum_for_fit(
         Wavelength step (Å) used or estimated for this spectrum.
     prenorm : bool
         True if the pre-normalized (continuum-already-divided) path was
-        used; False if this is ALS mode or a raw ``.spec`` file.
+        used; False if this is continuum-cofit mode or a raw ``.spec`` file.
     extra : dict
         Auxiliary arrays useful to downstream code (e.g. the full
         unwindowed wavelength array for LOSVD-grid reference, and, for
@@ -232,7 +232,7 @@ def load_spectrum_for_fit(
     if gal_file is None:
         raise ValueError("gal_file is required to load the spectrum for fitting.")
 
-    prenorm = not cfg.fit_als_continuum
+    prenorm = not cfg.fit_continuum
     is_norm = gal_file.lower().endswith(".norm")
     extra: dict = {}
     if is_norm:
@@ -254,7 +254,7 @@ def load_spectrum_for_fit(
         else:
             if nd["orig_flux"] is None:
                 raise ValueError(
-                    "fit_als_continuum=True with a .norm file requires orig_flux "
+                    "fit_continuum=True with a .norm file requires orig_flux "
                     "(columns 4+ of the .norm file)."
                 )
             flux = nd["orig_flux"].copy()
@@ -266,12 +266,12 @@ def load_spectrum_for_fit(
             if gal_errors is not None:
                 _ge = np.asarray(gal_errors, dtype=float)
                 ferr = np.full(len(flux), float(_ge)) if _ge.ndim == 0 else _ge
-                log("gal_errors override applied (.norm ALS path)")
+                log("gal_errors override applied (.norm continuum-cofit path)")
             elif not cfg.use_spectrum_errors:
                 med = float(np.nanmedian(ferr[ferr > 0])) if np.any(ferr > 0) else 1.0
                 ferr = np.full_like(ferr, med)
                 log("use_spectrum_errors=False: replaced per-pixel errors with uniform median")
-            log("ALS CONTINUUM MODE from .norm; using orig_flux / orig_flux_err")
+            log("CONTINUUM-COFIT MODE from .norm; using orig_flux / orig_flux_err")
         if cfg.fortran_rebin_norm:
             if cfg.step is None:
                 raise ValueError("cfg.step is required when fortran_rebin_norm=True")
@@ -404,16 +404,16 @@ def make_fit_state(cfg: FitConfig, gal_file: Optional[str] = None, gal_errors=No
     6. Constructs the `FitState` object with all derived quantities
        (rebinning factors, continuum-polynomial coordinates, etc.).
     7. Precomputes the LOSVD interpolation tables and instrument-profile
-       map, and, if ``cfg.fit_als_continuum`` is True, initializes the ALS
-       continuum via `~kinextract.continuum.init_als_continuum` (otherwise
-       sets a unit continuum, matching pre-normalized mode).
+       map, and sets a unit continuum placeholder (``st.continuum_mult``);
+       when ``cfg.fit_continuum`` is True, :mod:`kinextract.joint` fits and
+       overwrites this with the real co-fit continuum.
 
     Parameters
     ----------
     cfg : FitConfig
         Fit configuration controlling every stage above (redshift,
-        wavelength window, ALS/pre-normalized mode selection, template
-        list, LOSVD grid parameters, masking thresholds, etc.).
+        wavelength window, continuum-cofit/pre-normalized mode selection,
+        template list, LOSVD grid parameters, masking thresholds, etc.).
     gal_file : str, optional
         Path to the galaxy spectrum file, forwarded to
         `load_spectrum_for_fit`.
@@ -446,7 +446,7 @@ def make_fit_state(cfg: FitConfig, gal_file: Optional[str] = None, gal_errors=No
     if len(x_reg) < 10:
         raise ValueError(f"Too few pixels in fit region: {len(x_reg)}")
 
-    em_mask = np.zeros(len(x_reg), dtype=bool)   # populated below when ALS mode is active
+    em_mask = np.zeros(len(x_reg), dtype=bool)   # populated below
 
     with Timer("apply masks"):
         bad = (
@@ -473,10 +473,8 @@ def make_fit_state(cfg: FitConfig, gal_file: Optional[str] = None, gal_errors=No
             gerr = np.where(em_mask, BIG, gerr)
 
         # Segment-wise rolling-median detection for emission wings and features
-        # not in the known line table.  Unmasked emission wings are the most
-        # common reason the ALS continuum rises above the full spectrum: they
-        # stay in the ALS base as upward outliers, driving als_abs_clean to
-        # reject the true continuum as "absorption", in a self-reinforcing loop.
+        # not in the known line table -- catches upward outliers the fixed
+        # line-table mask above would otherwise miss.
         seg_em = _segment_emission_mask(x_reg, g_reg, gerr, cfg)
         if seg_em.any():
             new_pix = int(np.count_nonzero(seg_em & ~em_mask))
@@ -621,7 +619,7 @@ def make_fit_state(cfg: FitConfig, gal_file: Optional[str] = None, gal_errors=No
         fortran_template_mixture=cfg.fortran_template_mixture,
         fit_global_amp=cfg.fit_global_amp,
         vgrid0=vgrid0, facnew0=facnew0,
-        fit_als_continuum=cfg.fit_als_continuum,
+        fit_continuum=cfg.fit_continuum,
         continuum_poly_mode=cfg.continuum_poly_mode,
         continuum_poly_x=continuum_poly_x,
         continuum_poly_bound=cfg.continuum_poly_bound,
@@ -632,23 +630,18 @@ def make_fit_state(cfg: FitConfig, gal_file: Optional[str] = None, gal_errors=No
     with Timer("precompute LOSVD + ip map"):
         precompute_losvd_interp(st)
         precompute_ip_map(st)
-        if cfg.fit_als_continuum and cfg.continuum_method != "joint":
-            init_als_continuum(st, cfg, templates=getattr(st, 't', None))
-            log("ALS continuum initialised.")
-        else:
-            # continuum_method="joint" builds its own P-spline initial guess
-            # directly from the data (see kinextract.joint.build_initial_guess)
-            # and has no use for an ALS pre-pass -- running one anyway would
-            # just be a wasted hyperparameter search, against the whole point
-            # of the joint method (no separate continuum sub-fit). st's
-            # continuum_mult is overwritten with the recovered P-spline
-            # continuum once the joint fit completes (see
-            # kinextract.joint.run_joint_fit).
-            st.continuum_mult = np.ones(st.npix)
+        # kinextract.joint builds its own P-spline continuum initial guess
+        # directly from the data (see kinextract.joint.build_initial_guess)
+        # when cfg.fit_continuum=True -- no separate continuum pre-pass is
+        # needed here. st.continuum_mult is overwritten with the recovered
+        # P-spline continuum once the joint fit completes (see
+        # kinextract.joint.run_joint_fit); left at all-ones for
+        # pre-normalized-mode fits (cfg.fit_continuum=False).
+        st.continuum_mult = np.ones(st.npix)
 
     log(
         f"STATE: npix={st.npix} nt={st.nt} nl={st.nl} nlosvd={st.nlosvd} "
-        f"prenormalized={st.prenormalized} fit_als_continuum={st.fit_als_continuum}"
+        f"prenormalized={st.prenormalized} fit_continuum={st.fit_continuum}"
     )
     return st, tpl_files
 

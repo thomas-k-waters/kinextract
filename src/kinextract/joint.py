@@ -1,20 +1,22 @@
 """Joint continuum-in-the-model LOSVD/template/continuum fit.
 
-This is the primary continuum-fitting method for :func:`~kinextract.fitting.run_spectral_fit`
-when ``cfg.fit_als_continuum=True`` (selected via ``cfg.continuum_method="joint"``,
-the default). It replaced the earlier ALS/polynomial outer-loop continuum fit
-as the default because of a structural problem with running continuum
-estimation as a *separate* sub-fit with its own hyperparameter search and
-overfitting heuristic: on a real MUSE spectrum, ALS's hyperparameter search
-picked an oversmoothed, near-flat continuum despite a more flexible ``als_lam``
-giving a healthier chi2_red and visibly tracking the data's real curvature --
-every grid candidate failed the ``als_chisq_floor`` overfitting check, and the
-fallback logic is systematically biased toward the *smoothest* available
-option. The same failure mode was confirmed for the standalone polynomial
-continuum alternative (its own order-search grid falls back the same way).
-ALS and polynomial continuum fitting remain available as opt-in alternatives
-(``cfg.continuum_method="als"`` / ``"polynomial"``) for users who want that
-approach instead.
+This is the (only) continuum-cofitting method for
+:func:`~kinextract.fitting.run_spectral_fit`, used when ``cfg.fit_continuum=True``.
+An earlier ALS/polynomial outer-loop continuum fit -- estimating the
+continuum as a *separate* sub-fit with its own hyperparameter search and
+overfitting heuristic -- was removed from the pipeline entirely because of a
+structural problem: on a real MUSE spectrum, ALS's hyperparameter search
+picked an oversmoothed, near-flat continuum despite a more flexible
+smoothing strength giving a healthier chi2_red and visibly tracking the
+data's real curvature -- every grid candidate failed the overfitting-floor
+check, and the fallback logic is systematically biased toward the
+*smoothest* available option. The same failure mode was confirmed for the
+standalone polynomial continuum alternative (its own order-search grid falls
+back the same way). The core ALS math
+(:func:`kinextract.continuum.asymmetric_least_squares_continuum`) remains
+available as a standalone, one-time pre-normalization utility (see
+``examples/notebooks/06_prenormalized_workflow.ipynb``) -- just no longer as
+an in-pipeline continuum-cofitting alternative.
 
 Instead of a separate continuum sub-fit, a continuum is folded directly into
 the same flat parameter vector as the LOSVD and template weights, applied
@@ -43,13 +45,21 @@ deliberately dropping the shipped pipeline's ``icoff``/``coff``/``coff2``
 continuum-offset parameterization (that exists for a narrower "pre-normalized
 mode" purpose unrelated to full continuum fitting).
 
-**Known open issue -- residual bias.** A dedicated real-MUSE-bin validation
-(``bin1605sp``, assumed truth from the original Fortran pipeline's
-``pallmc.out``) found the self-consistent ``sigl0`` fixed-point iteration
-(see :func:`fit_joint_auto_xlam_sigl0`) converges robustly regardless of the
-starting guess, but lands on a sigma ~11 km/s above the assumed truth --
-larger than the ~2 km/s residual seen in synthetic single-template tests.
-The source of this larger real-data residual has not yet been identified.
+**Resolved false alarm -- not a real bias.** An initial real-MUSE-bin
+validation (``bin1605sp``, compared against an entry in the original Fortran
+pipeline's ``pallmc.out``) found the self-consistent ``sigl0`` fixed-point
+iteration converging robustly but landing on a sigma ~11 km/s above the
+"assumed truth." Root-caused: ``pallmc.out`` mixes two distinct binning
+schemes (filenames prefixed ``bin`` vs. ``bnn``, ~40/38 split); the
+comparison had matched ``bin1605sp`` against a *different* bin
+(``bnn1605spmc.sim``) purely by a digit-substring coincidence, not the
+correct ground truth for that spectrum. Confirmed by cross-checking against
+the shipped ALS pipeline run directly on the actual ``bin1605sp.spec`` file,
+which agrees with the joint fit (V~0-14, sigma~50-57) and disagrees with the
+mismatched ``bnn1605spmc.sim`` entry (itself only weakly constrained:
+sigma=40.7+/-8.9). The genuine residual bias at the ``sigl0`` fixed point is
+the small ~2 km/s one already characterized in synthetic single-template
+tests (see :func:`fit_joint_auto_xlam_sigl0`'s docstring).
 """
 from __future__ import annotations
 
@@ -60,7 +70,7 @@ import numpy as np
 from scipy.interpolate import BSpline
 from scipy.optimize import minimize
 
-from .fitting import compute_losvd_n_peaks, compute_losvd_roughness
+from .fitting import _discrepancy_principle_search, compute_losvd_n_peaks, compute_losvd_roughness
 from .io import write_fitlov_outputs_from_model
 from .losvd import fit_losvd_gauss_hermite
 from .numerics import (
@@ -155,10 +165,11 @@ def normalize_template_matrix(st: FitState) -> tuple[np.ndarray, np.ndarray]:
 
     The bundled MUSE templates are NOT cross-normalized to a common flux
     level (per-template median ranges from ~0.5 to ~7.3, a 14x spread). In
-    the shipped ALS-outer-loop pipeline this doesn't matter, because the
-    continuum is re-fit via a separate, anchored regression at each outer
-    iteration (against a *fixed* current template mixture) rather than
-    varying jointly with the template weights. In a single joint
+    the retired ALS-outer-loop continuum-cofitting approach this didn't
+    matter, because the continuum was re-fit via a separate, anchored
+    regression at each outer iteration (against a *fixed* current template
+    mixture) rather than varying jointly with the template weights. In a
+    single joint
     optimization, though, leaving that spread in place opens a genuine
     degeneracy: shifting the template mix toward higher- or lower-level
     templates changes the weighted mixture's overall (multiplicative) level
@@ -622,16 +633,33 @@ def fit_joint_auto_xlam(
     maxiter: int = 50000, ftol: float = 1e-12, maxfun: int = 500000,
     use_jax: bool = True,
     fit_continuum: bool = True,
+    xlam_criterion: str = "chi2",
+    xlam_discrepancy_nsigma: float = 1.0,
 ):
     """Automatically select the joint model's LOSVD regularization strength.
 
-    Mirrors ``kinextract.fitting._auto_select_xlam``'s chi2 criterion
-    exactly (same selection rule, reusing its ``compute_losvd_roughness``/
-    ``compute_losvd_n_peaks`` helpers directly): run a full fit at every
-    grid point, then among the *unimodal* candidates (``n_peaks <=
-    xlam_max_peaks``) pick the **largest** xlam whose reduced chi2 is
-    within ``xlam_chi2_tolerance`` of the grid minimum -- "use as much
-    smoothing as possible without visibly hurting the fit."
+    Two criteria are supported (``xlam_criterion``):
+
+    ``"chi2"``/``"roughness"`` (default ``"chi2"``)
+        Mirrors ``kinextract.fitting._auto_select_xlam``'s chi2 criterion
+        exactly (same selection rule, reusing its ``compute_losvd_roughness``/
+        ``compute_losvd_n_peaks`` helpers directly): run a full fit at every
+        grid point, then among the *unimodal* candidates (``n_peaks <=
+        xlam_max_peaks``) pick the **largest** xlam whose reduced chi2 is
+        within ``xlam_chi2_tolerance`` of the grid minimum -- "use as much
+        smoothing as possible without visibly hurting the fit."
+
+    ``"discrepancy"``
+        Delegates to :func:`kinextract.fitting._discrepancy_principle_search`
+        (the same shared root-finder the shipped MAP path's
+        :func:`kinextract.fitting._auto_select_xlam_discrepancy` uses),
+        replacing the grid scan with a 1-D root-find over ``log(xlam)``
+        targeting a known chi2 rise rather than a tolerance-from-minimum
+        rule. Only ``xlam_grid``'s min/max are used, as the search's initial
+        bracket. If `xlam_grid` has only one element (``cfg.xlam_auto=False``
+        convention -- see :func:`run_joint_fit`), falls back to the
+        ``"chi2"`` path's trivial single-candidate behavior instead of
+        attempting a degenerate 1-D search.
 
     **Difference from the shipped selector, and why it matters:** this
     always recenters the wing-taper's ``v_center`` on
@@ -688,6 +716,17 @@ def fit_joint_auto_xlam(
         st = dataclasses.replace(st, v_center=v_center_est)
 
     grid = sorted(float(x) for x in xlam_grid)
+
+    if str(xlam_criterion).lower() == "discrepancy" and len(grid) > 1:
+        return _fit_joint_discrepancy_xlam(
+            st, n_interior_knots, degree, xlam_grid=grid,
+            xlam_max_peaks=xlam_max_peaks, xlam_peak_min_prominence=xlam_peak_min_prominence,
+            v_center_est=v_center_est,
+            xlam_cont=xlam_cont, cont_diff_order=cont_diff_order,
+            maxiter=maxiter, ftol=ftol, maxfun=maxfun, use_jax=use_jax,
+            fit_continuum=fit_continuum, nsigma=xlam_discrepancy_nsigma,
+        )
+
     records = []
     fits = {}
     gh_by_xlam = {}
@@ -774,6 +813,74 @@ def fit_joint_auto_xlam(
     return result, design, best_xlam, records
 
 
+def _fit_joint_discrepancy_xlam(
+    st: FitState, n_interior_knots: int, degree: int,
+    xlam_grid: list, xlam_max_peaks: int, xlam_peak_min_prominence: float,
+    v_center_est: float,
+    xlam_cont: float, cont_diff_order: int,
+    maxiter: int, ftol: float, maxfun: int, use_jax: bool,
+    fit_continuum: bool, nsigma: float,
+):
+    """Joint-model discrepancy-principle xlam selector -- the
+    ``xlam_criterion="discrepancy"`` branch of :func:`fit_joint_auto_xlam`,
+    factored out to keep that function's grid-search branch readable.
+
+    Wraps :func:`kinextract.fitting._discrepancy_principle_search` (the
+    same search the shipped MAP path's
+    :func:`kinextract.fitting._auto_select_xlam_discrepancy` uses) with an
+    ``evaluate_xlam`` closure that runs one :func:`fit_joint` call per
+    trial xlam instead of :func:`kinextract.fitting._fit_map_once` --
+    the two paths have entirely different objective functions and flat-
+    parameter-vector layouts, so only the *search algorithm* is shared, not
+    the per-trial fit mechanics (see the module docstring's plan reference).
+    ``v_center_est`` is assumed already resolved by the caller (recentering,
+    if requested, happens once in :func:`fit_joint_auto_xlam` before this is
+    called, not per-trial here).
+
+    Returns
+    -------
+    Same 4-tuple as :func:`fit_joint_auto_xlam`: ``(result, design,
+    best_xlam, records)``.
+    """
+    fits: dict = {}
+
+    def evaluate_xlam(xlam: float) -> dict:
+        st_try = dataclasses.replace(st, xlam=xlam)
+        result, design = fit_joint(
+            st_try, n_interior_knots, degree, xlam_cont=xlam_cont,
+            cont_diff_order=cont_diff_order, maxiter=maxiter, ftol=ftol,
+            maxfun=maxfun, use_jax=use_jax, auto_recenter_v=False,
+            fit_continuum=fit_continuum,
+        )
+        t_norm, _ = normalize_template_matrix(st_try)
+        gp, b, w, cont_coeffs, cont = evaluate_model_gp_joint(result.x, st_try, design, t_norm)
+        good = (st_try.gerr > 0.0) & (st_try.gerr < 1.0e9) & np.isfinite(st_try.g) & np.isfinite(gp)
+        resid = (st_try.g - gp) / st_try.gerr
+        chi2_total = float(np.sum(np.where(good, resid * resid, 0.0)))
+        ngood = int(good.sum())
+        n_peaks = compute_losvd_n_peaks(b, xlam_peak_min_prominence)
+        roughness = compute_losvd_roughness(b)
+        gh = fit_losvd_gauss_hermite(st_try.xl, b, fit_h3h4=True)
+        fits[xlam] = (result, design, roughness, ngood, len(result.x))
+        return dict(chi2_total=chi2_total, ngood=ngood, n_peaks=n_peaks,
+                     v_rec=float(gh["vherm"]), sigma_rec=float(gh["sherm"]))
+
+    best_xlam, trials = _discrepancy_principle_search(
+        evaluate_xlam, xlam_lo=xlam_grid[0], xlam_hi=xlam_grid[-1],
+        max_peaks=xlam_max_peaks, v_center_est=v_center_est, nsigma=nsigma,
+        log_label="Auto-xlam (joint, discrepancy)",
+    )
+
+    result, design, _roughness, _ngood, _nparams = fits[best_xlam]
+    # Same (xlam, chi2_red, roughness, n_peaks) shape as the grid-search
+    # branch, for any caller relying on records' shape (diagnostics only).
+    records = [
+        (xlam, t["chi2_total"] / max(fits[xlam][3] - fits[xlam][4], 1), fits[xlam][2], t["n_peaks"])
+        for xlam, t in sorted(trials.items())
+    ]
+    return result, design, best_xlam, records
+
+
 def fit_joint_auto_xlam_sigl0(
     st: FitState, n_interior_knots: int = 10, degree: int = 3,
     sigl0_init: float = 100.0, n_sigl0_iter: int = 3, sigl0_tol: float = 2.0,
@@ -785,12 +892,13 @@ def fit_joint_auto_xlam_sigl0(
     maxiter: int = 50000, ftol: float = 1e-12, maxfun: int = 500000,
     use_jax: bool = True,
     fit_continuum: bool = True,
+    xlam_criterion: str = "chi2",
+    xlam_discrepancy_nsigma: float = 1.0,
 ):
     """Self-consistent fixed-point refinement of the wing-taper's ``sigl0``.
 
     This is the default top-level joint-fit entry point (see
-    :func:`~kinextract.fitting.run_spectral_fit` with
-    ``cfg.continuum_method="joint"``).
+    :func:`~kinextract.fitting.run_spectral_fit` with ``cfg.fit_continuum=True``).
 
     Rationale: a dedicated diagnostic found the sigma-recovery bias is a
     monotonic function of ``sigl0`` crossing zero almost exactly at
@@ -815,13 +923,14 @@ def fit_joint_auto_xlam_sigl0(
     correction (3 total fits, the default) tightens convergence further so
     that *every* tested starting point lands within ~0.3 km/s of the others,
     confirming genuine fixed-point convergence independent of the initial
-    guess. On a real MUSE bin (``bin1605sp``, against the original Fortran
-    pipeline's own recovered sigma as assumed truth), starting guesses of
-    20, 100, and 300 km/s all converged to sigma ~51.5-51.6 km/s within 2-3
-    iterations -- confirming the same robust convergence on real data, but
-    also revealing a real ~11 km/s residual bias relative to that assumed
-    truth (larger than the ~2 km/s residual seen in the synthetic test) that
-    has not yet been root-caused.
+    guess. On a real MUSE bin (``bin1605sp``), starting guesses of 20, 100,
+    and 300 km/s all converged to sigma ~51.5-51.6 km/s within 2-3
+    iterations, confirming the same robust convergence on real data as in
+    the synthetic sweep above (an initial comparison against a ``pallmc.out``
+    entry suggested an ~11 km/s residual here, but that entry turned out to
+    be a different, mismatched bin -- see this module's docstring; the
+    shipped ALS pipeline run on the actual ``bin1605sp.spec`` agrees with
+    this result).
 
     Parameters
     ----------
@@ -843,7 +952,8 @@ def fit_joint_auto_xlam_sigl0(
         ``|sigl0 - recovered_sigma| <= sigl0_tol`` km/s, i.e. the fixed
         point has already been reached to within this tolerance.
     xlam_grid, xlam_chi2_tolerance, xlam_max_peaks, xlam_peak_min_prominence,
-    recenter_v, xlam_cont, cont_diff_order, maxiter, ftol, maxfun, use_jax :
+    recenter_v, xlam_cont, cont_diff_order, maxiter, ftol, maxfun, use_jax,
+    xlam_criterion, xlam_discrepancy_nsigma :
         Passed through to each :func:`fit_joint_auto_xlam` call.
     fit_continuum : bool, optional
         Passed through to each :func:`fit_joint_auto_xlam` call -- see its
@@ -878,6 +988,7 @@ def fit_joint_auto_xlam_sigl0(
             xlam_cont=xlam_cont, cont_diff_order=cont_diff_order,
             maxiter=maxiter, ftol=ftol, maxfun=maxfun, use_jax=use_jax,
             fit_continuum=fit_continuum,
+            xlam_criterion=xlam_criterion, xlam_discrepancy_nsigma=xlam_discrepancy_nsigma,
         )
         t_norm, _ = normalize_template_matrix(st_try)
         _, b, *_ = evaluate_model_gp_joint(result.x, st_try, design, t_norm)
@@ -897,11 +1008,10 @@ def run_joint_fit(st: FitState, cfg, write_outputs: bool = False, outdir: str = 
     :func:`kinextract.fitting.run_spectral_fit`'s ``"outputs"`` dict.
 
     This is the entry point :func:`kinextract.fitting.run_spectral_fit`
-    dispatches to whenever ``cfg.continuum_method=="joint"`` (the default).
+    dispatches to whenever ``cfg.fit_continuum=True`` or ``cfg.joint_prenorm=True``.
     Whether a continuum is actually co-fit is controlled by
-    ``cfg.fit_als_continuum`` exactly as for the shipped ALS/polynomial
-    methods: if True, a free P-spline continuum is co-fit; if False (the
-    pre-normalized-mode convention), the continuum is fixed at 1.0 (see
+    ``cfg.fit_continuum``: if True, a free P-spline continuum is co-fit; if
+    False (the pre-normalized-mode convention), the continuum is fixed at 1.0 (see
     :func:`fit_joint`'s `fit_continuum` parameter) -- there is nothing
     genuine for a free continuum to fit once the data's own continuum has
     already been divided out, and the sigl0/v_center/xlam-selection
@@ -944,17 +1054,30 @@ def run_joint_fit(st: FitState, cfg, write_outputs: bool = False, outdir: str = 
     """
     from .numerics import compute_weighted_template_spectrum
 
+    # cfg.xlam_auto=False means "use cfg.xlam as a single fixed regularization
+    # strength, no grid search" -- matching the shipped path's own convention
+    # (_auto_select_xlam is simply skipped there). fit_joint_auto_xlam_sigl0
+    # has no separate "no search" mode of its own, but a single-element xlam
+    # grid is exactly equivalent: the chi2-tolerance selection logic still
+    # runs, but with only one candidate to "select." The sigl0 fixed-point
+    # iteration and v_center recentering are independent improvements over
+    # the legacy pipeline (not part of what xlam_auto governs) and stay
+    # active either way.
+    xlam_grid = cfg.xlam_auto_grid if cfg.xlam_auto else (float(cfg.xlam),)
+
     result, design, best_xlam, sigl0_trace = fit_joint_auto_xlam_sigl0(
         st,
         n_interior_knots=cfg.joint_n_interior_knots, degree=cfg.joint_degree,
         sigl0_init=cfg.sigl, n_sigl0_iter=cfg.joint_n_sigl0_iter, sigl0_tol=cfg.joint_sigl0_tol,
-        xlam_grid=cfg.xlam_auto_grid, xlam_chi2_tolerance=cfg.xlam_chi2_tolerance,
+        xlam_grid=xlam_grid, xlam_chi2_tolerance=cfg.xlam_chi2_tolerance,
         xlam_max_peaks=cfg.xlam_max_peaks, xlam_peak_min_prominence=cfg.xlam_peak_min_prominence,
         recenter_v=cfg.joint_recenter_v,
         xlam_cont=cfg.joint_xlam_cont, cont_diff_order=cfg.joint_cont_diff_order,
         maxiter=cfg.map_maxiter, ftol=cfg.map_ftol, maxfun=cfg.map_maxfun,
         use_jax=cfg.use_jax_objective,
-        fit_continuum=cfg.fit_als_continuum,
+        fit_continuum=cfg.fit_continuum,
+        xlam_criterion=getattr(cfg, "xlam_criterion", "discrepancy"),
+        xlam_discrepancy_nsigma=getattr(cfg, "xlam_discrepancy_nsigma", 0.3),
     )
 
     t_norm, _ = normalize_template_matrix(st)
