@@ -166,3 +166,114 @@ problem with their real target galaxy's real data.
 
 **Re-prioritizing: sigma~250-350 is now the primary goal, not secondary.**
 Reopening the multi-start-optimization investigation immediately.
+
+### Checkpoint 5: multi-start diagnostic + the wide-window fix (this is the real breakthrough)
+
+**Multi-start diagnostic** (sigma=350, seed=42, the reproducible bad case from
+checkpoint 3): initialized the optimizer directly at the TRUE LOSVD shape
+(a Gaussian at V=80, sigma=350) instead of the usual uniform starting guess.
+It did NOT stay there -- it drifted to V=6, sigma=341 km/s, essentially the
+same wrong answer the uniform start finds. This rules out "bad starting
+point, multi-start would fix it": even starting exactly at truth, the
+optimizer moves away from it, meaning the true answer isn't even a local
+optimum of the objective for this narrow-window fit. A harder problem than
+optimizer luck.
+
+**The actual fix: widen the fit window.** Tested narrow (335A, CaII only) vs
+medium (1000A) vs wide (2300A) vs full (4300A) windows on the same bad case:
+
+| window | V | sigma | chi2_red |
+|---|---|---|---|
+| narrow (335A) | 12.08 | 330.58 | 0.860 |
+| medium (1000A) | 62.07 | 348.72 | 0.970 |
+| wide (2300A) | 52.05 | 385.35 | 1.078 |
+| full (4300A) | 59.82 | 445.64 | 1.134 |
+
+Medium (1000A, 8000-9000A) is the sweet spot -- dramatically better than
+narrow, without the sigma-overestimate/worse-chi2 that wide/full introduce
+(likely because the continuum model, a fixed low-order P-spline, doesn't
+flexibly track real spectral complexity over that much wider a range as well
+-- not retested with more P-spline knots, a possible further improvement).
+Confirmed across all 5 seeds at sigma=350 with the medium window: V ranges
+62-79 (vs 65-164 with the narrow window and full library, or -137 to +33 with
+the narrow window before E-MILES) -- not perfect, but a completely different,
+much more usable regime. Also re-checked at sigma=40-140: the wider window
+helps *there* too, consistently, not just at extreme sigma.
+
+**Why this makes sense**: a narrow, CaII-only window on a very broad LOSVD
+smooths out nearly all the useful spectral structure, leaving the fit with
+too little independent information to distinguish "correct V/sigma + this
+template mix" from "wrong V/sigma + a different template/continuum
+compensation" -- a genuine information-content problem, not a bug. More
+wavelength range with more distinct absorption features breaks that
+degeneracy. This is standard practice in the literature (real pPXF/galaxy
+kinematics fits typically use much wider windows than a single line region)
+-- I was carrying over notebook 01's narrow CaII-only window design
+uncritically, which was fine for its own single-template, low-sigma test but
+not something to keep for wider sigma regimes.
+
+**Decision: adopted the 1000A (8000-9000A) window as the new standard for
+notebook 02**, replacing the narrow 335A window used throughout this
+project's example notebooks so far. Notebook 02 rebuilt around E-MILES +
+this window + sigma=60 km/s (representative of the validated regime);
+executed cleanly, V=79.74+/-1.76 (truth 80), sigma=63.00+/-1.29 (truth 60),
+truth genuinely inside the reported bootstrap error bars.
+
+### Checkpoint 6: honest coverage-check results (sigma 40-140, narrow window, before the wide-window fix)
+
+Ran an actual bootstrap-CI coverage test (not just point-estimate bias) at
+sigma=40/70/100/140 x 3 seeds, narrow window, E-MILES: only 4/12 V-coverage
+and 5/12 sigma-coverage -- i.e. even in the "good" regime, the *reported*
+error bars did not reliably contain truth. The bias was small (~2-5 km/s)
+but the bootstrap error bars (~1.5-3 km/s half-width) were often smaller
+than that bias, so coverage failed more often than not. This was BEFORE the
+wide-window fix above; it's the finding that made clear the sigma~30-160
+"win" from checkpoint 2 wasn't actually good enough by the user's own
+stated bar (truth inside the error bars, not just close). Have not yet
+re-run the full coverage test with the wide window applied -- flagging as
+the most important immediate follow-up (see "Not yet done" below).
+
+### pPXF comparison notebook: NOT working yet, honestly flagged
+
+Attempted to build the user-requested kinextract-vs-pPXF comparison
+(`dev_notes/stress_test/ppxf_compare.py`). Hit a persistent, unresolved bug:
+pPXF recovers badly wrong V/sigma (e.g. V~10-16 km/s instead of truth 80,
+sigma~25-46 instead of 70) on the exact same mock spectra kinextract fits
+well, even with moments=2 (no GH), various mdegree/degree settings, external
+continuum pre-normalization, and 4x oversampled log-rebinning. Checked that
+templates and galaxy are correctly correlated in the right direction (weak
+positive correlation improvement when shifted by the true velocity -- so the
+setup isn't fundamentally nonsensical), but something in the log-rebin/
+velocity-convention/continuum-handling setup is wrong and I did not find it
+in the time available. This needs careful, unhurried debugging next time --
+likely candidates not yet fully ruled out: continuum-shape residuals
+dominating chi2 despite mdegree correction (galaxy has a much steeper/more
+structured synthetic continuum than typical pPXF examples); a sign/frame
+convention issue in how `vsyst`/`start` interact with this package's own
+velocity-shift convention; or an issue specific to fitting many similarly-old
+SSP templates together (parameter degeneracy pPXF's own regularization
+machinery is designed to handle but which I haven't enabled/configured).
+**Did not ship a broken comparison notebook** -- that would be actively
+misleading given the user's explicit goal of finding out "for sure" whether
+kinextract beats pPXF.
+
+## Not yet done (honest list for next session)
+
+1. Re-run the full bootstrap-CI coverage test (checkpoint 6) WITH the
+   wide-window fix applied, across the full sigma range including 250-350,
+   to get a final, honest coverage number for the actually-shipped
+   configuration -- this is the single most important remaining validation
+   step and hasn't been completed yet.
+2. Fix the pPXF comparison setup (see above) and build the notebook the
+   user explicitly asked for.
+3. Consider whether more P-spline continuum knots let the wide/full window
+   (2300-4300A) perform as well as the medium window without the
+   sigma-overestimate seen in checkpoint 5's table -- would be a real
+   further improvement at high sigma if it works.
+4. sigma>=250 still has a real, if much smaller than before, residual bias
+   (see checkpoint 5's 5-seed sigma=350 table: V 62-79, not 74-86) -- not
+   fully solved, just substantially better.
+5. Notebooks 03/04 (real MUSE/STIS data) were not touched this session --
+   worth checking whether the wide-window-fit-window finding changes
+   anything there too, given real N4751/N5102 fits currently use narrow
+   windows matching the old convention.
