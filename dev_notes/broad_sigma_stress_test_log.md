@@ -67,3 +67,54 @@ conversation this branch continues from, and the commit message itself):
 ## Session log
 
 (Entries added as I go, newest at the bottom.)
+
+### Checkpoint 2: comprehensive baseline sweep + E-MILES win (this is a big one)
+
+Ran a proper multi-seed (5 seeds), multi-sigma (30-350 km/s) sweep, generating
+from real templates and fitting back with the same library (no mismatch by
+construction), reporting bias AND seed-to-seed scatter separately (bias >>
+scatter means the error bars from that scatter would NOT cover truth, a
+stricter and more honest test than point-estimate accuracy alone).
+
+**G/K-restricted MUSE library (10 real stars)**: revealed something new --
+even in the "good" sigma~30-90 regime, there's a *persistent, systematic*
+V bias of -6 to -9.5 km/s (small scatter, ~1-2 km/s, but a real offset that
+scatter alone wouldn't explain/cover). Traced this to one specific star,
+`HD099648_av.dat` (G8Iab, a *supergiant*, not part of the true generating
+population) absorbing 28-71% of the fitted weight in every seed tested, even
+though it's not physically present -- luminosity-class-I stars apparently
+have different enough line profiles from the class-III giants they're being
+used to approximate that this creates a real, systematic pull. At high sigma
+(200+) the same full G/K library becomes outright chaotic again (std=33 km/s
+at sigma=350), matching earlier findings.
+
+**E-MILES (20 SSP templates, old/moderate-metallicity subgrid, bundled with
+the installed pPXF package -- no download needed)**: dramatically better at
+*every* sigma tested, not just the low end:
+
+| sigma | G/K MUSE: V bias (std) | E-MILES: V bias (std) |
+|---|---|---|
+| 30  | -9.5 (1.2)  | -2.0 (1.2) |
+| 50  | -7.9 (1.3)  | -1.4 (1.1) |
+| 70  | -7.0 (1.8)  | -1.6 (1.4) |
+| 90  | -6.5 (2.2)  | -2.4 (1.8) |
+| 120 | -8.1 (4.1)  | -2.7 (1.2) |
+| 160 | -4.1 (3.8)  | -0.9 (1.7) |
+| 200 | -7.9 (11.1) | -3.3 (3.5) |
+| 250 | -20.5 (18.3)| -11.5 (3.6) |
+| 300 | -51.9 (26.2)| -25.2 (7.4) |
+| 350 | -73.5 (33.3)| -43.1 (14.6)|
+
+E-MILES is a dense, physically smooth grid (25 ages x 6 metallicities in the
+full set), fundamentally more well-behaved than a handful of individual,
+idiosyncratic real stars -- exactly the pPXF-community rationale for using it,
+now directly confirmed on this problem. sigma <= 160 looks close to solved
+with E-MILES (bias consistent with the ~1-2 km/s scatter, i.e. error bars
+built from that scatter should genuinely cover truth). sigma >= 200 still has
+a real, if much smaller, residual bias to chase.
+
+Next: (1) check whether restricting the MUSE library to III-only giants (no
+supergiants) closes the gap without needing E-MILES, for completeness: (2)
+root-cause the remaining E-MILES high-sigma bias; (3) move to finalizing
+E-MILES as the primary template recommendation and rebuilding notebook 02
+around it.
