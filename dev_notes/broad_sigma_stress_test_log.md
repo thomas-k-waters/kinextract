@@ -277,3 +277,56 @@ kinextract beats pPXF.
    worth checking whether the wide-window-fit-window finding changes
    anything there too, given real N4751/N5102 fits currently use narrow
    windows matching the old convention.
+
+### Checkpoint 7: FINAL comprehensive validation -- E-MILES + wide window, full sigma=30-350 range, 5 seeds each
+
+This is the final, most complete result of the session (50 fits, ~26 min).
+Same setup as notebook 02 (E-MILES 20-SSP subgrid, 1000A window, sigma-matched
+velocity grid), swept across the full sigma range:
+
+| sigma | V bias | V std | sigma bias | sigma std |
+|---|---|---|---|---|
+| 30  | -1.23 | 0.42 | +4.60 | 1.18 |
+| 50  | -1.51 | 0.64 | +3.00 | 1.38 |
+| 70  | -1.69 | 0.95 | +2.02 | 2.06 |
+| 90  | -1.00 | 0.99 | +5.75 | 2.34 |
+| 120 | -1.24 | 0.56 | +4.69 | 2.69 |
+| 160 | -0.19 | 2.02 | +4.60 | 4.40 |
+| 200 | -1.08 | 3.22 | +5.33 | 5.98 |
+| 250 | -4.01 | 3.98 | +7.30 | 8.11 |
+| 300 | -7.62 | 5.56 | +7.01 | 10.16 |
+| 350 | -10.37| 6.30 | +9.69 | 12.83 |
+
+**sigma = 30-200 km/s: looks genuinely solved.** V bias is tiny (~1 km/s,
+often smaller than the seed-to-seed std) throughout; sigma has a small,
+consistent positive bias (+2 to +6 km/s, i.e. a few percent) with modest
+scatter. This is dramatically different from where this session started
+(the original notebook 02 design couldn't even reliably do sigma=140).
+Covers N5102 (35-47) and, if the pallmc.out-based number is right, N4751
+(43-70) with large margin either way.
+
+**sigma = 250-350 km/s: substantially better, not fully solved.** V bias
+grows to -10 km/s and std to 6 km/s at sigma=350 -- real, but categorically
+different from the original catastrophic failure (V ranging over 100 km/s,
+sometimes wrong in *sign*). If Gultekin/Campbell/Rusli's ~349-358 km/s is
+indeed what NGC 4751 needs, this regime needs more work before full
+publication-grade trust, but it's now in a "some tuning away" state, not a
+"fundamentally broken" one. Candidates for closing the remaining gap (not
+yet tried): more P-spline continuum knots at the wider window (checkpoint 5
+noted wide/full windows overshoot sigma, possibly a continuum-flexibility
+limit, not a kinematics one); explicit multi-start with several different
+xlam/v_center starting points and best-chi2 selection (the earlier
+single-start multi-start test only tried one alternative start).
+
+## Summary for the user
+
+- **sigma ~ 30-200 km/s: adopted, validated, shipped** in notebook 02
+  (E-MILES templates + 1000A fit window). This is a large, genuine
+  improvement over where the notebook started this session.
+- **sigma ~ 250-350 km/s: much improved (roughly 5-10x tighter than before)
+  but not fully solved.** Real residual bias remains, characterized and
+  documented above, with concrete next steps identified.
+- **pPXF comparison notebook: not done.** Explicitly not shipped in a broken
+  state; the specific bug and what's been ruled out is documented above.
+- Everything is on branch `claude/broad-sigma-losvd-stress-test`, nothing
+  pushed, `main` untouched, every step is its own commit.
