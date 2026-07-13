@@ -31,6 +31,7 @@ dependencies = [
     "numba>=0.57",
     "jax[cpu]>=0.4",
     "threadpoolctl>=3.0",
+    "astropy>=5.0",
 ]
 
 [project.optional-dependencies]
@@ -39,7 +40,6 @@ bayesian = [
 ]
 lines = [
     "astroquery>=0.4",
-    "astropy>=5.0",
 ]
 benchmarks = [
     "pandas>=2.0",
