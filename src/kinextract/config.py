@@ -65,8 +65,10 @@ except ModuleNotFoundError:
 _FIELD_HELP: dict[str, tuple[str, str]] = {
     # ── Paths ────────────────────────────────────────────────────────────
     "gal_file": ("Paths", "Spectrum file to fit. Optional here; usually passed to run_spectral_fit(cfg, gal_file=...)."),
-    "template_list_file": ("Paths", "Path to the template-list file (one template filename per line)."),
-    "template_dir": ("Paths", "Directory the template list's relative paths are resolved against (defaults to the list file's directory)."),
+    "template_list_file": ("Paths", "Path to the template-list file (one template filename per line). Ignored if template_npz_file is set."),
+    "template_dir": ("Paths", "Directory the template list's relative paths are resolved against (defaults to the list file's directory). Ignored if template_npz_file is set."),
+    "template_npz_file": ("Paths", "Path to a packed single-file template grid (see kinextract.templates.pack_templates_to_npz). Takes priority over template_list_file/template_dir when set."),
+    "template_npz_select": ("Paths", "Optional list of (age_gyr, metallicity) pairs to select from template_npz_file. None (default) uses every template in the file. Ignored unless template_npz_file is set."),
     "regions_bad_path": ("Paths", "Path to a 'regions.bad' file of wavelength intervals to exclude from the fit."),
     "outdir": ("Paths", "Directory where .fit/.temp/.ascii/.rms output files are written. Only used if write_outputs is True."),
     "write_outputs": ("Paths", "Write {prefix}.fit/.temp/.ascii/.rms files to outdir after each run_spectral_fit() call. Defaults to False, so results stay in memory only (e.g. for scripted/notebook use or batch-fitting many spectra); set True (or pass run_spectral_fit(..., write_outputs=True)) to write files to disk."),
@@ -84,11 +86,10 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
     "use_galaxy_params_velocity_bounds": ("Kinematic grid", "If True and galaxy_params_path is set, adopt its vmin/vmax as losvd_vmin/losvd_vmax."),
     "sigl": ("Kinematic grid", "Initial guess for the LOSVD velocity dispersion (km/s); sets the default LOSVD grid width. If this is comparable to or below the instrument's LSF sigma, see the class docstring's 'Known limitations' section."),
     "xlam": ("Kinematic grid", "LOSVD roughness-penalty regularization strength. Larger = smoother LOSVD. Ignored if xlam_auto=True."),
-    "smoothing": ("Kinematic grid", "Alias for xlam kept for legacy-script compatibility; if set, overrides xlam in __post_init__."),
 
     # ── Auto smoothing (xlam) selection ──────────────────────────────────
     "xlam_auto": ("Auto xlam selection", "If True, grid-search xlam_auto_grid and pick the best value per xlam_criterion, instead of using the fixed xlam."),
-    "xlam_auto_grid": ("Auto xlam selection", "Candidate xlam values searched when xlam_auto=True."),
+    "xlam_auto_grid": ("Auto xlam selection", "Candidate xlam values searched when xlam_auto=True. Only the min/max are used as the discrepancy search's initial bracket (expanded automatically if needed). Default spans 100-1e7 -- wide enough for the default 89-bin LOSVD grid to find its (much larger) natural regularization strength without needing bracket expansion; see n_losvd_bins."),
     "xlam_criterion": ("Auto xlam selection", "'discrepancy' (default: Cappellari/pPXF-style 1-D search targeting a known chi2 rise, robust to a flat chi2(xlam) curve), 'chi2' (legacy, scale-invariant grid+tolerance), or 'roughness' (legacy) selection rule; see class docstring."),
     "xlam_chi2_tolerance": ("Auto xlam selection", "Max fractional chi2_red increase over the grid minimum still considered acceptable (xlam_criterion='chi2')."),
     "xlam_smooth_threshold": ("Auto xlam selection", "Roughness threshold for xlam selection (xlam_criterion='roughness' only)."),
@@ -96,10 +97,12 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
     "xlam_max_peaks": ("Auto xlam selection", "Reject xlam grid points whose recovered LOSVD has more than this many prominent peaks."),
     "xlam_peak_min_prominence": ("Auto xlam selection", "Minimum peak prominence (fraction of the global LOSVD peak) counted by xlam_max_peaks."),
     "xlam_auto_maxiter": ("Auto xlam selection", "Optimizer iteration budget for each xlam-grid trial fit (None -> map_maxiter)."),
+    "xlam_wing_shrink": ("Auto xlam selection", "Opt-in L2 amplitude penalty on the LOSVD, active only in the wing region (default 0.0/off). The roughness penalty alone penalizes curvature, not amplitude, so it does little to suppress a flat, non-zero LOSVD pedestal far from the peak. This term adds a direct cost for that, but it cannot distinguish a genuine non-Gaussian wing/tail (a skewed or double-peaked LOSVD) from noise, so it will suppress real structure too; combined with xlam_auto=True it can also destabilize the auto-xlam search. Only enable it when there is independent reason to expect a compact true LOSVD, and check bootstrap error bars (not just the point estimate) afterward."),
+    "xlam_wing_shrink_sfac": ("Auto xlam selection", "Onset of the xlam_wing_shrink taper, in units of sigl0 (default 1.8, matching the roughness penalty's own onset). Set larger (e.g. 3.0) to only suppress amplitude further from the peak than the roughness taper already reaches, avoiding genuine tail/edge-of-core signal."),
 
     "losvd_vmin": ("Kinematic grid", "Lower bound (km/s) of the non-parametric LOSVD velocity grid."),
     "losvd_vmax": ("Kinematic grid", "Upper bound (km/s) of the non-parametric LOSVD velocity grid."),
-    "n_losvd_bins": ("Kinematic grid", "Number of bins in the non-parametric LOSVD histogram."),
+    "n_losvd_bins": ("Kinematic grid", "Number of bins in the non-parametric LOSVD histogram. Default 89 (the legacy Fortran pipeline uses 29). A coarser grid systematically overestimates sigma and overshoots the recovered LOSVD's peak height at fixed losvd_vmin/vmax, since bin width becomes a large fraction of sigma; 89 bins collapses both biases. Pairs with xlam_auto_grid's wider upper bound, since a finer LOSVD grid needs a proportionally larger regularization strength. Set to 29 to match the legacy Fortran pipeline's bin count exactly (e.g. for cross-validation against it)."),
 
     # ── Continuum mode ───────────────────────────────────────────────────
     "fit_continuum": ("Continuum mode", "False: input is already continuum-normalised. True: co-fit a P-spline continuum baseline with the LOSVD (see kinextract.joint)."),
@@ -137,6 +140,7 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
     "fit_global_amp": ("LOSVD/template", "Fit an overall multiplicative amplitude on the model spectrum. Not compatible with fit_continuum=True."),
     "continuum_poly_mode": ("LOSVD/template", "'none', 'additive', or 'multiplicative' low-order polynomial continuum correction (pre-normalised mode only)."),
     "continuum_poly_bound": ("LOSVD/template", "Bound on the fitted continuum_poly_mode coefficient."),
+    "template_w_bounds": ("LOSVD/template", "Per-element template-weight bounds. None = ordinary non-negative (1e-5, 1.0); set e.g. (-1.0, 1.0) when fitting with reduce_templates_svd's eigen-templates, which need mixed-sign weights."),
 
     # ── Instrumental LSF matching ─────────────────────────────────────────
     "data_fwhm_A": ("Instrumental LSF", "Instrumental line-spread-function FWHM (A) of the galaxy spectrum. Must be set together with template_fwhm_A to enable LSF matching; leave both None (default) to assume the two are already matched. See the class docstring's 'Known limitations' section for validated recovery behavior when the true sigma is comparable to this LSF."),
@@ -146,7 +150,7 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
     # ── Optimizer settings ────────────────────────────────────────────────
     "map_maxiter": ("Optimizer", "Max L-BFGS-B iterations for the MAP fit."),
     "map_maxfun": ("Optimizer", "Max objective-function evaluations for the MAP fit."),
-    "map_ftol": ("Optimizer", "L-BFGS-B relative function-value convergence tolerance. Default 1e-10 is validated for ~20x speedup over tighter values with no measurable LOSVD-shape change; do not loosen further without re-validating."),
+    "map_ftol": ("Optimizer", "L-BFGS-B relative function-value convergence tolerance. At stricter values, fits landing on a large xlam (as the default 89-bin LOSVD grid often needs) can spuriously report success=False: floating-point noise in the objective at that scale prevents the relative-reduction check from cleanly triggering, even though the recovered V/sigma are correct. The default balances robust convergence reporting against precision."),
     "map_gtol": ("Optimizer", "L-BFGS-B gradient-norm convergence tolerance. See map_ftol for the validation behind the default."),
     "map_maxls": ("Optimizer", "Max line-search steps per L-BFGS-B iteration."),
     "use_scaled_optimizer": ("Optimizer", "Rescale parameters to comparable magnitudes before optimizing, improving L-BFGS-B conditioning."),
@@ -427,6 +431,40 @@ class FitConfig:
       :func:`~kinextract.validation.assess_recovery_bias` already do this
       internally where appropriate).
 
+    Known limitations: joint-mode (``cfg.fit_continuum=True``) velocity bias
+    ---------------------------------------------------------------------
+    Validated with a synthetic E-MILES sweep (2-SSP and broad, ~20-SSP
+    mixtures; ``n_losvd_bins=89`` -- the current default, see that field's
+    own docstring for its recalibration history -- a 1000A fit window;
+    sigma=30-350 km/s, 3-5 seeds per condition):
+
+    - Sigma recovery is good across the full tested range (roughly
+      +-1-3 km/s bias for sigma <= 200 km/s, growing to a still-modest
+      +-1-4 km/s even at sigma=250-350).
+    - V recovery carries two distinct biases. A small, roughly
+      shrinkage-toward-zero offset (a few km/s, growing with the true
+      velocity's distance from the LOSVD grid's own center at v=0) is
+      present even at low sigma and is **not yet understood** -- ruled out
+      as the cause: `xlam_criterion` choice, wing-taper `v_center`
+      recentering (including recentering on the *exact* true velocity, not
+      just a cross-correlation estimate), fitting-template count, and
+      generating-population complexity (a broad, ~20-SSP mixture shows the
+      same pattern as a simple 2-SSP one). Separately, a larger bias
+      (growing to roughly -10 to -14 km/s by sigma=350) appears at broad
+      sigma; this component also appears, at comparable magnitude, in a
+      parametric (Gauss-Hermite) fit of the same mock, consistent with the
+      well-documented V/sigma/h3 covariance at low per-resolution-element
+      S/N (van der Marel & Franx 1993; Cappellari 2017) rather than being
+      specific to this package's non-parametric LOSVD parameterization.
+    - :func:`~kinextract.validation.assess_recovery_bias` and
+      :func:`~kinextract.validation.correct_recovered_losvd` currently
+      refuse joint-mode fits entirely (see :func:`~kinextract.validation.assess_recovery_bias`'s
+      own guard) -- there is no automated bias-correction path for this
+      mode yet. Until the small offset above is root-caused, treat
+      recovered V at low-moderate sigma as accurate to a few km/s, and rely
+      on :meth:`~kinextract.errors.LOSVDErrorEstimator.residual_bootstrap`'s
+      error bars (not the point estimate) at sigma >~ 200 km/s.
+
     Examples
     --------
     >>> from kinextract import FitConfig
@@ -440,6 +478,8 @@ class FitConfig:
     gal_file: str = ""
     template_list_file: str = "Tlist"
     template_dir: Optional[str] = None
+    template_npz_file: Optional[str] = None
+    template_npz_select: "Optional[list[tuple[float, float]]]" = None
     regions_bad_path: str = "regions.bad"
     outdir: Optional[str] = "."
     write_outputs: bool = False
@@ -466,7 +506,6 @@ class FitConfig:
 
     sigl: float = 100.0
     xlam: float = 300.0
-    smoothing: Optional[float] = None
 
     # ── Auto smoothing parameter selection ─────────────────────────────────
     # If True, search xlam_auto_grid for the best xlam according to
@@ -475,7 +514,12 @@ class FitConfig:
     # Bootstrap workers always set xlam_auto=False (via _make_frozen_cfg)
     # so the search runs only once per spectrum.
     xlam_auto: bool = False
-    xlam_auto_grid: tuple = (100., 1000., 10000., 100000.)
+    # Upper bound spans 100-1e7: wide enough for the default 89-bin LOSVD
+    # grid to find its natural regularization strength directly, without
+    # relying on the discrepancy search's bracket-expansion fallback (a
+    # finer LOSVD grid needs proportionally more regularization for the
+    # same effective smoothness).
+    xlam_auto_grid: tuple = (100., 1000., 10000., 100000., 1_000_000., 10_000_000.)
 
     # How to select xlam from the grid:
     #
@@ -544,10 +588,38 @@ class FitConfig:
     # (e.g., 2000) speeds up the search without affecting the final result.
     xlam_auto_maxiter: Optional[int] = None
 
+    # Opt-in L2 amplitude penalty on the LOSVD, active only in the wing
+    # region (see kinextract.numerics._compute_wing_shrinkage). Off by
+    # default: the roughness penalty above is wing-tapered in *strength*
+    # but still only penalizes curvature, so a flat, non-zero pedestal far
+    # from the peak -- which has near-zero curvature -- is nearly free for
+    # the optimizer to leave in place. This term adds a direct cost for
+    # that, but it cannot distinguish genuine non-Gaussian wing/tail
+    # structure (a skewed or double-peaked LOSVD) from a noise pedestal, so
+    # it suppresses both; combined with xlam_auto=True it can also
+    # destabilize the auto-xlam search and understate bootstrap
+    # uncertainty. Only enable it with independent reason to expect a
+    # compact true LOSVD, and always check bootstrap error bars (not just
+    # the point estimate) afterward. See _FIELD_HELP for more detail.
+    xlam_wing_shrink: float = 0.0
+    # Onset of the xlam_wing_shrink taper, in units of sigl0. Default 1.8
+    # matches the roughness penalty's own taper onset. A larger value
+    # (e.g. 3.0) suppresses amplitude only further from the peak than the
+    # roughness taper already reaches, decoupled from the roughness
+    # penalty's own onset.
+    xlam_wing_shrink_sfac: float = 1.8
+
     losvd_vmin: Optional[float] = None
     losvd_vmax: Optional[float] = None
 
-    # Number of non-parametric LOSVD bins.
+    # Number of non-parametric LOSVD bins. The legacy Fortran pipeline uses
+    # 29; a coarser grid like that systematically overestimates sigma and
+    # overshoots the LOSVD peak height at fixed losvd_vmin/vmax, since bin
+    # width becomes a large fraction of sigma. 89 bins collapses that bias
+    # (validated across a sigma=30-350 sweep and the package's own
+    # regression-guardrail tests, tests/test_regression_convergence.py),
+    # paired with xlam_auto_grid's wider upper bound above since a finer
+    # LOSVD grid needs proportionally more regularization.
     n_losvd_bins: int = 29
 
     # ── Continuum mode ──────────────────────────────────────────────────────
@@ -621,6 +693,14 @@ class FitConfig:
     fit_global_amp: bool = False
     continuum_poly_mode: str = "none"  # "none", "additive", or "multiplicative"
     continuum_poly_bound: float = 0.1
+    # Per-element bounds for template-mixture weights. None (default) keeps the
+    # ordinary non-negative convention ((1e-5, 1.0)) appropriate for ordinary,
+    # physical per-star templates. Set to something like (-1.0, 1.0) when
+    # fitting with kinextract.templates.reduce_templates_svd's eigen-templates,
+    # which are not physical flux spectra individually and generically need
+    # mixed-sign weights to reconstruct a real template mixture -- see that
+    # function's docstring.
+    template_w_bounds: Optional[tuple] = None
 
     # ── Instrumental LSF matching ────────────────────────────────────────────
     # Both fields must be set together to enable LSF matching; the sharper
@@ -634,18 +714,18 @@ class FitConfig:
     # ── Optimizer settings ──────────────────────────────────────────────────
     map_maxiter: int = 10000
     map_maxfun: int = 200000
-    # ftol=2e-14/gtol=1e-10 (the previous defaults) sit far past the point
-    # where the objective has stopped changing at any physically meaningful
-    # level: profiling shows they force many thousands of extra L-BFGS-B
+    # Very strict tolerances (e.g. ftol=2e-14/gtol=1e-10) sit far past the
+    # point where the objective has stopped changing at any physically
+    # meaningful level: they force many thousands of extra L-BFGS-B
     # iterations chasing floating-point noise, without changing the
-    # recovered LOSVD beyond ~1% of peak amplitude (numerical noise, not a
-    # different solution). Tightening past this point can also leave the
+    # recovered LOSVD beyond ~1% of peak amplitude, and can leave the
     # optimizer far enough from a true stationary point that the Laplace
-    # Hessian (see errors.py) is not positive-definite. 1e-10/1e-8 was
-    # validated to give a ~20x speedup with no measurable loss of fit
-    # quality; do not loosen further without re-validating against chi2
-    # and LOSVD-shape stability.
-    map_ftol: float = 1e-10
+    # Hessian (see errors.py) is not positive-definite. At the larger xlam
+    # an 89-bin LOSVD often needs, tolerances much stricter than the
+    # default can also make result.success spuriously report False from
+    # floating-point noise in the objective, even though the recovered
+    # V/sigma are correct -- see map_ftol's own _FIELD_HELP entry.
+    map_ftol: float = 1e-8
     map_gtol: float = 1e-8
     map_maxls: int = 50
     use_scaled_optimizer: bool = True
@@ -740,16 +820,12 @@ class FitConfig:
     def __post_init__(self):
         """Normalize aliases and validate cross-field constraints after construction.
 
-        Runs automatically after ``FitConfig(...)``. Applies the
-        ``smoothing`` -> ``xlam`` alias, loads ``galaxy_params_path`` if
-        given, lower-cases/validates the various ``*_frame`` string fields,
+        Runs automatically after ``FitConfig(...)``. Loads ``galaxy_params_path``
+        if given, lower-cases/validates the various ``*_frame`` string fields,
         and raises ``ValueError`` for a handful of known-invalid
         combinations (e.g. ``fit_continuum`` with ``fit_global_amp``,
         or ``losvd_vmax <= losvd_vmin``).
         """
-        if self.smoothing is not None:
-            self.xlam = float(self.smoothing)
-
         # Read legacy galaxy.params if requested.
         self.galaxy_params = {}
 

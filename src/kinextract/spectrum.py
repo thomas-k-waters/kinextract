@@ -45,7 +45,9 @@ from .masking import _segment_emission_mask, build_emission_line_mask
 from .state import FitState, precompute_ip_map, precompute_losvd_interp
 from .templates import (
     build_template_matrix_fortran,
+    build_template_matrix_from_npz,
     convolve_gaussian_pixels,
+    load_packed_templates,
     resolution_mismatch_sigma_A,
 )
 
@@ -428,7 +430,10 @@ def make_fit_state(cfg: FitConfig, gal_file: Optional[str] = None, gal_errors=No
         and precomputed interpolation tables all set).
     tpl_files : list of str
         The template file paths used to build the template matrix, in
-        the same order as the columns of ``st.t``.
+        the same order as the columns of ``st.t``. When
+        ``cfg.template_npz_file`` is set, this is instead the packed
+        template names (see :func:`kinextract.templates.load_packed_templates`),
+        since there are no individual per-template file paths in that case.
 
     Raises
     ------
@@ -500,8 +505,17 @@ def make_fit_state(cfg: FitConfig, gal_file: Optional[str] = None, gal_errors=No
                 gerr = np.where(em_mask, BIG, gerr)
 
     with Timer("read + interpolate templates"):
-        tpl_files = read_template_list(cfg.template_list_file, cfg.template_dir)
-        T, T_err, outside_each, outside_all = build_template_matrix_fortran(x_reg, tpl_files)
+        if cfg.template_npz_file is not None:
+            # Packed single-file grid (see kinextract.templates.pack_templates_to_npz)
+            # takes priority over template_list_file/template_dir when set.
+            T, T_err, outside_each, outside_all = build_template_matrix_from_npz(
+                x_reg, cfg.template_npz_file, select=cfg.template_npz_select,
+            )
+            _, _, _npz_meta = load_packed_templates(cfg.template_npz_file, select=cfg.template_npz_select)
+            tpl_files = list(_npz_meta["names"])
+        else:
+            tpl_files = read_template_list(cfg.template_list_file, cfg.template_dir)
+            T, T_err, outside_each, outside_all = build_template_matrix_fortran(x_reg, tpl_files)
         if cfg.fortran_mask_template_outside and outside_all.any():
             log(f"Template coverage mask: {outside_all.sum()} pixels masked "
                 f"(no template covers them)")
@@ -623,6 +637,8 @@ def make_fit_state(cfg: FitConfig, gal_file: Optional[str] = None, gal_errors=No
         continuum_poly_mode=cfg.continuum_poly_mode,
         continuum_poly_x=continuum_poly_x,
         continuum_poly_bound=cfg.continuum_poly_bound,
+        xlam_wing_shrink=cfg.xlam_wing_shrink,
+        xlam_wing_shrink_sfac=cfg.xlam_wing_shrink_sfac,
     )
 
     st.emission_pre_mask = em_mask

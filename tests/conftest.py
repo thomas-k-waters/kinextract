@@ -97,6 +97,11 @@ def real_muse_fit():
         xlam_auto=True, xlam_criterion="roughness", xlam_smooth_threshold=0.25,
         sigl=100.0, clean=True,
         map_maxiter=20000, print_every=0,
+        # Pinned to the legacy 29-bin grid xlam_smooth_threshold=0.25 was
+        # calibrated against -- the roughness metric's typical scale shifts
+        # with bin width, so this threshold isn't portable to a different
+        # n_losvd_bins without recalibration (see config.py's new 89 default).
+        n_losvd_bins=29,
     )
     fit = run_spectral_fit(cfg, gal_file=str(norm_file))
     return fit, cfg

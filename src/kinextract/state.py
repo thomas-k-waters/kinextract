@@ -222,6 +222,20 @@ class FitState:
     continuum_poly_bound: float = 0.1
     v_center: float = 0.0
     ntot: int = 0
+    # Coefficient for an L2 (b^2) penalty applied ONLY to the wing-taper's
+    # "excess" regularization weight (lam_j - xlam, zero in the core, grows
+    # into the wings exactly like the roughness penalty's own taper) -- see
+    # kinextract.numerics._compute_wing_shrinkage. Default 0.0 (off): a flat,
+    # non-zero LOSVD pedestal in the wings has near-zero curvature, so the
+    # existing roughness-only penalty barely discourages it. Opt-in via
+    # FitConfig.xlam_wing_shrink.
+    xlam_wing_shrink: float = 0.0
+    # Onset of the wing_shrink taper, in units of sigl0 (default 1.8, matching
+    # the roughness penalty's own taper onset). A separate, larger value lets
+    # wing_shrink kick in only *past* where the roughness taper already does,
+    # avoiding touching genuine tail/edge-of-core signal. See
+    # FitConfig.xlam_wing_shrink_sfac.
+    xlam_wing_shrink_sfac: float = 1.8
 
     def __getstate__(self):
         """Serialize FitState for multiprocessing by converting numpy arrays to tuples."""

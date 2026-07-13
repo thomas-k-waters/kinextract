@@ -10,16 +10,6 @@ Open with `jupyter lab` or `jupyter notebook`.
 | `01_basic_mock_fit.ipynb` | Full pipeline on a normalized synthetic spectrum; all key outputs; `FitConfig.describe()` for config introspection |
 | `02_realistic_mock_fit.ipynb` | Fitting a raw (non-normalized) spectrum with the joint continuum-cofitting method (`fit_continuum=True`), plus Laplace + bootstrap uncertainty estimation |
 | `03_real_data_muse.ipynb` | Real NGC 5102 MUSE central bin — bundled data, runs out of the box, plus error estimation |
-| `04_real_data_stis.ipynb` | Real NGC 5102 HST/STIS inner-bin spectrum, plus error estimation |
-| `05_recovery_validation.ipynb` | Measuring empirical recovery bias with `assess_recovery_bias`/`correct_recovered_losvd` on matched mock spectra |
-| `06_prenormalized_workflow.ipynb` | Manually pre-normalizing a raw spectrum with the standalone ALS utility (`kinextract.continuum.asymmetric_least_squares_continuum`), then fitting the resulting `.norm` spectrum with `fit_continuum=False` (joint mode off) |
-
-### Supplementary
-
-| Notebook | What it demonstrates |
-| - | - |
-| `S0_losvd_recovery_diagnostics.ipynb` | Diagnosing LOSVD recovery quality: velocity grid, forward-model accuracy, regularization bias, emission masking, S/N and true-V sweeps |
-| `S1_regularization_demo.ipynb` | How `xlam` affects LOSVD smoothness; the chi² auto-selection criterion |
 
 Plot styling is applied automatically by `kinextract.plotting` (no separate
 style file to load), so no setup beyond installing `kinextract` is needed;
@@ -34,19 +24,13 @@ pip install kinextract   # includes JAX + Numba for fast fitting by default
 ## Bundled data (`data/`)
 
 Real spectra and stellar templates for notebooks 02 (template normalization
-demo), 03, 04, and 06 (reuses the notebook 03 MUSE spectrum, plus a real
-pre-normalized `.norm` version of it and the STIS spectrum).
+demo) and 03.
 
 ```text
 data/
   muse/
     bin0105sp.spec   spaxel on the galactic center — VLT/MUSE WFM, NGC 5102 (notebook 03)
-    bin0105sp.norm   the same spaxel, already continuum-normalized (notebook 06)
-    <template>.dat   one or more template spectra (any number supported)
-    Tlist            template list file: one template filename per line
-  stis/
-    bin0105sp.spec   spaxel on the galactic center — HST/STIS G750L, NGC 5102 (notebook 04)
-    bin0105sp.norm   the same spaxel, already continuum-normalized (notebook 06)
+    bin0105sp.norm   the same spaxel, already continuum-normalized
     <template>.dat   one or more template spectra (any number supported)
     Tlist            template list file: one template filename per line
 ```

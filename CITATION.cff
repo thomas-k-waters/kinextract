@@ -6,16 +6,17 @@ authors:
   - family-names: Waters
     given-names: Thomas, K.
     affiliation: University of Michigan
-version: 0.1.0
-date-released: "2026-07-06"
+version: 0.4.0
+date-released: "2026-07-13"
 url: "https://github.com/thomas-k-waters/kinextract"
 abstract: >
   kinextract fits galaxy spectra using a non-parametric line-of-sight velocity
-  distribution (LOSVD) represented directly on a velocity grid.  An
-  asymmetric-least-squares (ALS) baseline is co-fitted with the LOSVD,
-  and regularization strength is selected automatically via a roughness
-  criterion.  The package targets integral-field-spectroscopy data (MUSE,
-  STIS) for black-hole mass measurements through Schwarzschild orbit modelling.
+  distribution (LOSVD) represented directly on a velocity grid.  A penalized
+  B-spline (P-spline) continuum is co-fitted jointly with the LOSVD and
+  template weights in a single optimization, and regularization strength is
+  selected automatically via a discrepancy-principle or roughness criterion.
+  The package targets integral-field-spectroscopy data (MUSE, STIS) for
+  black-hole mass measurements through Schwarzschild orbit modelling.
 keywords:
   - astronomy
   - spectroscopy

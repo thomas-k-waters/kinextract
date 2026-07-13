@@ -140,7 +140,10 @@ def assess_recovery_bias(
     st_fields = _fit_state_to_fields(st_ref)
     base_gerr = np.asarray(st_ref.gerr, float).copy()
 
-    _, xlb, xub = build_initial_guess_nonparam(st_ref, cfg.coff, cfg.coff2)
+    _, xlb, xub = build_initial_guess_nonparam(
+        st_ref, cfg.coff, cfg.coff2,
+        w_bounds=cfg.template_w_bounds if cfg.template_w_bounds is not None else (1e-5, 1.0),
+    )
     bounds = list(zip(xlb, xub))
 
     # Work on a copy: _auto_select_xlam (invoked once per replicate below, if
@@ -163,9 +166,8 @@ def assess_recovery_bias(
                 st.g = g_mock
                 st.gerr = base_gerr.copy()
                 st.ntot = 0
-                # Zero-centered regardless of st_ref.v_center: a dedicated
-                # validation sweep found data-driven recentering (now the
-                # default for a real single fit via
+                # Zero-centered regardless of st_ref.v_center: data-driven
+                # recentering (the default for a real single fit via
                 # kinextract.fitting._fit_map_sigl0_recenter) introduces
                 # *worse* bias than a fixed zero point across this grid --
                 # see test_assess_recovery_bias_uses_zero_centered_map_objective.

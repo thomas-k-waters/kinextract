@@ -20,6 +20,7 @@ API for fitting a single galaxy spectrum end-to-end, given a
 """
 from __future__ import annotations
 
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -717,10 +718,10 @@ def _v_recovery_is_sane(
     """Guard against a candidate xlam landing in a spurious local optimum.
 
     Adapted from :func:`kinextract.joint.fit_joint_auto_xlam`'s
-    ``_candidate_ok`` (same two checks, same rationale -- found on a real
-    MUSE bin near the resolution limit, where one xlam trial's optimizer
-    landed on a genuinely different, lower-chi2 local optimum with V off by
-    >40 km/s, indistinguishable from the correct answer by chi2 alone):
+    ``_candidate_ok`` (same two checks, same rationale): an xlam trial's
+    optimizer can land on a genuinely different, lower-chi2 local optimum
+    with V off by tens of km/s, indistinguishable from the correct answer by
+    chi2 alone.
 
     1. Compare the candidate's recovered V against the pre-fit
        cross-correlation velocity estimate `v_center_est`.
@@ -845,6 +846,19 @@ def _discrepancy_principle_search(
     log_tol_dex : float, optional
         Bisection convergence tolerance, in decades of `xlam`.
 
+    Warns
+    -----
+    RuntimeWarning
+        If reaching the target required >=3 bracket expansions (i.e. the
+        final `xlam` is >=1000x the caller-supplied `xlam_hi`) -- a strong
+        signal that `xlam_auto_grid`/`nsigma` were calibrated for a
+        different problem size (e.g. a different `n_losvd_bins`, fit
+        window, or template count) than the one actually being fit. This
+        is the exact failure signature of a real regression found in this
+        package's history (raising `n_losvd_bins` without recalibrating
+        `xlam_discrepancy_nsigma`), so it is checked automatically here
+        rather than relying on a human noticing an absurd `xlam` value.
+
     Returns
     -------
     best_xlam : float
@@ -886,6 +900,7 @@ def _discrepancy_principle_search(
     log(f"{log_label}: chi2_min={chi2_min:.4g} (xlam={lo:.4g})  chi2_red_min={chi2_red_min:.4g}  "
         f"target={target:.4g}  (chi2_min * (1 + {nsigma:.2f}*sqrt(2/{ngood})))")
 
+    xlam_hi_initial = hi
     t_hi = _eval(hi)
     expansions = 0
     while t_hi["chi2_total"] < target and expansions < max_bracket_expansions:
@@ -893,6 +908,28 @@ def _discrepancy_principle_search(
         hi *= 10.0
         t_hi = _eval(hi)
         expansions += 1
+
+    if expansions >= 3:
+        # >=3 expansions means the search had to extrapolate >=1000x beyond
+        # the caller-supplied xlam_hi to find the discrepancy-principle
+        # target -- a strong signal that xlam_auto_grid/xlam_discrepancy_nsigma
+        # were calibrated for a different problem size (e.g. a different
+        # n_losvd_bins, fit window, or template count) and no longer match
+        # this one. This is not necessarily wrong (the search still finds an
+        # answer), but it is exactly the signature of the real regression
+        # found in this package's own history: raising n_losvd_bins 29->89
+        # without recalibrating xlam_discrepancy_nsigma caused searches to
+        # run away like this, some of which then failed to converge at all.
+        warnings.warn(
+            f"{log_label}: needed {expansions} bracket expansions (xlam_hi "
+            f"{xlam_hi_initial:.4g} -> {hi:.4g}, a {hi / xlam_hi_initial:.3g}x "
+            f"extrapolation) to reach the discrepancy-principle target. "
+            f"This usually means xlam_auto_grid/xlam_discrepancy_nsigma are "
+            f"miscalibrated for the current n_losvd_bins/fit window/template "
+            f"count -- treat the result with suspicion and consider "
+            f"re-checking convergence (result.success) and timing.",
+            RuntimeWarning, stacklevel=3,
+        )
 
     if t_hi["chi2_total"] < target:
         log(f"{log_label}: target not reached even at xlam={hi:.4g} after "
@@ -1150,16 +1187,13 @@ def _fit_map_sigl0_recenter(
     Ports :func:`kinextract.joint.fit_joint_auto_xlam_sigl0`'s validated
     fixed-point iteration to the shipped (non-joint) MAP path -- see that
     function's docstring for the full rationale, validation history, and
-    citations. Root cause: a real-data comparison between this path and the
-    joint path's ``joint_prenorm=True`` mode (otherwise matched settings,
-    same pre-normalized spectrum) found a large, unexplained V/sigma
-    discrepancy, traced to this exact gap. The wing-tapered smoothness
-    penalty (:func:`kinextract.numerics._wing_taper_lam_vec`) depends on
-    both ``st.sigl0`` (where the taper begins ramping up) and ``st.v_center``
-    (its pivot); the joint path always self-corrects both before returning,
-    while this path previously left them at their initial values
-    (``cfg.sigl``, 0.0) for the entire fit, however wrong those turned out to
-    be -- most consequential at high ``xlam``, exactly where kinextract's own
+    citations. The wing-tapered smoothness penalty
+    (:func:`kinextract.numerics._wing_taper_lam_vec`) depends on both
+    ``st.sigl0`` (where the taper begins ramping up) and ``st.v_center`` (its
+    pivot); the joint path always self-corrects both before returning, and
+    this wrapper brings the shipped path to parity rather than leaving them
+    at their initial values (``cfg.sigl``, 0.0) for the entire fit -- most
+    consequential at high ``xlam``, exactly where kinextract's own
     regularization search tends to land.
 
     Parameters
@@ -1180,7 +1214,22 @@ def _fit_map_sigl0_recenter(
     Returns
     -------
     scipy.optimize.OptimizeResult
-        The final iteration's fit result.
+        The best round's fit result (see the divergence-guard note below --
+        not necessarily the final round's).
+
+    Notes
+    -----
+    **Divergence guard.** The fixed-point iteration is not guaranteed to
+    converge monotonically on every chi2(xlam) curve: on an unusually flat
+    one (confirmed on a clean, oversimplified synthetic mock -- an
+    under-constrained problem for regularization selection in general, see
+    ``examples/notebooks/01_basic_mock_fit.ipynb``), each round's recovered
+    sigma can land *farther* from that round's ``sigl0`` input than the
+    previous round did, instead of converging -- a positive feedback loop
+    rather than a fixed point. This function tracks the smallest
+    ``|sigl0_input - recovered_sigma|`` gap seen across all rounds and
+    reverts to that round's fit/``sigl0``/``xlam`` if the final round's gap
+    is worse, rather than returning a compounded-drift result.
     """
     if bool(getattr(cfg, "joint_recenter_v", True)):
         st.v_center = estimate_velocity_xcorr(st)
@@ -1189,17 +1238,35 @@ def _fit_map_sigl0_recenter(
     tol = float(getattr(cfg, "joint_sigl0_tol", 2.0))
 
     res = None
+    best = None  # (gap, res, xlam, sigl0_input)
+    last_gap = None
     for _ in range(n_iter):
+        sigl0_in = float(st.sigl0)
         res = fit_state_map_with_optional_clean(st, cfg, a0, bounds)
         gp, b, *_ = evaluate_model_gp(res.x, st)
         gh = fit_losvd_gauss_hermite(st.xl, b, fit_h3h4=True)
         recovered_sigma = float(gh["sherm"])
         if not np.isfinite(recovered_sigma) or recovered_sigma <= 0:
             break
-        reached = abs(st.sigl0 - recovered_sigma) <= tol
+        gap = abs(sigl0_in - recovered_sigma)
+        if best is None or gap < best[0]:
+            best = (gap, res, float(st.xlam), sigl0_in)
+        reached = gap <= tol
         st.sigl0 = recovered_sigma
+        last_gap = gap
         if reached:
             break
+
+    if best is not None and last_gap is not None and best[0] < last_gap:
+        gap_best, res, xlam_best, sigl0_best = best
+        st.xlam = xlam_best
+        st.sigl0 = sigl0_best
+        log(
+            f"sigl0 fixed-point iteration diverged (final gap {last_gap:.2f} > "
+            f"best gap {gap_best:.2f} km/s); reverting to the round with the "
+            f"smallest |sigl0 - recovered_sigma| (sigl0={sigl0_best:.2f}, "
+            f"xlam={xlam_best:.4g})"
+        )
     return res
 
 
@@ -1241,10 +1308,10 @@ def run_spectral_fit(
     estimate) and ``sigl0`` (fixed-point iteration toward the recovered
     sigma) via :func:`_fit_map_sigl0_recenter`, mirroring
     :func:`kinextract.joint.fit_joint_auto_xlam_sigl0`'s validated approach
-    -- see its docstring for the rationale. This replaced an earlier
-    zero-centered/fixed-``sigl0`` default after a real-data comparison found
-    it caused a large, spurious V/sigma discrepancy against the joint path
-    on otherwise-matched settings. Both corrections are controlled by
+    -- see its docstring for the rationale. A zero-centered/fixed-``sigl0``
+    default would cause a large, spurious V/sigma discrepancy against the
+    joint path on otherwise-matched settings, so both paths self-correct the
+    same way. Both corrections are controlled by
     ``cfg.joint_recenter_v``/``cfg.joint_n_sigl0_iter``/``cfg.joint_sigl0_tol``
     (shared fields with the joint path). A full-posterior (NUTS/HMC)
     alternative to this MAP
@@ -1378,7 +1445,8 @@ def run_spectral_fit(
     )
     log(
         f"fit_continuum={cfg.fit_continuum} "
-        f"prenorm={not cfg.fit_continuum}"
+        f"prenorm={not cfg.fit_continuum} "
+        f"joint_prenorm={cfg.joint_prenorm}"
     )
 
     with Timer("build FitState"):
@@ -1402,7 +1470,14 @@ def run_spectral_fit(
         # slowing down every default pre-normalized fit package-wide.
         from .joint import run_joint_fit
 
-        log("Continuum method: joint (P-spline continuum-in-the-model)")
+        if cfg.fit_continuum:
+            log("Continuum method: joint (P-spline continuum co-fit in the model)")
+        else:
+            log(
+                "Continuum method: none (prenormalized; joint_prenorm=True uses "
+                "the joint engine's sigl0/v_center self-convergence, but the "
+                "continuum stays fixed at 1.0, not co-fit)"
+            )
         outputs = run_joint_fit(st, cfg, write_outputs=write_outputs, outdir=cfg.outdir, prefix=prefix)
         res = outputs["result"]
         if not res.success:
@@ -1426,7 +1501,10 @@ def run_spectral_fit(
             "gal_file": gal_file,
         }
 
-    a0, xlb, xub = build_initial_guess_nonparam(st, cfg.coff, cfg.coff2)
+    a0, xlb, xub = build_initial_guess_nonparam(
+        st, cfg.coff, cfg.coff2,
+        w_bounds=cfg.template_w_bounds if cfg.template_w_bounds is not None else (1e-5, 1.0),
+    )
     bounds = list(zip(xlb, xub))
 
     res = _fit_map_sigl0_recenter(st, cfg, a0, bounds)

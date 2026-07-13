@@ -60,6 +60,11 @@ def real_muse_state():
         use_spectrum_errors=False,
         xlam=10000.0, xlam_auto=False,
         sigl=100.0, clean=False,
+        # Pinned to the legacy 29-bin grid this fixture's fixed xlam=10000
+        # was calibrated against -- xlam_auto=False means nothing here
+        # re-tunes the regularization strength for a different bin count
+        # (see n_losvd_bins's docstring in config.py for the new 89 default).
+        n_losvd_bins=29,
     )
     st, _ = make_fit_state(cfg, gal_file=str(SPEC_FILE), gal_errors=ferr)
     return st

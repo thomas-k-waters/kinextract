@@ -86,6 +86,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from astropy.stats import biweight_location
 
 try:
     from threadpoolctl import threadpool_limits as _threadpool_limits
@@ -107,6 +108,7 @@ except ImportError:
 # These are imported at use-time inside functions so this module can be
 # imported even if spectral_fitting is not on the path yet.
 # ---------------------------------------------------------------------------
+from ._utils import CEE
 from .fitting import fit_state_map_with_optional_clean
 from .losvd import fit_losvd_gauss_hermite, fit_losvd_gauss_hermite_higher
 from .numerics import (
@@ -310,6 +312,52 @@ def _losvd_moments(xl: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     v = float(np.sum(xl * weights))
     sigma = float(np.sqrt(np.sum(weights * (xl - v) ** 2)))
     return v, sigma
+
+
+def _map_anchored_bounds(
+    map_value: np.ndarray, samples: np.ndarray, plo: float, phi: float,
+    ignore_nan: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Asymmetric error bounds re-centered on the MAP value, matching the
+    legacy Fortran pipeline's actual modeling-input convention exactly.
+
+    Traced (by direct source reading) through the chain that produces the
+    ``*_in`` files the original Schwarzschild-modeling stage actually
+    consumes: ``mcfitw.f`` writes the raw MC ensemble (sample 1 = the
+    un-perturbed/MAP fit, matching ``_write_sim_file``'s own convention
+    here), then ``pallmc.f``'s ``.mcfit2``-writing section (not its
+    ``pallmc.out`` visualization summary) computes, per velocity bin::
+
+        xb  = biweight_location(ensemble)      # Beers, Flynn & Gebhardt 1990
+        y16 = xsim(1,i) - (xb - ensemble_16th_percentile)
+        y84 = xsim(1,i) + (ensemble_84th_percentile - xb)
+
+    i.e. the ensemble's own biweight location is used *only* to measure
+    how far the 16th/84th percentiles sit from it -- that *distance* is
+    then transplanted onto ``xsim(1,i)`` (the MAP value), never onto the
+    ensemble's own location. This keeps the reported interval anchored on
+    the MAP fit even when the ensemble itself is shifted/biased relative
+    to MAP (a real, confirmed effect for dispersion-type quantities -- see
+    ``residual_bootstrap``'s module-level notes), rather than silently
+    inheriting that shift the way a raw ``percentile(samples, 16/84)``
+    bound would. ``.mcfit2`` feeds ``transvd`` then ``fix_losvd_errs.py``
+    to produce the final ``*_in`` files used by modeling, so this is the
+    convention that actually matters for direct comparison against the
+    original framework -- not ``pallmc.out``'s scalar V/sigma/h3/h4
+    summary, which is a separate, visualization-only reduction of the same
+    ensemble (also MAP-centered, but not the quantity modeling reads).
+    """
+    map_value = np.asarray(map_value, float)
+    loc = biweight_location(samples, c=6.0, axis=0, ignore_nan=ignore_nan)
+    if ignore_nan:
+        p_lo = np.nanpercentile(samples, plo, axis=0)
+        p_hi = np.nanpercentile(samples, phi, axis=0)
+    else:
+        p_lo = np.percentile(samples, plo, axis=0)
+        p_hi = np.percentile(samples, phi, axis=0)
+    lo = map_value - (loc - p_lo)
+    hi = map_value + (p_hi - loc)
+    return lo, hi
 
 
 # =============================================================================
@@ -885,6 +933,7 @@ def _refit_one_bootstrap_joint(args: tuple) -> Optional[dict]:
             maxiter=cfg_frozen.map_maxiter, ftol=cfg_frozen.map_ftol,
             maxfun=cfg_frozen.map_maxfun, use_jax=cfg_frozen.use_jax_objective,
             auto_recenter_v=False, fit_continuum=joint_kwargs["fit_continuum"],
+            w_bounds=joint_kwargs.get("w_bounds", (1e-5, 1.0)),
         )
 
         t_norm, _ = normalize_template_matrix(st)
@@ -1092,9 +1141,10 @@ class LOSVDErrorEstimator:
             from .joint import normalize_template_matrix as _joint_normalize_template_matrix
 
             fit_continuum = bool(cfg.fit_continuum)
+            w_bounds = cfg.template_w_bounds if getattr(cfg, "template_w_bounds", None) is not None else (1e-5, 1.0)
             _, joint_bounds, _, joint_design = _joint_build_initial_guess(
                 self.st, cfg.joint_n_interior_knots, cfg.joint_degree,
-                fit_continuum=fit_continuum,
+                fit_continuum=fit_continuum, w_bounds=w_bounds,
             )
             self.bounds = joint_bounds
             self._joint_design = joint_design
@@ -1103,11 +1153,14 @@ class LOSVDErrorEstimator:
             self._joint_kwargs = dict(
                 n_interior_knots=cfg.joint_n_interior_knots, degree=cfg.joint_degree,
                 xlam_cont=cfg.joint_xlam_cont, cont_diff_order=cfg.joint_cont_diff_order,
-                fit_continuum=fit_continuum,
+                fit_continuum=fit_continuum, w_bounds=w_bounds,
             )
         else:
             # Build bounds (same as used during the original fit)
-            _, xlb, xub = build_initial_guess_nonparam(self.st, cfg.coff, cfg.coff2)
+            _, xlb, xub = build_initial_guess_nonparam(
+                self.st, cfg.coff, cfg.coff2,
+                w_bounds=cfg.template_w_bounds if cfg.template_w_bounds is not None else (1e-5, 1.0),
+            )
             self.bounds = list(zip(xlb, xub))
 
     # ------------------------------------------------------------------
@@ -1540,39 +1593,57 @@ class LOSVDErrorEstimator:
         alpha = (1.0 - confidence) / 2.0
         plo, phi = 100 * alpha, 100 * (1 - alpha)
 
+        # Error *bounds* (b_lo/b_hi, gh_lo/gh_hi, moments_lo/moments_hi) are
+        # re-centered on the MAP fit rather than reported as raw ensemble
+        # percentiles -- matching the legacy pipeline's actual
+        # modeling-input convention exactly (see _map_anchored_bounds's
+        # docstring: traced through mcfitw.f -> pallmc.f's .mcfit2 section
+        # -> transvd -> fix_losvd_errs.py, the chain that produces the
+        # *_in files Schwarzschild modeling reads). This matters because
+        # the bootstrap ensemble's own location is a real, confirmed
+        # noise-inflated estimate for dispersion-type quantities (sigma
+        # in particular) -- a raw percentile(samples, 16/84) bound would
+        # silently inherit that shift; anchoring on MAP and taking only
+        # the *width* from the ensemble does not.
         b_err = np.std(b_samples, axis=0, ddof=1)
-        b_lo  = np.percentile(b_samples, plo, axis=0)
-        b_hi  = np.percentile(b_samples, phi, axis=0)
+        b_lo, b_hi = _map_anchored_bounds(self.b_map, b_samples, plo, phi)
+        b_lo = np.clip(b_lo, 0.0, None)  # LOSVD positivity, matching .mcfit2's own max(0., y16)
 
+        gh_map = fit_losvd_gauss_hermite(self.xl, self.b_map, fit_h3h4=True)
         gh_keys = ["gh_vherm", "gh_sherm", "gh_h3", "gh_h4", "gh_v1", "gh_v2"]
         gh_samples = {k: np.array([r[k] for r in good_results]) for k in gh_keys}
         gh_err = {k: float(np.std(v, ddof=1)) for k, v in gh_samples.items()}
-        gh_lo  = {k: float(np.percentile(v, plo)) for k, v in gh_samples.items()}
         gh_med = {k: float(np.percentile(v, 50))  for k, v in gh_samples.items()}
-        gh_hi  = {k: float(np.percentile(v, phi)) for k, v in gh_samples.items()}
+        gh_lo, gh_hi = {}, {}
+        for k, v in gh_samples.items():
+            lo, hi = _map_anchored_bounds(np.asarray(gh_map[k[3:]], float), v, plo, phi)
+            gh_lo[k] = float(lo)
+            gh_hi[k] = float(hi)
 
+        gh_ho_map = fit_losvd_gauss_hermite_higher(self.xl, self.b_map, max_order=6)
         gh_ho_keys = ["gh_ho_vherm", "gh_ho_sherm",
                       "gh_ho_h3", "gh_ho_h4", "gh_ho_h5", "gh_ho_h6"]
         gh_ho_samples = {k: np.array([r.get(k, np.nan) for r in good_results])
                          for k in gh_ho_keys}
         gh_ho_err = {k: float(np.nanstd(v, ddof=1)) for k, v in gh_ho_samples.items()}
-        gh_ho_lo  = {k: float(np.nanpercentile(v, plo)) for k, v in gh_ho_samples.items()}
-        gh_ho_hi  = {k: float(np.nanpercentile(v, phi)) for k, v in gh_ho_samples.items()}
+        gh_ho_lo, gh_ho_hi = {}, {}
+        for k, v in gh_ho_samples.items():
+            map_val = gh_ho_map.get(k[6:], np.nan)
+            lo, hi = _map_anchored_bounds(np.asarray(map_val, float), v, plo, phi, ignore_nan=True)
+            gh_ho_lo[k] = float(lo)
+            gh_ho_hi[k] = float(hi)
 
         moments_v = np.array([_losvd_moments(self.xl, b)[0] for b in b_samples], float)
         moments_sigma = np.array([_losvd_moments(self.xl, b)[1] for b in b_samples], float)
+        mv_map, ms_map = _losvd_moments(self.xl, self.b_map)
         moments_err = {
             "v": float(np.nanstd(moments_v, ddof=1)),
             "sigma": float(np.nanstd(moments_sigma, ddof=1)),
         }
-        moments_lo = {
-            "v": float(np.nanpercentile(moments_v, plo)),
-            "sigma": float(np.nanpercentile(moments_sigma, plo)),
-        }
-        moments_hi = {
-            "v": float(np.nanpercentile(moments_v, phi)),
-            "sigma": float(np.nanpercentile(moments_sigma, phi)),
-        }
+        mv_lo, mv_hi = _map_anchored_bounds(np.asarray(mv_map, float), moments_v, plo, phi, ignore_nan=True)
+        ms_lo, ms_hi = _map_anchored_bounds(np.asarray(ms_map, float), moments_sigma, plo, phi, ignore_nan=True)
+        moments_lo = {"v": float(mv_lo), "sigma": float(ms_lo)}
+        moments_hi = {"v": float(mv_hi), "sigma": float(ms_hi)}
 
         return {
             "method": "bootstrap",
@@ -1603,6 +1674,52 @@ class LOSVDErrorEstimator:
     # ------------------------------------------------------------------
     # Method 3: Bias-corrected LOSVD
     # ------------------------------------------------------------------
+
+    def _warn_if_bias_correction_regime_is_harmful(self) -> None:
+        """Warn loudly if ``bias_correction()`` is about to run in the regime
+        its own docstring documents as actively harmful (recovered sigma
+        comparable to or below the instrument's LSF width -- see
+        :func:`bias_corrected_losvd`'s "Warning" section). Checked
+        automatically on every call rather than left for the caller to
+        remember, so a bad LOSVD from this known failure mode is never silent.
+        """
+        gh_map = fit_losvd_gauss_hermite(self.xl, self.b_map, fit_h3h4=True)
+        sigma_kms = float(gh_map["sherm"])
+        data_fwhm_A = getattr(self.cfg, "data_fwhm_A", None)
+        template_fwhm_A = getattr(self.cfg, "template_fwhm_A", None)
+
+        if data_fwhm_A is not None and template_fwhm_A is not None:
+            fwhm_to_sigma = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+            data_fwhm_rest = data_fwhm_A
+            if str(getattr(self.cfg, "data_fwhm_frame", "observed")).lower() == "observed":
+                data_fwhm_rest = data_fwhm_A / (1.0 + self.cfg.zgal)
+            lsf_fwhm_A = max(data_fwhm_rest, template_fwhm_A)
+            lam_ref = float(np.median(self.st.x))
+            lsf_sigma_kms = lsf_fwhm_A * fwhm_to_sigma / lam_ref * CEE
+            if sigma_kms < 2.0 * lsf_sigma_kms:
+                warnings.warn(
+                    f"bias_correction(): recovered sigma ({sigma_kms:.1f} km/s) is "
+                    f"less than 2x the instrument's LSF sigma ({lsf_sigma_kms:.1f} "
+                    f"km/s, from data_fwhm_A/template_fwhm_A). This method's own "
+                    f"docstring documents that it is actively harmful in this "
+                    f"regime (amplifies noise catastrophically; can produce a "
+                    f"LARGER velocity bias than the uncorrected MAP estimate). "
+                    f"Prefer kinextract.validation.correct_recovered_losvd's "
+                    f"empirical bias table instead, or use the uncorrected MAP LOSVD.",
+                    RuntimeWarning, stacklevel=3,
+                )
+        else:
+            warnings.warn(
+                "bias_correction(): this method is documented to be actively "
+                "harmful when the recovered sigma is comparable to or below "
+                "the instrument's LSF width (see its docstring's \"Warning\" "
+                "section), but data_fwhm_A/template_fwhm_A are not set on "
+                "this FitConfig, so that regime can't be checked automatically "
+                "here. Prefer kinextract.validation.correct_recovered_losvd's "
+                "empirical bias table instead, which does not have this "
+                "failure mode.",
+                RuntimeWarning, stacklevel=3,
+            )
 
     def bias_correction(self) -> dict:
         """
@@ -1638,6 +1755,7 @@ class LOSVDErrorEstimator:
         """
         _require_genuine_map_fit(self.fit, "bias_correction()")
         _require_not_joint(self, "bias_correction()")
+        self._warn_if_bias_correction_regime_is_harmful()
         print("[LOSVDErrors] Computing LOSVD influence matrix...")
         t0 = time.perf_counter()
         H_b = compute_losvd_hat_matrix(self.st, self.a_map)
@@ -1776,9 +1894,27 @@ class LOSVDErrorEstimator:
         }
 
         if bootstrap_result is not None:
-            b_center = np.median(bootstrap_result["b_samples"], axis=0)
-            gh_center = fit_losvd_gauss_hermite(self.xl, b_center, fit_h3h4=True)
-            mv_center, ms_center = _losvd_moments(self.xl, b_center)
+            # The reported "center" is always the MAP fit, never a
+            # bootstrap-derived alternative -- matching the original Fortran
+            # pipeline's own convention (see _print_summary's "Gauss-Hermite
+            # moments (MAP, consistent with pallmc.f)"), and avoiding a
+            # second, different "correct" central estimate for the same
+            # quantity. bootstrap_result supplies only the *spread*
+            # (b_err/gh_err/etc.) around that one MAP center; it never
+            # replaces it. Two alternative bootstrap-derived centers are
+            # deliberately avoided: fitting the pointwise-averaged LOSVD
+            # *curve* is wrong (averaging many replicate LOSVDs bin-by-bin
+            # smears out each replicate's own peak position/width jitter,
+            # producing a systematically wider, lower-peaked curve than any
+            # individual fit); the median of each replicate's own GH fit is a
+            # valid statistic but is a second central estimate that can
+            # legitimately drift away from the MAP fit if the bootstrap
+            # ensemble itself is shifted, and having two different "correct"
+            # centers for the same quantity invites confusion. Simplest and
+            # most correct: don't compute an alternative center at all.
+            b_center = self.b_map
+            gh_center = gh_map
+            mv_center, ms_center = _losvd_moments(self.xl, self.b_map)
             summary["b_err_recommended"] = bootstrap_result["b_err"]
             summary["b_lo_recommended"] = bootstrap_result["b_lo"]
             summary["b_hi_recommended"] = bootstrap_result["b_hi"]
@@ -1880,14 +2016,16 @@ class LOSVDErrorEstimator:
         """
         Plot the recovered LOSVD together with its estimated error band.
 
-        Draws the central LOSVD estimate (bootstrap median if a bootstrap
-        was run, otherwise the MAP LOSVD) as a solid curve, shades the
-        recommended 1-sigma (or configured confidence-level) uncertainty
-        band from ``summary`` beneath it, overlays the Gauss-Hermite (GH)
-        fit to the central LOSVD, and annotates the plot with the MAP GH
-        moments (V, sigma, h3, h4) and their recommended uncertainties
-        (bootstrap standard deviation if available, otherwise the Laplace
-        delta-method standard deviation).
+        Draws the MAP LOSVD as a solid curve, shades the recommended 1-sigma
+        (or configured confidence-level) uncertainty band from ``summary``
+        beneath it, overlays the Gauss-Hermite (GH) fit to the MAP LOSVD,
+        and annotates the plot with the MAP GH moments (V, sigma, h3, h4)
+        and their recommended uncertainties (bootstrap standard deviation
+        if available, otherwise the Laplace delta-method standard
+        deviation). The MAP fit is always the reported center -- matching
+        the original Fortran pipeline's convention -- and bootstrap/Laplace
+        supply only the surrounding uncertainty band, never an alternative
+        central curve.
 
         Parameters
         ----------
@@ -1935,13 +2073,8 @@ class LOSVDErrorEstimator:
                 ax.fill_between(xl, b_lo, b_hi, alpha=0.25, color="tab:blue",
                                 label=fr"$1\sigma$ ({method})")
 
-            # Central LOSVD curve: bootstrap median when available, otherwise MAP.
-            if np.allclose(b_center, b_map):
-                center_label = "MAP LOSVD"
-            else:
-                center_label = "Bootstrap median LOSVD"
-                # ax.plot(xl, b_map, "--", color="0.55", lw=1.1, ms=3, label="MAP LOSVD")
-            ax.plot(xl, b_center, "o-", color="tab:blue", lw=1.5, ms=4, label=center_label)
+            # Central LOSVD curve: always the MAP fit (see summarize()).
+            ax.plot(xl, b_center, "o-", color="tab:blue", lw=1.5, ms=4, label="MAP LOSVD")
 
             # Bias-corrected LOSVD
             # if "b_corr" in summary:

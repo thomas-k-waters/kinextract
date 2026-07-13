@@ -23,9 +23,8 @@ Quick start
 penalized-B-spline continuum is folded directly into the same optimization
 as the LOSVD and template weights (see :mod:`kinextract.joint`).
 Alternatively, pre-normalize the spectrum once (e.g. via the standalone
-:func:`kinextract.continuum.asymmetric_least_squares_continuum` utility --
-see ``examples/notebooks/06_prenormalized_workflow.ipynb``) and fit with
-``fit_continuum = False``.
+:func:`kinextract.continuum.asymmetric_least_squares_continuum` utility)
+and fit with ``fit_continuum = False``.
 
 See :meth:`~kinextract.config.FitConfig.describe` (or ``help(FitConfig)``)
 for every tunable field, grouped by subsystem, e.g.
@@ -65,6 +64,3 @@ truths:
        fit, cfg, v_true_grid=[0.0, 50.0], sigma_true_grid=[80.0, 150.0], n_seeds=8,
    )
    corrected = correct_recovered_losvd(v_recovered=42.0, sigma_recovered=90.0, bias_table=bias_table)
-
-See ``examples/notebooks/05_recovery_validation.ipynb`` for a full worked
-example.
