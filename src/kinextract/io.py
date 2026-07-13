@@ -121,6 +121,42 @@ def read_template_xy(path: str) -> tuple[np.ndarray, np.ndarray, "np.ndarray | N
     return wave, flux, err
 
 
+def read_emiles_fits(path: str) -> tuple[np.ndarray, np.ndarray]:
+    """Read a single MILES/E-MILES-format SSP template FITS file.
+
+    MILES-family FITS spectra store flux as a 1-D primary HDU with a
+    linear wavelength solution given by the standard ``CRVAL1``/``CDELT1``
+    header keywords (``wave[i] = CRVAL1 + i * CDELT1``, 0-indexed) rather
+    than an explicit wavelength column -- unlike this module's other
+    ``.dat``/``.txt`` template readers.
+
+    Parameters
+    ----------
+    path : str
+        Path to a MILES/E-MILES-convention FITS file (e.g.
+        ``Ebi1.30Zp0.06T01.0000_iTp0.00_baseFe.fits``).
+
+    Returns
+    -------
+    wave : ndarray
+        Reconstructed wavelength grid, in Angstroms.
+    flux : ndarray
+        Template flux values (native units; median-normalized downstream
+        like any other template by
+        :func:`kinextract.templates.build_template_matrix_fortran`-family
+        functions).
+    """
+    from astropy.io import fits
+
+    with fits.open(path) as hdul:
+        header = hdul[0].header
+        flux = np.asarray(hdul[0].data, dtype=float)
+    crval1 = float(header["CRVAL1"])
+    cdelt1 = float(header["CDELT1"])
+    wave = crval1 + np.arange(flux.size) * cdelt1
+    return wave, flux
+
+
 def read_template_list(list_file: str, template_dir: Optional[str] = None) -> list[str]:
     """Read a template-list file and resolve each entry to a full path.
 

@@ -108,6 +108,7 @@ except ImportError:
 # These are imported at use-time inside functions so this module can be
 # imported even if spectral_fitting is not on the path yet.
 # ---------------------------------------------------------------------------
+from ._utils import CEE
 from .fitting import fit_state_map_with_optional_clean
 from .losvd import fit_losvd_gauss_hermite, fit_losvd_gauss_hermite_higher
 from .numerics import (
@@ -1674,6 +1675,52 @@ class LOSVDErrorEstimator:
     # Method 3: Bias-corrected LOSVD
     # ------------------------------------------------------------------
 
+    def _warn_if_bias_correction_regime_is_harmful(self) -> None:
+        """Warn loudly if ``bias_correction()`` is about to run in the regime
+        its own docstring documents as actively harmful (recovered sigma
+        comparable to or below the instrument's LSF width -- see
+        :func:`bias_corrected_losvd`'s "Warning" section). Checked
+        automatically on every call rather than left for the caller to
+        remember, so a bad LOSVD from this known failure mode is never silent.
+        """
+        gh_map = fit_losvd_gauss_hermite(self.xl, self.b_map, fit_h3h4=True)
+        sigma_kms = float(gh_map["sherm"])
+        data_fwhm_A = getattr(self.cfg, "data_fwhm_A", None)
+        template_fwhm_A = getattr(self.cfg, "template_fwhm_A", None)
+
+        if data_fwhm_A is not None and template_fwhm_A is not None:
+            fwhm_to_sigma = 1.0 / (2.0 * np.sqrt(2.0 * np.log(2.0)))
+            data_fwhm_rest = data_fwhm_A
+            if str(getattr(self.cfg, "data_fwhm_frame", "observed")).lower() == "observed":
+                data_fwhm_rest = data_fwhm_A / (1.0 + self.cfg.zgal)
+            lsf_fwhm_A = max(data_fwhm_rest, template_fwhm_A)
+            lam_ref = float(np.median(self.st.x))
+            lsf_sigma_kms = lsf_fwhm_A * fwhm_to_sigma / lam_ref * CEE
+            if sigma_kms < 2.0 * lsf_sigma_kms:
+                warnings.warn(
+                    f"bias_correction(): recovered sigma ({sigma_kms:.1f} km/s) is "
+                    f"less than 2x the instrument's LSF sigma ({lsf_sigma_kms:.1f} "
+                    f"km/s, from data_fwhm_A/template_fwhm_A). This method's own "
+                    f"docstring documents that it is actively harmful in this "
+                    f"regime (amplifies noise catastrophically; can produce a "
+                    f"LARGER velocity bias than the uncorrected MAP estimate). "
+                    f"Prefer kinextract.validation.correct_recovered_losvd's "
+                    f"empirical bias table instead, or use the uncorrected MAP LOSVD.",
+                    RuntimeWarning, stacklevel=3,
+                )
+        else:
+            warnings.warn(
+                "bias_correction(): this method is documented to be actively "
+                "harmful when the recovered sigma is comparable to or below "
+                "the instrument's LSF width (see its docstring's \"Warning\" "
+                "section), but data_fwhm_A/template_fwhm_A are not set on "
+                "this FitConfig, so that regime can't be checked automatically "
+                "here. Prefer kinextract.validation.correct_recovered_losvd's "
+                "empirical bias table instead, which does not have this "
+                "failure mode.",
+                RuntimeWarning, stacklevel=3,
+            )
+
     def bias_correction(self) -> dict:
         """
         Estimate and subtract the regularization bias from the MAP LOSVD.
@@ -1708,6 +1755,7 @@ class LOSVDErrorEstimator:
         """
         _require_genuine_map_fit(self.fit, "bias_correction()")
         _require_not_joint(self, "bias_correction()")
+        self._warn_if_bias_correction_regime_is_harmful()
         print("[LOSVDErrors] Computing LOSVD influence matrix...")
         t0 = time.perf_counter()
         H_b = compute_losvd_hat_matrix(self.st, self.a_map)
@@ -1853,17 +1901,17 @@ class LOSVDErrorEstimator:
             # second, different "correct" central estimate for the same
             # quantity. bootstrap_result supplies only the *spread*
             # (b_err/gh_err/etc.) around that one MAP center; it never
-            # replaces it. (An earlier version of this code computed a
-            # bootstrap-derived center instead -- first as a fit to the
-            # pointwise-averaged LOSVD *curve* (a real bug: averaging many
-            # replicate LOSVDs bin-by-bin smears out each replicate's own
-            # peak position/width jitter, producing a systematically wider,
-            # lower-peaked curve than any individual fit), then as the
-            # median of each replicate's own GH fit (not a bug, but still a
-            # second central estimate that can legitimately drift away from
-            # the MAP fit if the bootstrap ensemble itself is shifted --
-            # confirmed happening on real data. Simplest and most correct:
-            # don't compute an alternative center at all.)
+            # replaces it. Two alternative bootstrap-derived centers are
+            # deliberately avoided: fitting the pointwise-averaged LOSVD
+            # *curve* is wrong (averaging many replicate LOSVDs bin-by-bin
+            # smears out each replicate's own peak position/width jitter,
+            # producing a systematically wider, lower-peaked curve than any
+            # individual fit); the median of each replicate's own GH fit is a
+            # valid statistic but is a second central estimate that can
+            # legitimately drift away from the MAP fit if the bootstrap
+            # ensemble itself is shifted, and having two different "correct"
+            # centers for the same quantity invites confusion. Simplest and
+            # most correct: don't compute an alternative center at all.
             b_center = self.b_map
             gh_center = gh_map
             mv_center, ms_center = _losvd_moments(self.xl, self.b_map)

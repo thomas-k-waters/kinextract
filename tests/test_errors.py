@@ -171,3 +171,56 @@ def test_summarize_gh_center_always_equals_map_not_a_bootstrap_derived_value(rea
     # (deliberately weird) bootstrap_result -- summarize() isn't supposed
     # to touch those.
     assert summary["gh_err_recommended"]["gh_sherm"] == 1.0
+
+
+def test_bias_correction_warns_when_lsf_makes_it_actively_harmful(real_muse_fit):
+    """bias_correction()'s own docstring documents it as actively harmful
+    when recovered sigma is comparable to or below the instrument's LSF
+    width (amplifies noise catastrophically; can produce a LARGER bias than
+    the uncorrected MAP estimate). This must never be a silent trap: when
+    data_fwhm_A/template_fwhm_A place the fit in that regime, a
+    RuntimeWarning must fire before the (otherwise unguarded) correction runs.
+    """
+    import copy
+
+    from kinextract import LOSVDErrorEstimator
+
+    fit, cfg = real_muse_fit
+    cfg = copy.deepcopy(cfg)
+    # Deliberately implausible, huge LSF FWHM to force the "recovered sigma
+    # << LSF sigma" harmful regime regardless of this fixture's own sigma.
+    cfg.data_fwhm_A = 500.0
+    cfg.template_fwhm_A = 500.0
+
+    est = LOSVDErrorEstimator(fit, cfg)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        est.bias_correction()
+
+    messages = [str(w.message) for w in caught]
+    assert any("actively harmful" in m for m in messages), (
+        f"expected a RuntimeWarning citing the documented actively-harmful regime; got: {messages}"
+    )
+
+
+def test_bias_correction_warns_when_lsf_unknown(real_muse_fit):
+    """When data_fwhm_A/template_fwhm_A are not set (the common default),
+    the actively-harmful regime from bias_correction()'s docstring can't be
+    checked quantitatively -- but the caller must still be warned that the
+    check couldn't be performed, rather than staying silent about a
+    documented risk.
+    """
+    from kinextract import LOSVDErrorEstimator
+
+    fit, cfg = real_muse_fit
+    assert cfg.data_fwhm_A is None and cfg.template_fwhm_A is None
+
+    est = LOSVDErrorEstimator(fit, cfg)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        est.bias_correction()
+
+    messages = [str(w.message) for w in caught]
+    assert any("can't be checked automatically" in m for m in messages), (
+        f"expected a RuntimeWarning about the unmeasurable LSF regime; got: {messages}"
+    )

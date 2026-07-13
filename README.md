@@ -200,8 +200,7 @@ copied source):
 - Eilers, P. H. C. 2003, Analytical Chemistry, 75, 3631 — asymmetric
   least-squares (ALS) baseline fitting
   (`kinextract.continuum.asymmetric_least_squares_continuum`), retained as a
-  standalone, one-time pre-normalization utility (see
-  `examples/notebooks/06_prenormalized_workflow.ipynb`).
+  standalone, one-time pre-normalization utility.
 - Eilers, P. H. C. & Marx, B. D. 1996, Statistical Science, 11, 89 —
   penalized B-splines ("P-splines"), the continuum basis used by the joint
   continuum-in-the-model fit (`kinextract.joint`).

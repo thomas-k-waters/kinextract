@@ -39,10 +39,7 @@ process-wide lock), so distinct problem shapes can still compile in
 parallel under `ThreadPoolExecutor`-based concurrency.
 Separately, running many fits concurrently -- multiple threads in one
 process, multiple separate processes, or under unrelated external CPU
-load -- was verified (``benchmarks/``) to *not* perturb numerical results;
-the CPU-contention scare that motivated checking this turned out to be
-tied to the pre-fix locking bug's pathological process state, not a
-general reproducibility risk.
+load -- is verified (``benchmarks/``) to *not* perturb numerical results.
 """
 from __future__ import annotations
 
@@ -134,6 +131,7 @@ def _get_or_build_jax_vg(st):
     # scalar/shape but with different data-driven v_center (the common case,
     # since it's estimated per-spectrum) would silently share one compiled
     # kernel, applying the *first* fit's taper recentering to the *second*.
+    # xlam_wing_shrink is baked in the same way (see _wing_shrink_penalty).
     content_fp = _array_fingerprint(
         st.t, st.outside_tpl, st.xl, st.losvd_j0, st.losvd_j1, st.losvd_w,
         st.ip_map, st.ip_mask,
@@ -143,6 +141,8 @@ def _get_or_build_jax_vg(st):
         int(st.icoff), bool(st.fit_global_amp),
         bool(st.fortran_template_mixture), bool(st.fit_continuum),
         float(st.xlam), float(st.sigl0), float(getattr(st, "v_center", 0.0)),
+        float(getattr(st, "xlam_wing_shrink", 0.0)),
+        float(getattr(st, "xlam_wing_shrink_sfac", 1.8)),
         float(st.coffi)  if int(st.icoff) in (0, 2) else 0.0,
         float(st.coff2i) if int(st.icoff) == 0       else 0.0,
         content_fp,
@@ -269,16 +269,13 @@ def estimate_velocity_xcorr(st: FitState, detrend_deg: int = 3) -> float:
     velocity conversion is already used elsewhere in this package (e.g.
     ``facnew0`` in :func:`kinextract.spectrum.make_fit_state`).
 
-    **Sub-pixel refinement matters here.** An earlier, integer-lag-only
-    version of this function could only return multiples of one MUSE pixel
-    step (~43.6 km/s at the Ca II triplet) -- coarse enough that on real
-    N5102 MUSE bins with a true velocity of a few km/s (well under half a
-    pixel step), the estimate would sometimes land exactly on the correct
-    lag (0) and sometimes snap to an adjacent, wrong one (e.g. -43.7 km/s
-    for a true velocity of -4.5 km/s), with no way to represent anything
-    in between -- confirmed directly against real bins compared against
-    the original Fortran pipeline's own recovered velocities. Since this
-    value sets the wing-taper's ``v_center`` regularization pivot
+    **Sub-pixel refinement matters here.** An integer-lag-only estimate can
+    only return multiples of one MUSE pixel step (~43.6 km/s at the Ca II
+    triplet) -- coarse enough that for a true velocity of a few km/s (well
+    under half a pixel step), the estimate could land exactly on the correct
+    lag (0) or snap to an adjacent, wrong one (e.g. -43.7 km/s for a true
+    velocity of -4.5 km/s), with no way to represent anything in between.
+    Since this value sets the wing-taper's ``v_center`` regularization pivot
     (:mod:`kinextract.joint`), a wrong-by-a-full-pixel pivot measurably
     biased the recovered LOSVD (V and, via the wing-taper's asymmetric
     treatment of the blue/red wings around a mismatched pivot, h3) for
@@ -467,6 +464,48 @@ def _compute_smoothness(
         else:
             smooth += lam * (b[j + 1] - 2 * b[j] + b[j - 1]) ** 2
     return smooth / resd
+
+
+@njit(cache=True)
+def _compute_wing_shrinkage(
+    b: np.ndarray, xl: np.ndarray,
+    xlam: float, sigl0: float, resd: float, nl: int,
+    v_center: float, wing_shrink: float, sfac: float = 1.8,
+) -> float:
+    """L2 (amplitude) penalty on the LOSVD, active only in the wing region.
+
+    :func:`_compute_smoothness` penalizes the LOSVD's *curvature* (second
+    difference), wing-tapered so the penalty grows far from `v_center` --
+    but a flat, non-zero pedestal has near-zero curvature, so that penalty
+    barely discourages one. This function adds a genuine "pull toward
+    zero" term, restricted to the wings via a taper of the *same shape* as
+    the roughness penalty's own (zero for ``|xl[j] - v_center| <=
+    1.8*sigl0``, growing as ``((d/sigl0/1.8)**4 - 1)`` beyond it) multiplying
+    ``b[j]**2``.
+
+    Deliberately dimensionless and independent of `xlam`'s current value,
+    unlike the roughness penalty's own tapered weight (``xlam *
+    (d/sigl0/sfac)**4``). The auto-xlam discrepancy search calibrates xlam
+    against how chi2 rises with it, so a wing term whose own strength also
+    scaled with xlam would entangle the two and destabilize that search;
+    keeping this term's weight independent of xlam avoids that.
+
+    Off by default (``wing_shrink=0.0``, i.e. ``st.xlam_wing_shrink``); see
+    that field's own docstring for when to turn it on -- important caveat:
+    it cannot distinguish a genuine non-Gaussian wing/tail (a skewed or
+    double-peaked LOSVD) from a noise pedestal, and will suppress the
+    former along with the latter. Only enable it when there's independent
+    reason to expect the true LOSVD is compact.
+    """
+    if wing_shrink == 0.0:
+        return 0.0
+    penalty = 0.0
+    for j in range(nl):
+        d = abs(xl[j] - v_center)
+        if d > sfac * sigl0:
+            w = (d / sigl0 / sfac) ** 4 - 1.0
+            penalty += wing_shrink * w * b[j] * b[j]
+    return penalty / resd
 
 
 @njit(cache=True)
@@ -670,16 +709,21 @@ def objective_map(a: np.ndarray, st: FitState) -> float:
     """Scalar objective function minimised by the MAP LOSVD/template fit.
 
     Evaluates the forward model via :func:`evaluate_model_gp` and combines
-    the chi2 goodness-of-fit with the LOSVD smoothness penalty and a soft
-    normalization constraint:
+    the chi2 goodness-of-fit with the LOSVD smoothness penalty, an optional
+    wing-shrinkage penalty, and a soft normalization constraint:
 
-        objective = chi2 + smoothness_penalty + 0.1 * ``|sum(b) - 1|``
+        objective = chi2 + smoothness_penalty + wing_shrinkage_penalty
+                    + 0.1 * ``|sum(b) - 1|``
 
     where ``chi2`` is computed by :func:`_compute_chi2` over the good
-    (unmasked, finite, non-clipped) pixels, and ``smoothness_penalty`` is
+    (unmasked, finite, non-clipped) pixels, ``smoothness_penalty`` is
     the wing-tapered second-derivative roughness penalty on the LOSVD `b`
     computed by :func:`_compute_smoothness` with regularization strength
-    ``st.xlam``. The final term softly enforces that the LOSVD histogram
+    ``st.xlam``, and ``wing_shrinkage_penalty`` (:func:`_compute_wing_shrinkage`,
+    strength ``st.xlam_wing_shrink``, off by default) is an L2 amplitude
+    penalty active only in the wings -- see that function's docstring for
+    why the roughness penalty alone can leave a non-zero pedestal there.
+    The normalization term softly enforces that the LOSVD histogram
     integrates to 1 (i.e. represents a normalized probability distribution)
     without a hard constraint, so the optimizer remains a simple bound-
     constrained problem solvable by L-BFGS-B. This is the function (or,
@@ -710,8 +754,13 @@ def objective_map(a: np.ndarray, st: FitState) -> float:
         st.time_eval_model = 0.0
     st.time_eval_model += time.perf_counter() - t0
     chi2 = _compute_chi2(st.g, gp, st.gerr, st.iskip, st.npix)
-    smooth = _compute_smoothness(b, st.xl, st.xlam, st.sigl0, st.resd, st.nl, getattr(st, "v_center", 0.0))
-    return float(chi2 + smooth + 1e-1 * abs(float(np.sum(b)) - 1.0))
+    v_center = getattr(st, "v_center", 0.0)
+    smooth = _compute_smoothness(b, st.xl, st.xlam, st.sigl0, st.resd, st.nl, v_center)
+    wing_shrink = _compute_wing_shrinkage(
+        b, st.xl, st.xlam, st.sigl0, st.resd, st.nl, v_center, getattr(st, "xlam_wing_shrink", 0.0),
+        getattr(st, "xlam_wing_shrink_sfac", 1.8),
+    )
+    return float(chi2 + smooth + wing_shrink + 1e-1 * abs(float(np.sum(b)) - 1.0))
 
 
 def _build_jax_objective_value_and_grad(st: FitState):
@@ -808,6 +857,15 @@ def _build_jax_objective_value_and_grad(st: FitState):
     lam_vec = jnp.asarray(
         _wing_taper_lam_vec(st.xl, xlam, sigl0, v_center), dtype=jnp.float64
     )
+    xlam_wing_shrink = float(getattr(st, "xlam_wing_shrink", 0.0))
+    wing_shrink_sfac = float(getattr(st, "xlam_wing_shrink_sfac", 1.8))
+    # Dimensionless, independent of xlam's current value; onset given by its
+    # own sfac, decoupled from the roughness penalty's onset above (which
+    # always uses 1.8) -- see _compute_wing_shrinkage's docstring.
+    wing_excess_vec = jnp.asarray(
+        _wing_taper_lam_vec(st.xl, 1.0, sigl0, v_center, wing_shrink_sfac) - 1.0, dtype=jnp.float64
+    )
+    wing_excess_vec = jnp.maximum(wing_excess_vec, 0.0)
 
     # Keep 2D shape (npix, nlosvd) to avoid jnp.tile/repeat inside the jitted function.
     ip_safe = jnp.clip(jnp.asarray(ip_map, dtype=jnp.int32), 0, npix - 1)
@@ -819,6 +877,10 @@ def _build_jax_objective_value_and_grad(st: FitState):
         mid = (b[2:] - 2.0 * b[1:-1] + b[:-2]) ** 2
         terms = jnp.concatenate([jnp.array([left]), mid, jnp.array([right])])
         return jnp.sum(lam_vec * terms) / resd
+
+    def _wing_shrink_penalty(b):
+        # See numerics._compute_wing_shrinkage for why this term exists.
+        return xlam_wing_shrink * jnp.sum(wing_excess_vec * b * b) / resd
 
     def _ynew_from_b(b):
         y2 = b[losvd_j0] + (b[losvd_j1] - b[losvd_j0]) * losvd_w
@@ -890,8 +952,9 @@ def _build_jax_objective_value_and_grad(st: FitState):
         resid = (g - gp) / gerr_dyn
         chi2 = jnp.sum(jnp.where(valid, resid * resid, 0.0))
         smooth = _smooth_penalty(b)
+        wing_shrink = _wing_shrink_penalty(b)
         norm_pen = 1e-1 * jnp.abs(jnp.sum(b) - 1.0)
-        return chi2 + smooth + norm_pen
+        return chi2 + smooth + wing_shrink + norm_pen
 
     obj_vg = jax.jit(jax.value_and_grad(_objective))
 
@@ -938,10 +1001,13 @@ def objective_components(a: np.ndarray, st: FitState) -> dict:
             The chi-squared term (float).
         ``"smooth"``
             The LOSVD smoothness penalty term (float).
+        ``"wing_shrink"``
+            The wing-shrinkage amplitude penalty term (float); zero unless
+            ``st.xlam_wing_shrink`` is set.
         ``"losvd_norm_penalty"``
             The ``0.1 * |sum(b) - 1|`` normalization penalty term (float).
         ``"total"``
-            Sum of the three terms above; equal to the value
+            Sum of the terms above; equal to the value
             :func:`objective_map` would return for the same `a` and `st`.
         ``"smooth_over_chi2"``
             Ratio of the smoothness penalty to chi2, a quick diagnostic of
@@ -950,12 +1016,17 @@ def objective_components(a: np.ndarray, st: FitState) -> dict:
     """
     gp, b, *_ = evaluate_model_gp(a, st)
     chi2   = _compute_chi2(st.g, gp, st.gerr, st.iskip, st.npix)
-    smooth = _compute_smoothness(b, st.xl, st.xlam, st.sigl0, st.resd, st.nl, getattr(st, "v_center", 0.0))
+    v_center = getattr(st, "v_center", 0.0)
+    smooth = _compute_smoothness(b, st.xl, st.xlam, st.sigl0, st.resd, st.nl, v_center)
+    wing_shrink = _compute_wing_shrinkage(
+        b, st.xl, st.xlam, st.sigl0, st.resd, st.nl, v_center, getattr(st, "xlam_wing_shrink", 0.0),
+        getattr(st, "xlam_wing_shrink_sfac", 1.8),
+    )
     fadd   = 1e-1 * abs(float(np.sum(b)) - 1.0)
     return {
-        "chi2": float(chi2), "smooth": float(smooth),
+        "chi2": float(chi2), "smooth": float(smooth), "wing_shrink": float(wing_shrink),
         "losvd_norm_penalty": float(fadd),
-        "total": float(chi2 + smooth + fadd),
+        "total": float(chi2 + smooth + wing_shrink + fadd),
         "smooth_over_chi2": float(smooth / chi2) if chi2 else np.nan,
     }
 

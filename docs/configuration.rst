@@ -28,9 +28,8 @@ commonly-tuned fields inline; for the complete list, call
 continuum is folded directly into the same optimization as the LOSVD and
 template weights (see :mod:`kinextract.joint`). Alternatively, pre-normalize
 the spectrum once (e.g. via the standalone
-:func:`kinextract.continuum.asymmetric_least_squares_continuum` utility --
-see ``examples/notebooks/06_prenormalized_workflow.ipynb``) and fit with
-``fit_continuum = false``.
+:func:`kinextract.continuum.asymmetric_least_squares_continuum` utility)
+and fit with ``fit_continuum = false``.
 
 .. autoclass:: kinextract.config.FitConfig
    :members: describe

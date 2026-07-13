@@ -45,25 +45,16 @@ deliberately dropping the shipped pipeline's ``icoff``/``coff``/``coff2``
 continuum-offset parameterization (that exists for a narrower "pre-normalized
 mode" purpose unrelated to full continuum fitting).
 
-**Resolved false alarm -- not a real bias.** An initial real-MUSE-bin
-validation (``bin1605sp``, compared against an entry in the original Fortran
-pipeline's ``pallmc.out``) found the self-consistent ``sigl0`` fixed-point
-iteration converging robustly but landing on a sigma ~11 km/s above the
-"assumed truth." Root-caused: ``pallmc.out`` mixes two distinct binning
-schemes (filenames prefixed ``bin`` vs. ``bnn``, ~40/38 split); the
-comparison had matched ``bin1605sp`` against a *different* bin
-(``bnn1605spmc.sim``) purely by a digit-substring coincidence, not the
-correct ground truth for that spectrum. Confirmed by cross-checking against
-the shipped ALS pipeline run directly on the actual ``bin1605sp.spec`` file,
-which agrees with the joint fit (V~0-14, sigma~50-57) and disagrees with the
-mismatched ``bnn1605spmc.sim`` entry (itself only weakly constrained:
-sigma=40.7+/-8.9). The genuine residual bias at the ``sigl0`` fixed point is
-the small ~2 km/s one already characterized in synthetic single-template
-tests (see :func:`fit_joint_auto_xlam_sigl0`'s docstring).
+The self-consistent ``sigl0`` fixed-point iteration (see
+:func:`fit_joint_auto_xlam_sigl0`) converges robustly on real MUSE bins,
+agreeing with the shipped ALS pipeline's own recovered V/sigma. A small
+residual bias at the fixed point is characterized in synthetic
+single-template tests -- see :func:`fit_joint_auto_xlam_sigl0`'s docstring.
 """
 from __future__ import annotations
 
 import dataclasses
+import threading as _threading
 from typing import Optional
 
 import numpy as np
@@ -76,6 +67,7 @@ from .io import write_fitlov_outputs_from_model
 from .losvd import fit_losvd_gauss_hermite
 from .numerics import (
     _compute_smoothness,
+    _compute_wing_shrinkage,
     _convolve_losvd_numba,
     _wing_taper_lam_vec,
     estimate_velocity_xcorr,
@@ -87,10 +79,10 @@ from .state import FitState, getnlosvd_fast_from_b
 # Default P-spline continuum regularization weight. Chosen empirically: large
 # enough to keep the ~14-16 coefficient continuum from overfitting individual
 # noisy pixels, small enough to still track realistic multi-cycle continuum
-# structure (verified against a flux-calibration-ripple stress test). Applied
-# to *normalized* coefficients (see `build_jax_objective_value_and_grad`/
-# `objective_joint`), so this default is portable across datasets with very
-# different absolute flux units.
+# structure (e.g. flux-calibration ripples). Applied to *normalized*
+# coefficients (see `build_jax_objective_value_and_grad`/`objective_joint`),
+# so this default is portable across datasets with very different absolute
+# flux units.
 DEFAULT_XLAM_CONT = 3.0
 
 
@@ -300,18 +292,22 @@ def objective_joint(
 
     v_center = float(getattr(st, "v_center", 0.0))
     smooth = _compute_smoothness(b, st.xl, st.xlam, st.sigl0, st.resd, st.nl, v_center)
+    wing_shrink = _compute_wing_shrinkage(
+        b, st.xl, st.xlam, st.sigl0, st.resd, st.nl, v_center, getattr(st, "xlam_wing_shrink", 0.0),
+        getattr(st, "xlam_wing_shrink_sfac", 1.8),
+    )
 
     cont_smooth = 0.0
     if D is not None:
         d = D @ (cont_coeffs / coeff_scale)
         cont_smooth = float(xlam_cont * np.sum(d * d))
 
-    return chi2 + smooth + cont_smooth
+    return chi2 + smooth + wing_shrink + cont_smooth
 
 
 def build_jax_objective_value_and_grad(
     st: FitState, design: np.ndarray, t_norm: np.ndarray,
-    D: np.ndarray | None = None, coeff_scale: float = 1.0,
+    D: np.ndarray | None = None,
     xlam_cont: float = DEFAULT_XLAM_CONT,
 ):
     """Build a JAX-jitted value-and-gradient function for the joint objective.
@@ -324,13 +320,24 @@ def build_jax_objective_value_and_grad(
     and a design-matrix continuum instead of a separately co-fitted array),
     plus the P-spline continuum roughness penalty (see :func:`objective_joint`).
 
+    ``coeff_scale`` (the continuum-coefficient normalization used by the
+    P-spline penalty) is threaded through as an explicit runtime argument
+    rather than baked into the trace as a Python constant, even though a
+    single ``fit_joint`` call only ever needs one fixed value. This is what
+    lets :func:`_get_or_build_jax_vg_joint` cache and reuse one compiled
+    kernel across bootstrap replicates: ``coeff_scale`` is derived from the
+    resampled flux (``initial_continuum_coeffs`` on ``st.g``) and so differs
+    slightly, replicate to replicate, at otherwise-identical shape/xlam/
+    sigl0/v_center -- baking it in as a constant would make every replicate
+    a fresh cache miss and defeat the cache entirely.
+
     Returns
     -------
     callable or None
-        ``f(a, g, gerr) -> (value, grad)`` with `g`/`gerr` as explicit
-        (non-differentiated) arguments so the same compiled kernel can be
-        reused across calls that only change `g`/`gerr`. Returns None if JAX
-        is not installed.
+        ``f(a, g, gerr, coeff_scale) -> (value, grad)`` with `g`/`gerr`/
+        `coeff_scale` as explicit (non-differentiated) arguments so the same
+        compiled kernel can be reused across calls that only change those.
+        Returns None if JAX is not installed.
     """
     if jax is None or jnp is None:
         return None
@@ -340,7 +347,6 @@ def build_jax_objective_value_and_grad(
     n_poly = design.shape[1]
     fortran_template_mixture = bool(st.fortran_template_mixture)
     D_j = None if D is None else jnp.asarray(D, dtype=jnp.float64)
-    coeff_scale_j = float(coeff_scale)
     xlam_cont_j = float(xlam_cont)
 
     t = jnp.asarray(t_norm, dtype=jnp.float64)
@@ -363,6 +369,15 @@ def build_jax_objective_value_and_grad(
     fit_mask = jnp.asarray(fit_mask, dtype=bool)
 
     lam_vec = jnp.asarray(_wing_taper_lam_vec(st.xl, xlam, sigl0, v_center), dtype=jnp.float64)
+    xlam_wing_shrink = float(getattr(st, "xlam_wing_shrink", 0.0))
+    wing_shrink_sfac = float(getattr(st, "xlam_wing_shrink_sfac", 1.8))
+    # Dimensionless, independent of xlam's current value; onset given by its
+    # own sfac, decoupled from the roughness penalty's onset above (which
+    # always uses 1.8) -- see numerics._compute_wing_shrinkage's docstring.
+    wing_excess_vec = jnp.asarray(
+        _wing_taper_lam_vec(st.xl, 1.0, sigl0, v_center, wing_shrink_sfac) - 1.0, dtype=jnp.float64
+    )
+    wing_excess_vec = jnp.maximum(wing_excess_vec, 0.0)
 
     def _smooth_penalty(b):
         left = (b[1] - 2.0 * b[0]) ** 2
@@ -371,6 +386,10 @@ def build_jax_objective_value_and_grad(
         terms = jnp.concatenate([jnp.array([left]), mid, jnp.array([right])])
         return jnp.sum(lam_vec * terms) / resd
 
+    def _wing_shrink_penalty(b):
+        # See numerics._compute_wing_shrinkage for why this term exists.
+        return xlam_wing_shrink * jnp.sum(wing_excess_vec * b * b) / resd
+
     def _ynew_from_b(b):
         y2 = b[losvd_j0] + (b[losvd_j1] - b[losvd_j0]) * losvd_w
         s = jnp.sum(y2)
@@ -378,7 +397,7 @@ def build_jax_objective_value_and_grad(
         scale = jnp.where(s != 0.0, sum_b / s, 1.0)
         return y2 * scale
 
-    def _objective(a, g, gerr_dyn):
+    def _objective(a, g, gerr_dyn, coeff_scale_arg):
         i = 0
         b_raw = jnp.maximum(a[i:i + nl], 1e-6)
         b = b_raw / jnp.sum(b_raw)  # hard normalization -- see evaluate_model_gp_joint
@@ -420,23 +439,95 @@ def build_jax_objective_value_and_grad(
         resid = (g - gp) / gerr_dyn
         chi2 = jnp.sum(jnp.where(valid, resid * resid, 0.0))
         smooth = _smooth_penalty(b)
+        wing_shrink = _wing_shrink_penalty(b)
         cont_smooth = 0.0
         if D_j is not None:
-            d = D_j @ (cont_coeffs / coeff_scale_j)
+            d = D_j @ (cont_coeffs / coeff_scale_arg)
             cont_smooth = xlam_cont_j * jnp.sum(d * d)
-        return chi2 + smooth + cont_smooth
+        return chi2 + smooth + wing_shrink + cont_smooth
 
     obj_vg = jax.jit(jax.value_and_grad(_objective))
 
-    def _value_and_grad_np(a_np: np.ndarray, g_np: np.ndarray, gerr_np: np.ndarray) -> tuple[float, np.ndarray]:
+    def _value_and_grad_np(
+        a_np: np.ndarray, g_np: np.ndarray, gerr_np: np.ndarray, coeff_scale: float = 1.0,
+    ) -> tuple[float, np.ndarray]:
         val, grad = obj_vg(
             jnp.asarray(a_np, dtype=jnp.float64),
             jnp.asarray(g_np, dtype=jnp.float64),
             jnp.asarray(gerr_np, dtype=jnp.float64),
+            jnp.asarray(coeff_scale, dtype=jnp.float64),
         )
         return float(val), np.asarray(grad, dtype=np.float64)
 
     return _value_and_grad_np
+
+
+# =============================================================================
+# Cross-call JIT cache
+# =============================================================================
+
+# Process-wide cache for this module's JAX JIT-compiled value+grad functions,
+# mirroring kinextract.numerics._JAX_VG_CACHE (see that module's docstring for
+# the full rationale). Real compile cost here was measured directly at ~0.2s
+# per fresh closure -- much cheaper than the shipped (non-joint) path's
+# documented 10-120s, but still pure waste when repeated: bootstrap replicates
+# (kinextract.errors._refit_one_bootstrap_joint) call fit_joint once per
+# replicate at *frozen* xlam/sigl0/v_center and an unchanged template/design,
+# varying only the resampled g/gerr/coeff_scale -- exactly the case this cache
+# targets, since those three are threaded through as runtime (non-baked)
+# arguments to the returned function, not part of the trace.
+_JAX_VG_CACHE_JOINT: dict = {}
+_JAX_VG_CACHE_JOINT_LOCK = _threading.Lock()
+_JAX_VG_KEY_LOCKS_JOINT: dict = {}
+
+
+def _array_fingerprint_joint(*arrays) -> int:
+    """Content fingerprint for the arrays baked into this module's JAX trace.
+
+    Same rationale as ``kinextract.numerics._array_fingerprint``: two fits
+    can share every shape/scalar in the cache key below while having
+    different underlying templates/design/LOSVD grids, so the key must
+    include a fingerprint of the actual data, not just its shape.
+    """
+    h = 0
+    for arr in arrays:
+        h = hash((h, np.asarray(arr).tobytes()))
+    return h
+
+
+def _get_or_build_jax_vg_joint(
+    st: FitState, design: np.ndarray, t_norm: np.ndarray,
+    D: np.ndarray | None, xlam_cont: float,
+):
+    """Return the cached JAX value+grad function for this joint-fit shape.
+
+    Thread-safe via the same per-key double-checked-locking pattern as
+    :func:`kinextract.numerics._get_or_build_jax_vg`.
+    """
+    n_poly = design.shape[1]
+    content_fp = _array_fingerprint_joint(
+        st.xl, st.outside_tpl, t_norm, design,
+        st.losvd_j0, st.losvd_j1, st.losvd_w, st.ip_map, st.ip_mask,
+        D if D is not None else np.zeros(0),
+    )
+    key = (
+        int(st.nl), int(st.nt), int(st.npix), int(n_poly),
+        bool(st.fortran_template_mixture),
+        float(st.xlam), float(st.sigl0), float(getattr(st, "v_center", 0.0)),
+        float(getattr(st, "xlam_wing_shrink", 0.0)),
+        float(getattr(st, "xlam_wing_shrink_sfac", 1.8)),
+        float(xlam_cont), int(st.iskip),
+        content_fp,
+    )
+    if key in _JAX_VG_CACHE_JOINT:
+        return _JAX_VG_CACHE_JOINT[key]
+    with _JAX_VG_CACHE_JOINT_LOCK:
+        key_lock = _JAX_VG_KEY_LOCKS_JOINT.setdefault(key, _threading.Lock())
+    with key_lock:
+        if key not in _JAX_VG_CACHE_JOINT:
+            _JAX_VG_CACHE_JOINT[key] = build_jax_objective_value_and_grad(
+                st, design, t_norm, D, xlam_cont)
+    return _JAX_VG_CACHE_JOINT[key]
 
 
 def build_initial_guess(
@@ -555,13 +646,12 @@ def fit_joint(
     auto_recenter_v : bool, optional
         If True, recenter the wing-taper's regularization on
         ``kinextract.numerics.estimate_velocity_xcorr(st)`` instead of the
-        fixed ``v_center=0.0`` the shipped MAP path always uses. A dedicated
-        stress test found this cuts V-recovery bias by ~90% in the regime it
-        matters (clean/high-S/N data, xlam already tuned high). Default
-        False here because :func:`fit_joint_auto_xlam` always recenters
-        itself as a prerequisite step (see its docstring) -- this flag only
-        matters for callers invoking :func:`fit_joint` directly at a single,
-        fixed xlam.
+        fixed ``v_center=0.0`` the shipped MAP path always uses. This
+        substantially reduces V-recovery bias in the regime it matters
+        (clean/high-S/N data, xlam already tuned high). Default False here
+        because :func:`fit_joint_auto_xlam` always recenters itself as a
+        prerequisite step (see its docstring) -- this flag only matters for
+        callers invoking :func:`fit_joint` directly at a single, fixed xlam.
     fit_continuum : bool, optional
         If False (default True), no continuum is fit at all -- the
         continuum is fixed at 1.0 (see :func:`build_initial_guess`'s
@@ -602,14 +692,14 @@ def fit_joint(
         coeff_scale = 1.0
 
     value_and_grad = (
-        build_jax_objective_value_and_grad(st, design, t_norm, D, coeff_scale, xlam_cont)
+        _get_or_build_jax_vg_joint(st, design, t_norm, D, xlam_cont)
         if use_jax else None
     )
 
     if value_and_grad is not None:
         def _obj_jac(u):
             a = u * xscale
-            val, grad = value_and_grad(a, st.g, st.gerr)
+            val, grad = value_and_grad(a, st.g, st.gerr, coeff_scale)
             return val, grad * xscale
 
         result = minimize(
@@ -632,7 +722,7 @@ def fit_joint(
 
 def fit_joint_auto_xlam(
     st: FitState, n_interior_knots: int = 10, degree: int = 3,
-    xlam_grid: tuple = (10.0, 100.0, 1000.0, 10000.0, 100000.0),
+    xlam_grid: tuple = (10.0, 100.0, 1000.0, 10000.0, 100000.0, 1_000_000.0, 10_000_000.0),
     xlam_chi2_tolerance: float = 0.02, xlam_max_peaks: int = 1,
     xlam_peak_min_prominence: float = 0.1,
     recenter_v: bool = True,
@@ -640,15 +730,18 @@ def fit_joint_auto_xlam(
     maxiter: int = 50000, ftol: float = 1e-12, maxfun: int = 500000,
     use_jax: bool = True,
     fit_continuum: bool = True,
-    xlam_criterion: str = "chi2",
-    xlam_discrepancy_nsigma: float = 1.0,
+    xlam_criterion: str = "discrepancy",
+    xlam_discrepancy_nsigma: float = 0.3,
     w_bounds: tuple = (1e-5, 1.0),
 ):
     """Automatically select the joint model's LOSVD regularization strength.
 
     Two criteria are supported (``xlam_criterion``):
 
-    ``"chi2"``/``"roughness"`` (default ``"chi2"``)
+    ``"discrepancy"`` (the default -- see below) and ``"chi2"``/``"roughness"``
+    (legacy, kept for backward compatibility).
+
+    ``"chi2"``/``"roughness"``
         Mirrors ``kinextract.fitting._auto_select_xlam``'s chi2 criterion
         exactly (same selection rule, reusing its ``compute_losvd_roughness``/
         ``compute_losvd_n_peaks`` helpers directly): run a full fit at every
@@ -673,13 +766,12 @@ def fit_joint_auto_xlam(
     always recenters the wing-taper's ``v_center`` on
     ``kinextract.numerics.estimate_velocity_xcorr(st)`` *before* running the
     grid search (see `recenter_v`), rather than treating recentering as a
-    separate, optional step layered on afterward. A dedicated diagnostic
-    found the "prefer the largest xlam that doesn't hurt chi2" rule
-    systematically walks toward high xlam whenever the data is clean enough
-    not to visibly penalize it there -- and separately, that high xlam is
-    exactly the regime where the wing-taper's fixed ``v_center=0``
-    convention biases recovered V the most. Recentering first removes the
-    asymmetry regardless of which xlam the search lands on.
+    separate, optional step layered on afterward. The "prefer the largest
+    xlam that doesn't hurt chi2" rule systematically walks toward high xlam
+    whenever the data is clean enough not to visibly penalize it there -- and
+    high xlam is exactly the regime where the wing-taper's fixed
+    ``v_center=0`` convention biases recovered V the most. Recentering first
+    removes the asymmetry regardless of which xlam the search lands on.
 
     Parameters
     ----------
@@ -774,22 +866,21 @@ def fit_joint_auto_xlam(
 
     def _candidate_ok(candidate, pool):
         """Two independent sanity checks against a spurious-overfit failure
-        mode found on a real MUSE bin near the resolution limit: there, the
-        smallest xlam in the grid found a genuinely different, lower-chi2
-        local optimum (V off by >40 km/s) that the chi2-tolerance rule
-        couldn't distinguish from the correct answer, since nothing else
-        came within 2% of that spurious minimum.
+        mode: at the smallest xlam in the grid, the fit can land on a
+        genuinely different, lower-chi2 local optimum (V off by tens of
+        km/s) that the chi2-tolerance rule alone can't distinguish from the
+        correct answer, if nothing else comes within tolerance of that
+        spurious minimum.
 
         1. Compare against the pre-fit xcorr velocity estimate. Necessary
-           but not sufficient: on the bin that motivated this, the xcorr
-           estimate itself was *also* wrong in the same direction, so this
-           check alone did not catch it.
+           but not sufficient on its own -- the xcorr estimate can itself be
+           biased in the same direction as a spurious candidate.
         2. Compare against the *other* grid candidates' own median V
-           (robustly, via MAD). This is what actually caught the failure:
-           every candidate except the spurious one clustered within a few
-           km/s of each other, while the spurious one was a >40 km/s
-           outlier -- independent of whether the external xcorr estimate
-           can be trusted.
+           (robustly, via MAD). This is the check that actually catches a
+           spurious candidate: every legitimate candidate clusters within a
+           few km/s of each other, while a spurious one is a large outlier,
+           independent of whether the external xcorr estimate can be
+           trusted.
         """
         v_candidate = gh_by_xlam[candidate]["vherm"]
         sigma_candidate = max(gh_by_xlam[candidate]["sherm"], 1.0)
@@ -895,7 +986,7 @@ def _fit_joint_discrepancy_xlam(
 def fit_joint_auto_xlam_sigl0(
     st: FitState, n_interior_knots: int = 10, degree: int = 3,
     sigl0_init: float = 100.0, n_sigl0_iter: int = 3, sigl0_tol: float = 2.0,
-    xlam_grid: tuple = (10.0, 100.0, 1000.0, 10000.0, 100000.0),
+    xlam_grid: tuple = (10.0, 100.0, 1000.0, 10000.0, 100000.0, 1_000_000.0, 10_000_000.0),
     xlam_chi2_tolerance: float = 0.02, xlam_max_peaks: int = 1,
     xlam_peak_min_prominence: float = 0.1,
     recenter_v: bool = True,
@@ -903,8 +994,8 @@ def fit_joint_auto_xlam_sigl0(
     maxiter: int = 50000, ftol: float = 1e-12, maxfun: int = 500000,
     use_jax: bool = True,
     fit_continuum: bool = True,
-    xlam_criterion: str = "chi2",
-    xlam_discrepancy_nsigma: float = 1.0,
+    xlam_criterion: str = "discrepancy",
+    xlam_discrepancy_nsigma: float = 0.3,
     w_bounds: tuple = (1e-5, 1.0),
 ):
     """Self-consistent fixed-point refinement of the wing-taper's ``sigl0``.
@@ -912,48 +1003,37 @@ def fit_joint_auto_xlam_sigl0(
     This is the default top-level joint-fit entry point (see
     :func:`~kinextract.fitting.run_spectral_fit` with ``cfg.fit_continuum=True``).
 
-    Rationale: a dedicated diagnostic found the sigma-recovery bias is a
-    monotonic function of ``sigl0`` crossing zero almost exactly at
-    ``sigl0 == true sigma``. That means the map ``sigl0 -> recovered
-    sigma(sigl0)`` has a fixed point very close to the true sigma, and
-    iterating -- fit once, read off the recovered sigma, use it as the next
-    ``sigl0``, refit -- converges toward that fixed point regardless of how
-    wrong the starting guess is. This replaces an earlier cross-correlation-
-    based sigma pre-estimate that went through three failed implementation
-    attempts, each validated cleanly on a single-template synthetic test but
-    broken differently on the real, 35-template MUSE library (individual
-    templates' own autocorrelation widths there span 43-385 km/s, so no
-    single "reference template" construction generalized). Each iteration is
-    a full :func:`fit_joint_auto_xlam` call (its own xlam grid search + wing-
-    taper recentering), so this costs ``n_sigl0_iter`` times as much as a
-    single auto-xlam fit.
+    Rationale: the sigma-recovery bias is a monotonic function of ``sigl0``
+    crossing zero almost exactly at ``sigl0 == true sigma``. That means the
+    map ``sigl0 -> recovered sigma(sigl0)`` has a fixed point very close to
+    the true sigma, and iterating -- fit once, read off the recovered sigma,
+    use it as the next ``sigl0``, refit -- converges toward that fixed point
+    regardless of how wrong the starting guess is. This is more robust than
+    a cross-correlation-based sigma pre-estimate: on a real, many-template
+    library, individual templates' own autocorrelation widths can span a
+    wide range, so no single "reference template" construction generalizes
+    across a whole library. Each iteration is a full
+    :func:`fit_joint_auto_xlam` call (its own xlam grid search + wing-taper
+    recentering), so this costs ``n_sigl0_iter`` times as much as a single
+    auto-xlam fit.
 
-    A validation sweep (sigl0_init from 20 to 500 km/s against a synthetic
-    true sigma of 140) found one correction (2 total fits) already erases
-    the overwhelming majority of the bias from a badly wrong initial guess
-    (e.g. -37.45 -> -1.92 km/s for a 7x-too-small initial guess); a second
-    correction (3 total fits, the default) tightens convergence further so
-    that *every* tested starting point lands within ~0.3 km/s of the others,
-    confirming genuine fixed-point convergence independent of the initial
-    guess. On a real MUSE bin (``bin1605sp``), starting guesses of 20, 100,
-    and 300 km/s all converged to sigma ~51.5-51.6 km/s within 2-3
-    iterations, confirming the same robust convergence on real data as in
-    the synthetic sweep above (an initial comparison against a ``pallmc.out``
-    entry suggested an ~11 km/s residual here, but that entry turned out to
-    be a different, mismatched bin -- see this module's docstring; the
-    shipped ALS pipeline run on the actual ``bin1605sp.spec`` agrees with
-    this result).
+    Convergence is robust to the initial guess: a synthetic validation sweep
+    (sigl0_init from 20 to 500 km/s against a true sigma of 140) shows the
+    default 3-iteration schedule brings every tested starting point to
+    within ~0.3 km/s of each other, and real-MUSE-bin tests converge to a
+    consistent sigma within 2-3 iterations regardless of starting guess,
+    matching the shipped ALS pipeline's own recovered value on the same
+    data.
 
     Parameters
     ----------
     st : FitState
         Fit state to optimize (not modified).
     sigl0_init : float, optional
-        Starting ``sigl0`` guess for iteration 1. Default 100 km/s,
-        matching both this module's own and the original Fortran
-        framework's fixed default (confirmed directly in the legacy
-        pipeline's batch wrapper script: every bin uses the same hardcoded
-        initial sigma guess regardless of radius or true dispersion).
+        Starting ``sigl0`` guess for iteration 1. Default 100 km/s, matching
+        the legacy Fortran pipeline's own fixed default (every bin uses the
+        same hardcoded initial sigma guess regardless of radius or true
+        dispersion).
     n_sigl0_iter : int, optional
         Number of fit-then-update rounds. Default 3 (two corrections after
         the initial guess). Reduce to 2 (or 1, to disable correction

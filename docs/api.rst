@@ -70,7 +70,7 @@ Continuum
 
 ``asymmetric_least_squares_continuum``/``robust_sigma`` are standalone,
 one-time pre-normalization utilities -- not part of the main fitting
-pipeline. See ``examples/notebooks/06_prenormalized_workflow.ipynb``.
+pipeline.
 
 Joint continuum-in-the-model fit
 ---------------------------------

@@ -330,3 +330,267 @@ single-start multi-start test only tried one alternative start).
   state; the specific bug and what's been ruled out is documented above.
 - Everything is on branch `claude/broad-sigma-losvd-stress-test`, nothing
   pushed, `main` untouched, every step is its own commit.
+
+## Session 2: pPXF head-to-head, the LOSVD-bin-count fix, and the residual V bias
+
+Follow-on session, same branch/workflow conventions as above (checkpoints,
+no pushes). Picked up from "pPXF comparison notebook: not done."
+
+### Checkpoint 8: fixed the pPXF comparison script, ran the real head-to-head
+
+Fixed the `lam=`/`lam_temp=` bug from session 1 (was passing the pre-log-rebin
+wavelength array instead of the post-log-rebin one; pPXF requires
+`velscale == c * diff(ln(lam))` exactly). With that fixed,
+`dev_notes/stress_test/compare_kinextract_ppxf.py` ran the full
+10-sigma x 5-seed comparison (kinextract's validated E-MILES+wide-window
+config at the *old* 29-bin default, vs the user's own validated
+`ppxf_fit_and_clean`-style two-pass setup with the full 150-template E-MILES
+grid). **Result: pPXF won on both V and sigma at essentially every sigma
+tested**, most starkly at high sigma (kinextract sigma bias +9.69+-12.83 vs
+pPXF's +2.33+-9.69 at sigma=350). This was the opposite of what the user
+wanted ("I want to know for sure that kinextract is better") and had to be
+reported plainly rather than spun -- with one load-bearing caveat: every
+mock here has a **pure Gaussian** true LOSVD (h3=h4=0), which is the
+best-case scenario for pPXF's own Gauss-Hermite-parametric model and close
+to the worst-case for demonstrating kinextract's actual value proposition
+(nonparametric recovery of LOSVDs that *aren't* well-described by a low-order
+GH expansion). The user's response: don't chase that caveat yet, fix why
+kinextract underperforms *even on its worst-case test* first.
+
+### Checkpoint 9: n_losvd_bins was the big one
+
+`n_losvd_bins` defaulted to 29 (matching the legacy Fortran `nl` default in
+`fitlovw.f`/`mcfitw.f`), with `losvd_vmin/vmax` floored at +-300 km/s
+regardless of true sigma. At sigma=30 that's a ~20.7 km/s bin -- most of a
+full sigma in one bin. Swept `n_losvd_bins` at fixed sigma=30 first (29, 59,
+89, 119, 179): sigma bias roughly halved going 29->89 (+4.7 -> +2.0 km/s)
+then plateaued. Then swept 29 vs 89 across the **full** sigma range (10
+sigma x 3 seeds, 60 fits) to check whether it helped at high sigma too --
+it turned out to matter just as much there, not just at low sigma:
+
+| sigma | sigma bias (29 bins) | sigma bias (89 bins) |
+|---|---|---|
+| 30  | +5.23 | +2.67 |
+| 70  | +2.66 | -0.58 |
+| 120 | +7.16 | +2.48 |
+| 200 | +7.74 | +1.98 |
+| 250 | +9.02 | +1.03 |
+| 300 | +10.19| -0.14 |
+| 350 | +13.54| +1.14 |
+
+Sigma bias collapsed to roughly +-0.3-2.7 km/s across the **entire** sigma
+range -- smaller than pPXF's own sigma bias at nearly every sigma tested
+(pPXF: +3.54 at 30 down to +0.20 at 300, +2.33 at 350). V bias got very
+slightly worse at low-moderate sigma (e.g. -1.21 -> -2.70 at sigma=30) and
+very slightly better at high sigma; not the dominant effect either way.
+
+Before adopting, checked whether the *legacy Schwarzschild orbit-modeling*
+Fortran (`sco_framework/modprogs/model.f`, `library.f`, not
+`sco_framework_updated`) can even accept more than 29 LOSVD bins in the
+observed-kinematics file kinextract feeds it. Traced the actual data flow:
+
+- `Nvel=13` in `bothdefs.h` is a real compile-time `PARAMETER`, but it's the
+  orbit library's own *internal* grid for building model LOSVDs from
+  orbits -- unrelated to the observed data's bin count.
+- `vdataread.f` reads each spatial bin's observed LOSVD file line-by-line
+  until EOF (capped at `Nveld=1000`/`nadt=1000`), storing the actual count
+  as `nad` dynamically -- no fixed-29 assumption at all.
+- `getfwhm.f` (the actual model/data comparison) spline-interpolates the
+  observed LOSVD down to a FWHM + peak location -- 3 summary numbers
+  regardless of input resolution. More bins only sharpens that spline fit.
+- Also confirmed the *expensive* part of the orbit-modeling run (the
+  `do iter=1,Niter` loop calling `spear()`, explicitly commented in the
+  code as "where all the cpu is being spent") never touches the observed
+  data's bin count at all -- it compares against `sumad`, a version of the
+  data already pre-binned onto the orbit library's own fixed `Nvel=13` grid
+  during one-time setup. So raising kinextract's bin count costs nothing on
+  the modeling side, only a small one-time extraction-side setup cost.
+
+**Adopted `n_losvd_bins=89` as the new default** (`config.py`), with the
+rationale/citation-style comment on the field. This broke two tests that
+had pinned resolution-dependent tuning to the old default (a fixed
+`xlam=10000, xlam_auto=False` in `test_joint_continuum.py`'s
+`real_muse_state` fixture; a `xlam_criterion="roughness",
+xlam_smooth_threshold=0.25` in `conftest.py`'s `real_muse_fit` fixture) --
+fixed by pinning those two fixtures to `n_losvd_bins=29` explicitly (they're
+deliberately testing fixed legacy-tuned configs, not the new default). Full
+suite passes (98 passed, 2 skipped). Re-executed notebook 02 with the new
+default (no notebook code changes needed -- it uses the `FitConfig` default).
+
+### Checkpoint 10: two ruled-out hypotheses for the residual V bias
+
+With sigma essentially solved, the remaining gap vs pPXF is V bias, which
+grows with sigma regardless of bin count (roughly -13 to -14 km/s at
+sigma=350 even at 89 bins). Two candidate causes tested and **ruled out**:
+
+1. **`xlam_criterion` choice.** The default is `"discrepancy"` (Cappellari/
+   pPXF-style chi2-rise target); `"chi2"` is the legacy grid+tolerance rule,
+   documented elsewhere as having a nice "sigl0-fixed-point crosses zero at
+   true sigma" property. Swept both at 89 bins across sigma=30-350 (6 sigma
+   x 3 seeds x 2 criteria, 36 fits): **essentially identical V/sigma bias
+   under both criteria** at every sigma. `"chi2"` was notably faster (2-4x)
+   but not more accurate (slightly worse at sigma=70 specifically, likely
+   noise given only 3 seeds). Kept `"discrepancy"` as the default; this
+   rules out xlam-selection-rule choice as the V-bias driver.
+
+2. **xcorr-based `v_center` wing-taper recentering (`joint_recenter_v`).**
+   A monitoring diagnostic found something odd: `estimate_velocity_xcorr`'s
+   V estimate (which sets the wing-taper's pivot) is itself increasingly
+   biased *high* with sigma (81.05 at sigma=30 up to 95.67 at sigma=350,
+   i.e. +15.67 km/s off truth) while the *final* recovered V is
+   increasingly biased *low* (down to 63.97 at sigma=350) -- the two diverge
+   in opposite directions as sigma grows, which looked like recentering on
+   an increasingly-wrong pivot might be actively pushing the fit away from
+   truth. Tested directly: `joint_recenter_v=False` (fixed v_center=0.0) vs
+   `True` (current default) across sigma=30-350 (7 sigma x 3 seeds x 2,
+   42 fits). Result: **`False` is dramatically worse at low sigma** (V bias
+   -2.70 -> -7.97 at sigma=30) and **statistically indistinguishable from
+   `True` at high sigma** (e.g. -13.70 vs -13.14 at sigma=350, well within
+   noise). So recentering is genuinely necessary at low sigma and neutral
+   (not causal) at high sigma -- the xcorr-vs-final-V divergence observed
+   is a real correlate of the underlying problem, not its cause. Kept
+   `joint_recenter_v=True` (default, unchanged).
+
+**Still open**: what actually drives the high-sigma V bias, now that bin
+count (partial help), xlam_criterion (no effect), and v_center recentering
+(no effect at high sigma) are addressed/ruled out. Candidates not yet
+tested: template-mixture/LOSVD degeneracy specific to broad convolution
+kernels (more of each template's own intrinsic line structure blends
+together at high sigma, potentially with a net effective velocity shift
+under the fit's chosen weight combination); a genuine bias-variance
+artifact of the discrepancy-principle target itself at low per-bin SNR
+(distinct from which criterion is used -- e.g. the *nsigma* multiplier
+might need re-calibration at the new 89-bin resolution, not just choice
+of criterion).
+
+### Updated standing vs pPXF (89-bin default, same setup as checkpoint 8)
+
+Full 10-sigma x 5-seed re-run (see
+`dev_notes/stress_test/results_kinextract_vs_ppxf.json`):
+
+| sigma | kin V bias | pPXF V bias | kin sigma bias | pPXF sigma bias |
+|---|---|---|---|---|
+| 30  | -2.48+-0.54 | +1.32+-0.40 | +2.65+-1.07 | +3.54+-2.06 |
+| 50  | -2.45+-0.91 | +0.57+-1.05 | -0.44+-1.25 | +2.22+-1.66 |
+| 70  | -2.12+-1.29 | +0.11+-1.12 | -0.68+-1.50 | +1.79+-1.19 |
+| 90  | -1.91+-1.26 | -0.02+-1.16 | +1.61+-1.22 | +1.62+-1.95 |
+| 120 | -1.79+-0.71 | -0.13+-1.15 | +0.30+-3.31 | +0.97+-2.87 |
+| 160 | -0.07+-1.76 | -0.05+-1.90 | +0.32+-3.58 | -0.57+-4.04 |
+| 200 | -0.68+-3.23 | -0.79+-2.51 | -0.62+-4.66 | -1.20+-4.86 |
+| 250 | -3.31+-4.18 | -2.80+-3.23 | -2.13+-5.92 | -0.49+-6.45 |
+| 300 | -6.88+-4.82 | -5.39+-4.36 | -4.06+-7.39 | +0.20+-8.17 |
+| 350 | -9.36+-5.82 | -8.14+-5.75 | -3.06+-8.35 | +2.33+-9.69 |
+
+**Sigma: kinextract now wins (smaller |bias|) at 7 of 10 sigma values
+(30-200 km/s)** -- the range that covers both real galaxies in hand
+(N5102 ~35-47, N4751's real per-bin range ~43-70 per `pallmc.out`). pPXF
+still wins at sigma=250-350. This is the direct payoff of the
+`n_losvd_bins` fix (checkpoint 9) -- before it, pPXF won sigma at every
+single sigma tested.
+
+**V: pPXF wins (smaller |bias|) at 9 of 10 sigma values** -- only sigma=200
+is a virtual tie. This is now the clear, single dominant remaining gap, not
+yet root-caused despite ruling out bin count (partial help only), xlam
+criterion (no effect), and v_center recentering (no effect at high sigma) --
+see checkpoint 10.
+
+**Overall: not yet a clean "kinextract beats pPXF" result.** Real, substantial
+progress (from losing on nearly everything to winning sigma in the
+astrophysically relevant range), but V bias is the next thing that has to
+be fixed before that claim can be made honestly.
+
+### Checkpoint 11: three more V-bias hypotheses tested and ruled out
+
+Continued past checkpoint 10 chasing the low-sigma V offset specifically
+(the growing-with-sigma component was reframed as likely shared with any
+comparable method -- see below):
+
+- **Fitting-template count.** Reducing the fitting library from 20 to 16 to
+  4 templates (4 being the true generating pair plus 2 near neighbors) did
+  **not** reduce the bias -- flat at sigma=70, slightly *worse* at
+  sigma=250-350 (e.g. -10.12 -> -11.56 at sigma=300). Rules out
+  template-weight/LOSVD-shift degeneracy as the driver.
+- **Generating-population complexity.** Built a second mock generator
+  (`harness_emiles_broad.py`) drawing from a smooth, realistic mixture
+  spanning all 20 fitting-grid SSPs (old-age-dominated, roughly
+  solar-peaked metallicity, no single template above ~10% of the light) --
+  addressing the concern that a simple 2-SSP mock might be manufacturing an
+  artificial degeneracy a real, complex galaxy population wouldn't have.
+  Result: nearly identical bias pattern to the 2-SSP mock, slightly *worse*
+  at high sigma. Rules out mock oversimplification as the cause.
+- **LOSVD grid centering.** The low-sigma bias turned out not to be a fixed
+  offset but a shrinkage-toward-zero effect (grows with |true V|, flips
+  sign with sign(true V)) -- confirmed via a true_v = 0/40/80/-80 sweep at
+  sigma=70. Forcing the wing-taper's `v_center` to the *exact* true V
+  (bypassing the real cross-correlation estimate) left this pattern
+  essentially unchanged, ruling out recentering quality. Testing the
+  natural next hypothesis -- centering the LOSVD bin grid itself
+  (`losvd_vmin/vmax`) on the true V instead of a fixed range around v=0 --
+  made things markedly *worse* and inconsistently signed, ruling this out
+  too rather than confirming it.
+
+Five hypotheses now ruled out for the low-sigma offset with no unifying
+mechanism found (xlam_criterion, v_center recentering, recentering quality,
+template count, population complexity, grid centering). The full
+investigation record, the distinction between this component and the
+separate (likely-shared-with-pPXF) high-sigma component, and prioritized
+next steps live in `dev_notes/v_bias_remediation_plan.md` going forward,
+rather than continuing to grow this file.
+
+## Session 2 consolidation (this round)
+
+- `n_losvd_bins` default changed 29 -> 89 in `config.py`, with a proper
+  `_FIELD_HELP` entry; two tests that had pinned resolution-dependent
+  tuning to the old default were fixed by explicitly pinning them to
+  `n_losvd_bins=29` in their own fixtures (`tests/conftest.py`'s
+  `real_muse_fit`, `tests/test_joint_continuum.py`'s `real_muse_state`).
+  Full suite passes (98 passed, 2 skipped).
+- Cross-call JIT cache added to `joint.py` (mirroring `numerics.py`'s
+  existing `_JAX_VG_CACHE`), threading `coeff_scale` through as a runtime
+  argument rather than a baked-in constant so bootstrap replicates
+  (which share shape/xlam/sigl0/v_center but differ in resampled
+  flux/coeff_scale) actually hit the cache. Verified: 5 simulated
+  bootstrap-style replicates all hit the cache with zero recompiles.
+  `jaxopt.LBFGSB` (a fully JAX-native bounded optimizer, tested as a
+  possible further speedup) was prototyped and **declined** -- it needed
+  far more iterations than scipy's L-BFGS-B to reach a worse optimum.
+- Verified (reading `sco_framework/modprogs/model.f`, `library.f`,
+  `vdataread.f`, `getfwhm.f` directly) that the Schwarzschild orbit-modeling
+  Fortran framework has no fixed bin-count assumption for observed LOSVDs
+  and no compute-cost sensitivity to it -- the expensive per-iteration loop
+  compares against a fixed `Nvel=13`-bin *model* grid, unrelated to the
+  observed data's own resolution.
+- Notebook 02 re-executed with the new 89-bin default (no code changes
+  needed -- it uses the `FitConfig` default).
+- Dev-session-narrative comments (references to specific internal
+  debugging investigations, `sco_framework` directory paths, "a dedicated
+  diagnostic found..." framing) cleaned from the shipped package
+  (`src/kinextract/`) ahead of a public push -- legitimate design-rationale
+  documentation (the large majority of the package's existing comments)
+  was left untouched.
+- The joint-mode V-bias finding is now documented as a proper "Known
+  limitations" entry in `FitConfig`'s class docstring (quantified summary,
+  matching the existing shipped-path limitations section's style), with
+  the full investigation/remediation record in
+  `dev_notes/v_bias_remediation_plan.md`.
+
+## Updated "not yet done" list
+
+1. Root-cause the residual low-sigma V offset -- see
+   `dev_notes/v_bias_remediation_plan.md` for the prioritized next-step
+   list (isolating joint continuum-cofitting from the LOSVD fit itself is
+   the top recommended lead, not yet tried).
+2. Re-run the full bootstrap-CI coverage test with the new 89-bin default
+   across the full sigma range (still not done, same item as before) --
+   especially valuable at sigma >~ 200 km/s, where the honest response to
+   the (likely shared-with-pPXF) high-sigma bias is probably wider,
+   correctly-covering error bars rather than a point-estimate fix.
+3. Consider whether the pPXF comparison should also test genuinely
+   non-Gaussian (nonzero h3/h4) LOSVDs -- the regime kinextract's
+   nonparametric approach is actually built for, and the fairest test of
+   its real value proposition (flagged, not yet built).
+4. Notebooks 03/04 (real MUSE/STIS data) still not touched with any of
+   this session's findings (E-MILES, wide window, or the new bin count).
+5. Decide whether to keep or strip the unused SVD-template-reduction
+   feature (`reduce_templates_svd`, `template_w_bounds`) -- still an open
+   decision from session 1.

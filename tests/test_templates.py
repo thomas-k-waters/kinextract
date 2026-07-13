@@ -1,13 +1,20 @@
 """Tests for the instrumental LSF matching helpers in templates.py."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from kinextract.templates import (
     resolution_mismatch_sigma_A, convolve_gaussian_pixels, build_template_matrix_fortran,
+    parse_emiles_filename, pack_templates_to_npz, load_packed_templates,
+    build_template_matrix_from_npz,
 )
+from kinextract.io import read_emiles_fits
 from kinextract.config import FitConfig
+
+MUSE_DIR = Path(__file__).parent.parent / "examples" / "data" / "muse"
 
 
 def test_template_coverage_mask_is_per_template_not_any(tmp_path):
@@ -168,3 +175,200 @@ def test_lsf_matching_end_to_end_changes_the_fit(real_muse_fit):
     b_b = fit_b["outputs"]["b"]
     b_b = b_b / b_b.sum()
     assert np.max(np.abs(b_b - b_baseline)) > 1e-4
+
+
+# ── Packed .npz template grid: parsing, packing, loading ───────────────────
+
+def _write_emiles_fits(path, imf_type, imf_slope, metallicity, age_gyr,
+                        crval1=1680.2, cdelt1=0.9, npix=200):
+    """Write a tiny synthetic MILES/E-MILES-convention FITS template file."""
+    from astropy.io import fits
+    sign = "m" if metallicity < 0 else "p"
+    name = (f"E{imf_type}{imf_slope:.2f}Z{sign}{abs(metallicity):.2f}"
+            f"T{age_gyr:07.4f}_iTp0.00_baseFe.fits")
+    rng = np.random.default_rng(int(abs(metallicity * 100) + age_gyr * 10))
+    flux = (1.0 + 0.1 * np.sin(np.linspace(0, 6 * np.pi, npix))
+            + 0.01 * rng.standard_normal(npix)).astype(np.float32)
+    hdu = fits.PrimaryHDU(flux)
+    hdu.header["CRVAL1"] = crval1
+    hdu.header["CDELT1"] = cdelt1
+    hdu.writeto(Path(path) / name, overwrite=True)
+    return name
+
+
+def test_parse_emiles_filename_matches_standard_convention():
+    meta = parse_emiles_filename("Ebi1.30Zp0.06T01.0000_iTp0.00_baseFe.fits")
+    assert meta == {"imf_type": "bi", "imf_slope": 1.30, "metallicity": 0.06, "age_gyr": 1.0}
+
+    meta_neg = parse_emiles_filename("Ebi0.30Zm1.79T05.0000_iTp0.00_baseFe.fits")
+    assert meta_neg["metallicity"] == -1.79
+    assert meta_neg["age_gyr"] == 5.0
+    assert meta_neg["imf_slope"] == 0.30
+
+
+def test_parse_emiles_filename_returns_none_for_nonconforming_name():
+    assert parse_emiles_filename("B86133_av.dat") is None
+    assert parse_emiles_filename("not_a_miles_file.fits") is None
+
+
+def test_read_emiles_fits_reconstructs_wavelength_grid(tmp_path):
+    _write_emiles_fits(tmp_path, "bi", 1.30, 0.06, 1.0, crval1=1680.2, cdelt1=0.9, npix=50)
+    fits_path = next(tmp_path.glob("*.fits"))
+    wave, flux = read_emiles_fits(str(fits_path))
+    assert len(wave) == len(flux) == 50
+    np.testing.assert_allclose(wave[0], 1680.2)
+    np.testing.assert_allclose(wave[1] - wave[0], 0.9)
+
+
+def test_pack_templates_to_npz_requires_exactly_one_source(tmp_path):
+    with pytest.raises(ValueError):
+        pack_templates_to_npz(str(tmp_path / "out.npz"))
+    with pytest.raises(ValueError):
+        pack_templates_to_npz(
+            str(tmp_path / "out.npz"),
+            fits_dir=str(tmp_path), template_list_file="Tlist", template_dir=str(tmp_path),
+        )
+
+
+def test_pack_templates_to_npz_from_fits_round_trip(tmp_path):
+    fits_dir = tmp_path / "fits"
+    fits_dir.mkdir()
+    _write_emiles_fits(fits_dir, "bi", 1.30, -0.25, 1.0)
+    _write_emiles_fits(fits_dir, "bi", 1.30, -0.25, 5.0)
+    _write_emiles_fits(fits_dir, "bi", 1.30, 0.06, 1.0)
+
+    out = pack_templates_to_npz(str(tmp_path / "grid.npz"), fits_dir=str(fits_dir))
+    wave, flux, meta = load_packed_templates(out)
+
+    assert flux.shape == (200, 3)
+    assert sorted(meta["ages"].tolist()) == [1.0, 1.0, 5.0]
+    assert sorted(meta["metals"].tolist()) == [-0.25, -0.25, 0.06]
+    assert np.all(meta["imf_slope"] == 1.30)
+    assert "MILES/E-MILES" in meta["source"]
+
+
+def test_pack_templates_to_npz_from_dat_round_trip(tmp_path):
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    wave = np.linspace(8400.0, 8800.0, 100)
+    for i, name in enumerate(("star_a.dat", "star_b.dat")):
+        flux = 1.0 + 0.1 * (i + 1) * np.sin(np.linspace(0, 4 * np.pi, 100))
+        np.savetxt(lib_dir / name, np.column_stack([wave, flux]))
+    tlist = lib_dir / "Tlist"
+    tlist.write_text("star_a.dat\nstar_b.dat\n")
+
+    out = pack_templates_to_npz(
+        str(tmp_path / "grid.npz"), template_list_file=str(tlist), template_dir=str(lib_dir),
+    )
+    wave_out, flux, meta = load_packed_templates(out)
+    # Same input grid for both templates here -> packing still oversamples
+    # (see pack_templates_to_npz's .dat branch), so don't assume the exact
+    # original point count, just that both templates share one grid.
+    assert flux.shape[1] == 2
+    assert len(wave_out) == flux.shape[0]
+    assert np.all(np.isnan(meta["ages"]))
+    assert np.all(np.isnan(meta["metals"]))
+    assert set(meta["names"].tolist()) == {"star_a", "star_b"}
+    assert "user template library" in meta["source"]
+
+
+def test_load_packed_templates_select_filters_and_raises_on_missing_pair(tmp_path):
+    fits_dir = tmp_path / "fits"
+    fits_dir.mkdir()
+    _write_emiles_fits(fits_dir, "bi", 1.30, -0.25, 1.0)
+    _write_emiles_fits(fits_dir, "bi", 1.30, -0.25, 5.0)
+    _write_emiles_fits(fits_dir, "bi", 1.30, 0.06, 1.0)
+    out = pack_templates_to_npz(str(tmp_path / "grid.npz"), fits_dir=str(fits_dir))
+
+    wave, flux, meta = load_packed_templates(out, select=[(1.0, -0.25)])
+    assert flux.shape == (200, 1)
+    assert meta["ages"][0] == 1.0 and meta["metals"][0] == -0.25
+
+    with pytest.raises(ValueError, match=r"not found"):
+        load_packed_templates(out, select=[(99.0, -0.25)])
+
+
+def test_build_template_matrix_from_npz_matches_file_based(tmp_path):
+    """The packed-npz path should closely reproduce the file-per-template
+    path for the same underlying spectra (same median-normalization/
+    interpolation core, see _interpolate_normalize_templates) -- but not
+    bit-exactly for a real, heterogeneous .dat library like this one:
+    individual MUSE stellar templates share the same nominal step but not
+    the same pixel *phase* (see pack_templates_to_npz's .dat branch), so
+    packing onto one common (16x oversampled) grid and then interpolating
+    onto the fit grid composes two piecewise-linear interpolations at
+    different phases -- not identical to one direct interpolation, though
+    small (well under 1%) at this oversampling factor. This is an inherent
+    property of packing a heterogeneous library into one shared-grid
+    format, not a bug; the primary E-MILES/FITS packing path never hits
+    this since those files already share one native grid exactly."""
+    if not MUSE_DIR.exists():
+        pytest.skip("bundled MUSE example data not found")
+
+    tlist = MUSE_DIR / "Tlist"
+    from kinextract.io import read_template_list
+    paths = read_template_list(str(tlist), str(MUSE_DIR))[:3]
+
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    names = []
+    for p in paths:
+        import shutil
+        shutil.copy(p, lib_dir / Path(p).name)
+        names.append(Path(p).name)
+    (lib_dir / "Tlist").write_text("\n".join(names) + "\n")
+
+    npz_path = pack_templates_to_npz(
+        str(tmp_path / "grid.npz"), template_list_file=str(lib_dir / "Tlist"), template_dir=str(lib_dir),
+    )
+
+    xg = np.linspace(8400.0, 8750.0, 300)
+    T_file, T_err_file, outside_each_file, outside_all_file = build_template_matrix_fortran(xg, paths)
+    T_npz, T_err_npz, outside_each_npz, outside_all_npz = build_template_matrix_from_npz(xg, npz_path)
+
+    np.testing.assert_allclose(T_npz, T_file, rtol=1e-2, atol=1e-3)
+    np.testing.assert_array_equal(outside_each_npz, outside_each_file)
+    np.testing.assert_array_equal(outside_all_npz, outside_all_file)
+
+
+def test_fitconfig_template_npz_file_and_select_default_to_none():
+    cfg = FitConfig()
+    assert cfg.template_npz_file is None
+    assert cfg.template_npz_select is None
+
+
+def test_make_fit_state_with_template_npz_file_end_to_end(tmp_path):
+    """A real make_fit_state() call using template_npz_file= (instead of
+    template_list_file/template_dir) should closely reproduce the template
+    matrix from the file-based path, on the bundled real MUSE spectrum --
+    see test_build_template_matrix_from_npz_matches_file_based's docstring
+    for why this is not bit-exact for a real, phase-heterogeneous library."""
+    if not MUSE_DIR.exists():
+        pytest.skip("bundled MUSE example data not found")
+    from kinextract.spectrum import make_fit_state
+
+    spec_file = MUSE_DIR / "bin0105sp.spec"
+    data = np.loadtxt(spec_file)
+    ferr = data[:, 1] / 50.0
+
+    npz_path = pack_templates_to_npz(
+        str(tmp_path / "grid.npz"),
+        template_list_file=str(MUSE_DIR / "Tlist"), template_dir=str(MUSE_DIR),
+    )
+
+    base_kwargs = dict(
+        wavemin_full=4750.0, step=1.25,
+        wavefitmin=8400.0, wavefitmax=8750.0,
+        zgal=0.001556,
+        losvd_vmin=-300.0, losvd_vmax=300.0,
+        fit_continuum=False,
+        use_spectrum_errors=False,
+        sigl=100.0, clean=False,
+    )
+    cfg_file = FitConfig(template_list_file=str(MUSE_DIR / "Tlist"), template_dir=str(MUSE_DIR), **base_kwargs)
+    cfg_npz = FitConfig(template_npz_file=str(npz_path), **base_kwargs)
+
+    st_file, _ = make_fit_state(cfg_file, gal_file=str(spec_file), gal_errors=ferr)
+    st_npz, _ = make_fit_state(cfg_npz, gal_file=str(spec_file), gal_errors=ferr)
+
+    np.testing.assert_allclose(st_npz.t, st_file.t, rtol=1e-2, atol=1e-3)

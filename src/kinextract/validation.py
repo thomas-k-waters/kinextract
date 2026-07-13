@@ -166,9 +166,8 @@ def assess_recovery_bias(
                 st.g = g_mock
                 st.gerr = base_gerr.copy()
                 st.ntot = 0
-                # Zero-centered regardless of st_ref.v_center: a dedicated
-                # validation sweep found data-driven recentering (now the
-                # default for a real single fit via
+                # Zero-centered regardless of st_ref.v_center: data-driven
+                # recentering (the default for a real single fit via
                 # kinextract.fitting._fit_map_sigl0_recenter) introduces
                 # *worse* bias than a fixed zero point across this grid --
                 # see test_assess_recovery_bias_uses_zero_centered_map_objective.
