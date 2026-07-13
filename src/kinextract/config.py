@@ -89,7 +89,7 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
 
     # ── Auto smoothing (xlam) selection ──────────────────────────────────
     "xlam_auto": ("Auto xlam selection", "If True, grid-search xlam_auto_grid and pick the best value per xlam_criterion, instead of using the fixed xlam."),
-    "xlam_auto_grid": ("Auto xlam selection", "Candidate xlam values searched when xlam_auto=True. Only the min/max are used as the discrepancy search's initial bracket (expanded automatically if needed). Default spans 100-1e7 -- wide enough for the default 89-bin LOSVD grid to find its (much larger) natural regularization strength without needing bracket expansion; see n_losvd_bins."),
+    "xlam_auto_grid": ("Auto xlam selection", "Candidate xlam values searched when xlam_auto=True. Only the min/max are used as the discrepancy search's initial bracket (expanded automatically if needed). Default spans 100-1e7 -- wide enough to cover both the default 29-bin LOSVD grid and the finer n_losvd_bins=89 option, which needs a proportionally larger regularization strength for the same effective smoothness; see n_losvd_bins."),
     "xlam_criterion": ("Auto xlam selection", "'discrepancy' (default: Cappellari/pPXF-style 1-D search targeting a known chi2 rise, robust to a flat chi2(xlam) curve), 'chi2' (legacy, scale-invariant grid+tolerance), or 'roughness' (legacy) selection rule; see class docstring."),
     "xlam_chi2_tolerance": ("Auto xlam selection", "Max fractional chi2_red increase over the grid minimum still considered acceptable (xlam_criterion='chi2')."),
     "xlam_smooth_threshold": ("Auto xlam selection", "Roughness threshold for xlam selection (xlam_criterion='roughness' only)."),
@@ -102,7 +102,7 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
 
     "losvd_vmin": ("Kinematic grid", "Lower bound (km/s) of the non-parametric LOSVD velocity grid."),
     "losvd_vmax": ("Kinematic grid", "Upper bound (km/s) of the non-parametric LOSVD velocity grid."),
-    "n_losvd_bins": ("Kinematic grid", "Number of bins in the non-parametric LOSVD histogram. Default 89 (the legacy Fortran pipeline uses 29). A coarser grid systematically overestimates sigma and overshoots the recovered LOSVD's peak height at fixed losvd_vmin/vmax, since bin width becomes a large fraction of sigma; 89 bins collapses both biases. Pairs with xlam_auto_grid's wider upper bound, since a finer LOSVD grid needs a proportionally larger regularization strength. Set to 29 to match the legacy Fortran pipeline's bin count exactly (e.g. for cross-validation against it)."),
+    "n_losvd_bins": ("Kinematic grid", "Number of bins in the non-parametric LOSVD histogram. Default 29, matching the legacy Fortran pipeline's bin count. A coarser grid systematically overestimates sigma and overshoots the recovered LOSVD's peak height at fixed losvd_vmin/vmax, since bin width becomes a large fraction of sigma; a finer grid (e.g. n_losvd_bins=89) collapses both biases on synthetic/E-MILES test data, but was found to perform worse than the default on real MUSE data for this package's own validation targets, so it is not the default. Pairs with xlam_auto_grid's upper bound, since a finer LOSVD grid needs a proportionally larger regularization strength -- recalibrate xlam_auto_grid/xlam if you change this."),
 
     # ── Continuum mode ───────────────────────────────────────────────────
     "fit_continuum": ("Continuum mode", "False: input is already continuum-normalised. True: co-fit a P-spline continuum baseline with the LOSVD (see kinextract.joint)."),
@@ -150,7 +150,7 @@ _FIELD_HELP: dict[str, tuple[str, str]] = {
     # ── Optimizer settings ────────────────────────────────────────────────
     "map_maxiter": ("Optimizer", "Max L-BFGS-B iterations for the MAP fit."),
     "map_maxfun": ("Optimizer", "Max objective-function evaluations for the MAP fit."),
-    "map_ftol": ("Optimizer", "L-BFGS-B relative function-value convergence tolerance. At stricter values, fits landing on a large xlam (as the default 89-bin LOSVD grid often needs) can spuriously report success=False: floating-point noise in the objective at that scale prevents the relative-reduction check from cleanly triggering, even though the recovered V/sigma are correct. The default balances robust convergence reporting against precision."),
+    "map_ftol": ("Optimizer", "L-BFGS-B relative function-value convergence tolerance. At stricter values, fits landing on a large xlam (as a finer LOSVD grid, e.g. n_losvd_bins=89, often needs) can spuriously report success=False: floating-point noise in the objective at that scale prevents the relative-reduction check from cleanly triggering, even though the recovered V/sigma are correct. The default balances robust convergence reporting against precision."),
     "map_gtol": ("Optimizer", "L-BFGS-B gradient-norm convergence tolerance. See map_ftol for the validation behind the default."),
     "map_maxls": ("Optimizer", "Max line-search steps per L-BFGS-B iteration."),
     "use_scaled_optimizer": ("Optimizer", "Rescale parameters to comparable magnitudes before optimizing, improving L-BFGS-B conditioning."),
@@ -434,9 +434,9 @@ class FitConfig:
     Known limitations: joint-mode (``cfg.fit_continuum=True``) velocity bias
     ---------------------------------------------------------------------
     Validated with a synthetic E-MILES sweep (2-SSP and broad, ~20-SSP
-    mixtures; ``n_losvd_bins=89`` -- the current default, see that field's
-    own docstring for its recalibration history -- a 1000A fit window;
-    sigma=30-350 km/s, 3-5 seeds per condition):
+    mixtures; ``n_losvd_bins=89`` -- not the default, see that field's
+    own docstring -- with a 1000A fit window; sigma=30-350 km/s, 3-5 seeds
+    per condition):
 
     - Sigma recovery is good across the full tested range (roughly
       +-1-3 km/s bias for sigma <= 200 km/s, growing to a still-modest
@@ -514,11 +514,11 @@ class FitConfig:
     # Bootstrap workers always set xlam_auto=False (via _make_frozen_cfg)
     # so the search runs only once per spectrum.
     xlam_auto: bool = False
-    # Upper bound spans 100-1e7: wide enough for the default 89-bin LOSVD
-    # grid to find its natural regularization strength directly, without
-    # relying on the discrepancy search's bracket-expansion fallback (a
-    # finer LOSVD grid needs proportionally more regularization for the
-    # same effective smoothness).
+    # Upper bound spans 100-1e7: wide enough for both the default 29-bin
+    # LOSVD grid and the finer n_losvd_bins=89 option to find their natural
+    # regularization strength directly, without relying on the discrepancy
+    # search's bracket-expansion fallback (a finer LOSVD grid needs
+    # proportionally more regularization for the same effective smoothness).
     xlam_auto_grid: tuple = (100., 1000., 10000., 100000., 1_000_000., 10_000_000.)
 
     # How to select xlam from the grid:
@@ -612,14 +612,15 @@ class FitConfig:
     losvd_vmin: Optional[float] = None
     losvd_vmax: Optional[float] = None
 
-    # Number of non-parametric LOSVD bins. The legacy Fortran pipeline uses
-    # 29; a coarser grid like that systematically overestimates sigma and
-    # overshoots the LOSVD peak height at fixed losvd_vmin/vmax, since bin
-    # width becomes a large fraction of sigma. 89 bins collapses that bias
-    # (validated across a sigma=30-350 sweep and the package's own
-    # regression-guardrail tests, tests/test_regression_convergence.py),
-    # paired with xlam_auto_grid's wider upper bound above since a finer
-    # LOSVD grid needs proportionally more regularization.
+    # Number of non-parametric LOSVD bins. Default 29, matching the legacy
+    # Fortran pipeline's bin count -- a coarser grid like this systematically
+    # overestimates sigma and overshoots the LOSVD peak height at fixed
+    # losvd_vmin/vmax, since bin width becomes a large fraction of sigma.
+    # A finer grid (e.g. 89 bins) collapses that bias on synthetic/E-MILES
+    # test data, but performed worse than this default on real MUSE data,
+    # so it is not the default; pairs with xlam_auto_grid's upper bound if
+    # you do switch, since a finer LOSVD grid needs proportionally more
+    # regularization.
     n_losvd_bins: int = 29
 
     # ── Continuum mode ──────────────────────────────────────────────────────
