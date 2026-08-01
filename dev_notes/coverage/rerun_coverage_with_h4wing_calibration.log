@@ -1,0 +1,9 @@
+h4wing calibration h4_bias range: -0.1055 to -0.013499999999999984
+[snr=   40][              shipped (h4=0)] n= 30  sig_cov68= 53.3%  h4_cov68=  0.0%  h4_bias_mean=-0.1366
+[snr=   40][ h4wing (h4=0.15, corrected)] n= 30  sig_cov68=100.0%  h4_cov68= 96.7%  h4_bias_mean=-0.0048
+[snr=  100][              shipped (h4=0)] n= 30  sig_cov68= 63.3%  h4_cov68=  3.3%  h4_bias_mean=-0.1202
+[snr=  100][ h4wing (h4=0.15, corrected)] n= 30  sig_cov68=100.0%  h4_cov68= 96.7%  h4_bias_mean=-0.0119
+
+reference from the original overnight sweep (shipped h4=0 calibration):
+  snr=40:  sig_cov68=53.3%  h4_cov68=0.0%
+  snr=100: sig_cov68=63.3%  h4_cov68=3.3%

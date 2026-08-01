@@ -1,0 +1,756 @@
+<title>kinextract_lite — current state</title>
+<style>
+  :root {
+    --bg: #eef1f5;
+    --panel: #ffffff;
+    --ink: #161a24;
+    --muted: #4a5568;
+    --faint: #8a94a3;
+    --rule: #d4dae2;
+    --blue: #1b5f8c;
+    --blue-soft: #e4eef5;
+    --coral: #c34a34;
+    --coral-soft: #fbe9e5;
+    --amber: #9a6a14;
+    --amber-soft: #f7edd9;
+    --code-bg: #f4f6f9;
+    --code-ink: #1b2430;
+    --accent-bar: #1b5f8c;
+    --shadow: 0 1px 3px rgba(20,30,45,0.07), 0 8px 24px rgba(20,30,45,0.05);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0e14;
+    --panel: #121722;
+    --ink: #e4e8ef;
+    --muted: #a6b0c0;
+    --faint: #626d80;
+    --rule: #232c3a;
+    --blue: #6fb3e0;
+    --blue-soft: #16232f;
+    --coral: #e58469;
+    --coral-soft: #2a1a17;
+    --amber: #e0b45c;
+    --amber-soft: #2b2312;
+    --code-bg: #0d121b;
+    --code-ink: #cfd8e6;
+    --accent-bar: #6fb3e0;
+    --shadow: 0 1px 3px rgba(0,0,0,0.35), 0 12px 32px rgba(0,0,0,0.35);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0b0e14;
+      --panel: #121722;
+      --ink: #e4e8ef;
+      --muted: #a6b0c0;
+      --faint: #626d80;
+      --rule: #232c3a;
+      --blue: #6fb3e0;
+      --blue-soft: #16232f;
+      --coral: #e58469;
+      --coral-soft: #2a1a17;
+      --amber: #e0b45c;
+      --amber-soft: #2b2312;
+      --code-bg: #0d121b;
+      --code-ink: #cfd8e6;
+      --accent-bar: #6fb3e0;
+      --shadow: 0 1px 3px rgba(0,0,0,0.35), 0 12px 32px rgba(0,0,0,0.35);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: ui-sans-serif, "Segoe UI", -apple-system, "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.65;
+  }
+  h1, h2, h3, .display {
+    font-family: ui-serif, "Iowan Old Style", Palatino, "Palatino Linotype", Georgia, serif;
+    color: var(--ink);
+    text-wrap: balance;
+    font-weight: 600;
+  }
+  code, .eq, .mono {
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  }
+
+  .page {
+    display: grid;
+    grid-template-columns: 270px minmax(0, 1fr);
+    gap: 0;
+    max-width: 1280px;
+    margin: 0 auto;
+  }
+  nav.toc {
+    position: sticky;
+    top: 0;
+    align-self: start;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 2.2rem 1.4rem 2rem 1.6rem;
+    border-right: 1px solid var(--rule);
+  }
+  nav.toc .brand {
+    font-family: ui-serif, Georgia, serif;
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: 0.01em;
+    margin-bottom: 0.3rem;
+  }
+  nav.toc .brand .dot { color: var(--blue); }
+  nav.toc .sub {
+    font-size: 0.78rem;
+    color: var(--faint);
+    margin-bottom: 1.6rem;
+  }
+  nav.toc a {
+    display: block;
+    font-size: 0.86rem;
+    color: var(--muted);
+    text-decoration: none;
+    padding: 0.32rem 0;
+    border-left: 2px solid transparent;
+    padding-left: 0.7rem;
+    margin-left: -0.72rem;
+  }
+  nav.toc a:hover { color: var(--blue); border-left-color: var(--rule); }
+  nav.toc .grp { margin-top: 1.1rem; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--faint); }
+
+  main { padding: 2.6rem 3.2rem 6rem 3.2rem; min-width: 0; }
+  .kicker {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--blue);
+    font-weight: 600;
+    margin-bottom: 0.6rem;
+  }
+  h1.title { font-size: 2.4rem; margin: 0 0 0.6rem 0; line-height: 1.15; }
+  .lede { font-size: 1.12rem; color: var(--muted); max-width: 62ch; margin-bottom: 1.4rem; }
+  .lede a { color: var(--blue); }
+
+  section { margin-bottom: 3.6rem; scroll-margin-top: 1.5rem; }
+  section h2 {
+    font-size: 1.5rem;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 0.6rem;
+    margin-bottom: 1.3rem;
+    margin-top: 0;
+  }
+  section h2 .num { color: var(--faint); font-weight: 400; margin-right: 0.5rem; }
+  h3 { font-size: 1.12rem; margin: 1.8rem 0 0.7rem 0; }
+  p { max-width: 74ch; color: var(--ink); }
+  p.tight { max-width: none; }
+  .muted { color: var(--muted); }
+
+  .status {
+    display: inline-block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.15rem 0.55rem;
+    border-radius: 3px;
+    margin-left: 0.5rem;
+    vertical-align: middle;
+  }
+  .status.done { background: var(--blue-soft); color: var(--blue); }
+  .status.open { background: var(--coral-soft); color: var(--coral); }
+  .status.progress { background: var(--amber-soft); color: var(--amber); }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    padding: 1.4rem 1.6rem;
+    margin: 1.2rem 0;
+    max-width: 74ch;
+  }
+  .card.wide { max-width: none; }
+
+  .eqblock {
+    background: var(--code-bg);
+    color: var(--code-ink);
+    border-left: 3px solid var(--accent-bar);
+    border-radius: 0 6px 6px 0;
+    padding: 1rem 1.3rem;
+    margin: 1rem 0;
+    font-size: 0.95rem;
+    overflow-x: auto;
+    max-width: 74ch;
+  }
+  .eqblock .eq { display: block; margin: 0.15rem 0; }
+  .varlist { margin: 0.6rem 0 0 0; padding: 0; list-style: none; max-width: 74ch; }
+  .varlist li { font-size: 0.9rem; color: var(--muted); padding: 0.18rem 0; }
+  .varlist code { color: var(--blue); font-weight: 600; }
+
+  .figure {
+    margin: 1.6rem 0;
+    max-width: none;
+  }
+  .figure img {
+    max-width: 100%;
+    border-radius: 8px;
+    box-shadow: var(--shadow);
+    display: block;
+    background: white;
+  }
+  .figure figcaption {
+    font-size: 0.86rem;
+    color: var(--muted);
+    margin-top: 0.7rem;
+    max-width: 78ch;
+  }
+
+  table.spec {
+    border-collapse: collapse;
+    width: 100%;
+    max-width: 78ch;
+    font-size: 0.88rem;
+    margin: 1rem 0;
+  }
+  table.spec th, table.spec td {
+    text-align: left;
+    padding: 0.45rem 0.8rem;
+    border-bottom: 1px solid var(--rule);
+  }
+  table.spec th { color: var(--faint); font-weight: 600; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  table.spec td.num { font-variant-numeric: tabular-nums; font-family: ui-monospace, monospace; font-size: 0.86rem; }
+  .overflow-x { overflow-x: auto; }
+
+  .callout {
+    border-left: 3px solid var(--coral);
+    background: var(--coral-soft);
+    border-radius: 0 6px 6px 0;
+    padding: 1rem 1.3rem;
+    margin: 1.2rem 0;
+    max-width: 74ch;
+    font-size: 0.95rem;
+  }
+  .callout.blue { border-left-color: var(--blue); background: var(--blue-soft); }
+  .callout.amber { border-left-color: var(--amber); background: var(--amber-soft); }
+  .callout strong.lbl { display: block; font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--faint); margin-bottom: 0.4rem; }
+
+  .pillrow { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0.8rem 0 1.4rem 0; }
+  .pill {
+    font-size: 0.78rem;
+    padding: 0.28rem 0.7rem;
+    border-radius: 999px;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    color: var(--muted);
+  }
+
+  footer {
+    max-width: 74ch;
+    color: var(--faint);
+    font-size: 0.82rem;
+    border-top: 1px solid var(--rule);
+    padding-top: 1.4rem;
+    margin-top: 3rem;
+  }
+
+  @media (max-width: 900px) {
+    .page { grid-template-columns: 1fr; }
+    nav.toc { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--rule); }
+    main { padding: 2rem 1.4rem 4rem 1.4rem; }
+  }
+</style>
+
+<div class="page">
+  <nav class="toc">
+    <div class="brand"><span class="dot">●</span> kinextract_lite</div>
+    <div class="sub">state of the package — 2026-07-23</div>
+
+    <div class="grp">Method</div>
+    <a href="#motivation">Why not Gauss-Hermite</a>
+    <a href="#representation">LOSVD representation</a>
+    <a href="#noise">Noise model &amp; whitening</a>
+    <a href="#objective">The fitting objective</a>
+    <a href="#multistart">Multi-start</a>
+    <a href="#multitemplate">Multi-template fitting</a>
+    <a href="#continuum">Continuum co-fitting</a>
+    <a href="#regularization">Fixed vs. adaptive regularization</a>
+    <a href="#moments">Summarizing as moments</a>
+    <a href="#uncertainty">Uncertainty (bootstrap)</a>
+
+    <div class="grp">Bias &amp; calibration</div>
+    <a href="#bias">Regularization bias</a>
+    <a href="#calibration">Calibration methodology</a>
+    <a href="#ablation">Ablation ladder</a>
+    <a href="#coupling">The calibration/adaptive-λ coupling</a>
+
+    <div class="grp">Explored and set aside</div>
+    <a href="#emiles">E-MILES templates</a>
+    <a href="#varpro">Variable projection (VARPRO)</a>
+    <a href="#logwave">Log-wavelength</a>
+
+    <div class="grp">Where things stand</div>
+    <a href="#limitations">Known limitations</a>
+    <a href="#next">What's next</a>
+  </nav>
+
+  <main>
+    <div class="kicker">internal reference · non-parametric LOSVD recovery</div>
+    <h1 class="title">kinextract_lite: what it does, and why it's built this way</h1>
+    <p class="lede">A from-scratch line-of-sight velocity distribution (LOSVD) extractor for galaxy
+    spectroscopy, built for black-hole-mass work via stellar dynamics. This page walks through every
+    live mechanism in the package, why each one exists, and where the ongoing validation work
+    currently stands — including the negative results, not just the wins. For the precise mathematical
+    form (the forward model equation, the objective, the noise model), see the companion
+    <a href="model_reference.html">Forward Model
+    Reference</a>; this page is about the software and the methodology story around it.</p>
+
+    <div class="callout">
+      <div class="callout-label">2026-07-30 staleness notice (updated, not yet rewritten)</div>
+      <p>This page predates <code>VALIDATION_CAMPAIGN.md</code> Stages 22&ndash;27 and everything since:
+      the <code>penalty_order=3</code> default, the spline-truth mock default (<code>build_spline_truth</code>),
+      the reflected dartboard binning scheme, and, from the most recent session (2026-07-30):</p>
+      <ul>
+        <li>The bias-calibration table redesign, <strong><code>PerLamCalibration</code></strong> &mdash;
+        replacing the old single-table <code>m_eff</code>-axis 3-D interpolation (root cause of a real
+        query-time bug: <code>m_eff</code> depends on both <code>lam</code> and local regime, so
+        unrelated points could interpolate together). The new design queries one dense 2-D
+        <code>(sigma, S/N)</code> table per canonical <code>lam</code>, via nearest-two-<code>lam</code>
+        log-linear interpolation. <code>apply_bias_correction</code> still defaults to <code>False</code>
+        &mdash; sigma coverage now passes the 4-gate acceptance test (67%&rarr;83%), h4 coverage still
+        fails (~3%, essentially unchanged) for a now well-understood reason: h4's point estimate is
+        severely shrunk under regularization and the bootstrap SE never widens to reflect that. See
+        <code>dev_notes/uncertainty/FINDINGS.md</code>.</li>
+        <li>Two speed fixes: warm-starting the adaptive-lam scan across grid points
+        (<code>warm_start_lam_grid</code>) and <code>fit_losvd_parallel</code> for multi-bin fits
+        (100-bin benchmark: ~6.0&nbsp;min &rarr; ~1.1&nbsp;min); and a real bug,
+        <code>losvd_single_start</code> silently disabling iteration-to-iteration warm-start (making it
+        3-5x <em>slower</em> than multi-start, not faster) &mdash; found and fixed. See
+        <code>dev_notes/speed/RESULTS.md</code>.</li>
+        <li>A continuum-cofitting multi-seed validation sweep: <code>penalty_order=3</code> with a fixed
+        lam in 4096-32768 beats the previously-only-validated <code>penalty_order=2</code>/<code>lam=2.0</code>
+        combination. Adaptive lam selection still doesn't support continuum-cofitting. See
+        <code>dev_notes/continuum/FINDINGS.md</code>.</li>
+        <li>Pre-fit emission-line detection (<code>detect_emission_lines</code>, excess-S/N over the local
+        continuum against a curated line list) and post-fit residual-peak detection
+        (<code>detect_emission_from_residual</code>, Gaussian-characterized, pPXF-style fit-then-clean),
+        both in <code>cleaning.py</code> &mdash; neither described below at all.</li>
+        <li>ZAP (Zurich Atmosphere Purge) sky-residual cleaning was investigated as a cube-level
+        preprocessing step and found to visibly corrupt real spectral structure on this project's own
+        NGC 5102 cube, independent of eigenvector count &mdash; not adopted; see
+        <code>dev_notes/HISTORY.md</code>'s "Real-data behavior" section.</li>
+      </ul>
+      <p>Treat <code>VALIDATION_CAMPAIGN.md</code>, <code>dev_notes/HISTORY.md</code> (a topic-indexed map
+      of every dev_notes investigation), and the package source's own docstrings as current. This
+      narrative's full rewrite is deliberately deferred to the Phase 6 rename
+      (<code>kinextract_lite</code>&rarr;<code>kinextract</code>) rather than done twice &mdash; every
+      reference on this page to the current package name, and much of the specific numeric detail, would
+      need touching again at that point regardless.</p>
+    </div>
+
+    <section id="motivation">
+      <h2><span class="num">01</span>Why not just fit a Gauss-Hermite expansion?</h2>
+      <p>The standard shortcut in this field is to skip the LOSVD entirely and fit four numbers
+      instead — <code>V</code>, <code>σ</code>, <code>h3</code>, <code>h4</code> — via a truncated
+      Gauss-Hermite series. It's fast, well-understood, and every downstream Schwarzschild/orbit-superposition
+      code speaks that language. It is also a <em>fixed-shape</em> model: at most a Gaussian core plus one
+      antisymmetric and one symmetric correction term. Real LOSVDs routinely have more structure than that —
+      a rotating disk component sitting at its own velocity, a pressure-supported body, and an extended
+      high-velocity wing from orbital anisotropy are all superposed in the same spectrum.</p>
+      <p>This is the entire reason <code>kinextract_lite</code> fits the LOSVD itself as a free-form curve
+      rather than a 4-parameter shape. The parametric route isn't wrong so much as it silently assumes the
+      truth already looks like a Gaussian-with-corrections — an assumption real galaxies routinely break
+      (disks, counter-rotating cores, radial orbital anisotropy in the outskirts, tidal debris). A
+      non-parametric fit can represent multi-component structure without going negative, <em>if</em> it's
+      built to be structurally incapable of going negative in the first place — the very next section.</p>
+    </section>
+
+    <section id="representation">
+      <h2><span class="num">02</span>LOSVD representation: a structurally-positive log-spline</h2>
+      <p>The LOSVD <code>b(v)</code> is represented as a cubic B-spline <em>in log-space</em>:</p>
+      <div class="eqblock">
+        <span class="eq">b(v) = exp( Σ<sub>j</sub> c<sub>j</sub> · B<sub>j</sub>(v) )</span>
+      </div>
+      <ul class="varlist">
+        <li><code>B_j(v)</code> — the j-th cubic B-spline basis function on the velocity grid</li>
+        <li><code>c_j</code> — the fitted spline coefficients (what the optimizer actually solves for)</li>
+        <li><code>v</code> — line-of-sight velocity, on a grid spanning roughly <code>V ± 7σ</code></li>
+      </ul>
+      <div class="card">
+        <p class="tight"><strong>Positivity is structural, not enforced.</strong> There is no boundary at
+        <code>b = 0</code> for the optimizer to run into, and no post-hoc clipping step that would silently
+        make the reported curve the answer to a slightly different problem than the one actually solved.
+        The continuum spline (§7) and the LSF-matching step both reuse this same exp-link idea.</p>
+      </div>
+      <p>The number of spline knots scales with how wide the velocity grid is (<code>knot_spacing_kms</code>,
+      default ~95 km/s/knot) rather than being fixed — a fixed knot count too coarse for the grid width was
+      measured to produce 47-58% shape residual; the auto-scaled default keeps this comfortably under 5%.</p>
+    </section>
+
+    <section id="noise">
+      <h2><span class="num">03</span>Noise model &amp; whitening <span class="status done">built this session</span></h2>
+      <p>Every fit in this package works on <em>whitened</em> data — the design matrix and observed flux
+      divided by the noise model, so an ordinary sum-of-squares becomes the statistically correct
+      weighted chi-squared. Until this session, the noise model was implicitly "every pixel is independent"
+      (plain division by the per-pixel error). Two independent diagnostics on real MUSE star spectra found
+      that's measurably wrong: genuine lag-1 pixel-to-pixel noise correlation of roughly 0.1-0.5, which
+      survives even after continuum-detrending removes the (much larger) apparent correlation caused by
+      unmodeled template mismatch.</p>
+      <p>A new module (<code>noise_model.py</code>) makes the covariance explicit and pluggable — a
+      stationary AR(1) model, <code>Σ_ij = err_i·err_j·ρ^|i−j|</code> — with proper GLS whitening
+      (<code>A_w = L⁻¹A</code>, <code>y_w = L⁻¹y</code> via the Cholesky factor <code>Σ = LLᵀ</code>).
+      Critically, <code>ρ = 0</code> reproduces the old plain-division convention <strong>bit-for-bit</strong>
+      (verified directly), and no changes were needed anywhere in the actual fitting engines — they only
+      ever consumed whitened inputs, so the whole upgrade lives in how those inputs get built.</p>
+      <div class="callout blue">
+        <strong class="lbl">calibrated, not yet defaulted</strong>
+        Measured <code>ρ ≈ 0.09–0.49</code> across real stars (mean ≈ 0.21, median ≈ 0.13) — real,
+        star-to-star scatter, not measurement noise. Recommended as an informed starting point for real-data
+        work; the package default stays <code>ρ = 0.0</code> until there's a principled per-target estimation
+        procedure, not silently changed underneath existing users.
+      </div>
+    </section>
+
+    <section id="objective">
+      <h2><span class="num">04</span>The fitting objective: penalized likelihood</h2>
+      <p>Coefficients are found by minimizing whitened data chi-squared plus a curvature penalty (a P-spline,
+      Eilers &amp; Marx 1996) — this whole family of methods (Saha &amp; Williams 1994 → Gebhardt et al. 2000b
+      → Pinkney et al. 2003) is usually called <strong>Maximum Penalized Likelihood (MPL)</strong>:</p>
+      <div class="eqblock">
+        <span class="eq">minimize<sub>c</sub>  ½‖A<sub>w</sub>·b − y<sub>w</sub>‖² + ½·λ·‖D₂·c‖²</span>
+      </div>
+      <ul class="varlist">
+        <li><code>A_w</code> — whitened design matrix: each column a stellar template Doppler-shifted to one velocity-grid point, whitened per §3</li>
+        <li><code>y_w</code> — whitened observed flux</li>
+        <li><code>D₂</code> — a second-difference operator on the spline coefficients (penalizes curvature, not raw amplitude), scaled by real velocity spacing so a given <code>λ</code> means the same thing on any grid width</li>
+        <li><code>λ</code> ("<code>lam</code>") — regularization strength; default <code>2.0</code>, fixed by default, adaptive alternative now validated (§8)</li>
+      </ul>
+      <p>Optimization is exact-gradient L-BFGS-B (JAX autodiff through the <code>exp</code> link) — deterministic
+      given a starting point, which is exactly why the starting point needs care (next section).</p>
+    </section>
+
+    <section id="multistart">
+      <h2><span class="num">05</span>Multi-start: the landscape isn't convex</h2>
+      <p>Because <code>b = exp(spline)</code> is a nonlinear reparameterization, the objective in coefficient
+      space is not convex. A single starting point — even a good, data-driven one — lands in a real,
+      meaningfully-suboptimal local minimum in roughly <strong>1 in 150</strong> noisy fits, with no other
+      visible warning sign (reported <code>success=True</code>, no error). The default pool of three starts
+      (a closed-form ridge estimate of <code>b</code>, plus two flat starts at different scales) catches this
+      at the cost of a few hundred extra milliseconds per fit — cheap relative to a silently wrong LOSVD.</p>
+    </section>
+
+    <section id="multitemplate">
+      <h2><span class="num">06</span>Multi-template fitting: one engine, any template count</h2>
+      <p>Real spectra are a mixture of stellar populations, not one template. Rather than a separate code
+      path for "one template" vs. "many," there is a single alternating-minimization engine parameterized by
+      a template stack of shape <code>(n_templates, n_pixels, n_velocity_bins)</code> — <code>n_templates=1</code>
+      is just the one-column case of the same problem.</p>
+      <div class="eqblock">
+        <span class="eq">A_eff(w) = Σ<sub>k</sub> w<sub>k</sub> · A_stack[k]</span>
+      </div>
+      <p>Each iteration: fix the mixture weights <code>w</code> and solve for <code>b</code> (§4-5 above,
+      against <code>A_eff(w)</code>); then fix <code>b</code> and solve for <code>w</code> via non-negative
+      least squares (NNLS — convex, exact, no local-minimum risk on this half of the problem). Repeat until
+      the joint objective stops improving.</p>
+      <div class="callout blue">
+        <strong class="lbl">non-identifiability to know about</strong>
+        The model is invariant under <code>(w, b) → (c·w, b/c)</code> for any <code>c &gt; 0</code> — the
+        <em>absolute</em> scale of <code>w</code>/<code>b</code> the fit lands on is arbitrary. Always read off
+        mixture fractions as <code>w / w.sum()</code>, never raw <code>w</code>.
+      </div>
+    </section>
+
+    <section id="continuum">
+      <h2><span class="num">07</span>Continuum co-fitting <span class="status done">promoted to standard this session</span></h2>
+      <p>Real templates never match a real galaxy's continuum shape perfectly (flux calibration, dust,
+      population differences). Left uncorrected, that broadband mismatch has nowhere to go except the LOSVD
+      itself — it gets misattributed as kinematic structure rather than showing up as residual. A shared,
+      structurally-positive multiplicative continuum (same <code>exp(spline)</code> idea as §2, over
+      wavelength instead of velocity) is now co-fit as a <strong>third alternating block</strong>: fix
+      <code>(b, w)</code>, solve the continuum; fix <code>(b, C)</code>, solve <code>w</code>; fix
+      <code>(w, C)</code>, solve <code>b</code>. This was previously a separate, parallel-maintained code
+      path, on hold pending the noise-model work above; this session merged it into the same alternation
+      driver as the plain 2-block fit (<code>continuum_knots=None</code> reproduces the old behavior exactly)
+      and promoted it to a standard, opt-in <code>FitConfig</code> field.</p>
+      <div class="callout amber">
+        <strong class="lbl">a flag that looks scarier than it is</strong>
+        The continuum sub-fit's own optimizer frequently reports <code>success=False</code> ("ABNORMAL"
+        L-BFGS-B termination). An earlier hypothesis blamed the LOSVD sub-fit misbehaving inside the
+        continuum-alternation context specifically — traced step-by-step this session and found <strong>wrong</strong>:
+        the LOSVD sub-fit succeeds in every iteration checked; the flag comes from the continuum block's own
+        optimizer. Further check: every multi-start candidate converges to the <em>same</em> objective value
+        regardless of the flag, and a direct 60+ fit bias comparison found no statistically significant
+        difference between flagged-success and flagged-failure fits (+21.45 vs. +20.78 km/s mean sigma-bias).
+        Conclusion: the flag is a scipy line-search technicality on an already-well-converged, low-dimensional
+        problem, not a real accuracy signal — fixed the reporting (a separate bug meant the wrong sub-block's
+        message was shown when this happened) and corrected the documentation, but did not build a workaround
+        for the flag itself, since it doesn't appear to indicate anything wrong.
+      </div>
+    </section>
+
+    <section id="regularization">
+      <h2><span class="num">08</span>Fixed vs. adaptive regularization <span class="status progress">evidence validated, promotion decision pending</span></h2>
+      <p>The fixed <code>λ = 2.0</code> default (§4) is not adaptive to signal-to-noise or velocity dispersion
+      — the ablation ladder (§10) found this is a real, sometimes-dominant bias source at low σ. This session
+      validated a data-driven alternative: <strong>generalized-AIC regularization selection</strong>
+      (Lipka &amp; Thomas 2021; Thomas &amp; Lipka 2022) — pick <code>λ</code> from a grid to minimize
+      <code>chi² + w_m·m_eff</code>, where <code>m_eff</code> is the fit's own effective degrees of freedom at
+      that <code>λ</code> (a bootstrap estimator, expensive; and a closed-form local approximation,
+      <code>select_lambda_aic_local</code>, cheap — no bootstrap refitting).</p>
+      <p>The closed-form version had never been tested against a mock with genuine non-Gaussian wings
+      (<code>h4=0.15</code>) before this session — only the expensive bootstrap version had. Closing that gap
+      was the concrete blocking requirement, and the result was positive:</p>
+      <table class="spec">
+        <thead><tr><th>true σ</th><th>fixed λ=2 (σ-bias)</th><th>adaptive (σ-bias)</th><th>fixed λ=2 (h4-bias)</th><th>adaptive (h4-bias)</th></tr></thead>
+        <tbody>
+          <tr><td class="num">50</td><td class="num">+29.7%</td><td class="num">+27.0%</td><td class="num">−0.096</td><td class="num">−0.089</td></tr>
+          <tr><td class="num">150</td><td class="num">+36.6%</td><td class="num">+27.4%</td><td class="num">+0.018</td><td class="num">−0.018</td></tr>
+          <tr><td class="num">300</td><td class="num">+40.5%</td><td class="num">+19.9%</td><td class="num">+0.019</td><td class="num">−0.010</td></tr>
+        </tbody>
+      </table>
+      <p>Adaptive regularization beats the fixed default on σ-bias at every tested σ, with the gap widening at
+      high σ — roughly halving the bias at σ=300. This is a genuine, meaningful result, not a marginal one,
+      given how central correct regularization is to the whole project.</p>
+      <div class="callout amber">
+        <strong class="lbl">firming up before committing <span class="status progress">running</span></strong>
+        This result is <code>n=6</code> replicates/cell — directionally strong, but this project has been
+        burned before by declaring something fixed on a small sample (see §11's methodology trap, and the
+        original wing-coverage catastrophe). A larger run (25 reps/cell, both <code>h4=0</code> and
+        <code>h4=0.15</code> truths) is in progress to confirm this generalizes before adaptive regularization
+        is promoted to default or shipped as a fully-supported option.
+      </div>
+    </section>
+
+    <section id="moments">
+      <h2><span class="num">09</span>Summarizing the recovered curve as (V, σ, h3, h4)</h2>
+      <p>The recovered <code>b(v)</code> curve is the real scientific product — but it still needs to be
+      reported as comparable numbers. <code>V</code>/<code>σ</code> come from a <strong>direct moment</strong>
+      of the recovered curve, not a second model fit:</p>
+      <div class="eqblock">
+        <span class="eq">V = Σ v·b(v)·τ(v)  /  Σ b(v)·τ(v)</span>
+        <span class="eq">σ = sqrt[ Σ (v−V)²·b(v)·τ(v)  /  Σ b(v)·τ(v) ]</span>
+      </div>
+      <p>where <code>τ(v)</code> is a <strong>smooth logistic taper</strong> that downweights the noise-dominated
+      far wings — a <em>hard</em> cutoff is measurably worse for skewed LOSVDs specifically (asymmetric about
+      the true center for any skewed density, biasing the windowed moment toward the heavy tail). Benchmarked
+      directly against a full parametric Gauss-Hermite fit across this package's validation grid, the tapered
+      direct moment wins on both V (std 2.5 vs. 8.7 km/s) and σ (std 2.9 vs. 7.4 km/s).</p>
+      <p><code>h3</code>/<code>h4</code> still come from a Gauss-Hermite fit — but with <code>V</code>/<code>σ</code>
+      held fixed at the values above rather than jointly optimized, which loses nothing relative to a full
+      5-parameter joint fit while removing any V/σ ↔ h3/h4 coupling from the estimate.</p>
+    </section>
+
+    <section id="uncertainty">
+      <h2><span class="num">10</span>Uncertainty: parametric bootstrap</h2>
+      <p>Fit once for the point estimate, then refit <code>n_boot</code> times against that same point
+      estimate's own best-fit model spectrum plus freshly simulated noise — every replicate goes through the
+      <em>entire</em> pipeline, multi-start included, so a replicate landing in a worse basin shows up as
+      genuine spread rather than being invisible to the uncertainty estimate. The full ensemble
+      (<code>b_boot</code>/<code>w_boot</code>, not just summary statistics) is the recommended product for
+      anything propagating uncertainty forward, e.g. into downstream orbit-superposition modeling.</p>
+      <p>The noise injected into each bootstrap replicate needed reconsidering once §3's covariance model
+      arrived. The resolution (confirmed by direct numerical test, not assumed): if the inputs are properly
+      pre-whitened against the <em>true</em> covariance, the whitened residuals are already i.i.d.
+      <code>N(0,1)</code> regardless of <code>ρ</code>'s value — GLS whitening removes correlation rather than
+      just rescaling it. So plain noise injection is already correct in the mainline case; an optional
+      <code>L</code> parameter exists only for deliberately testing an assumed-vs-true covariance
+      <em>mismatch</em>, which is the realistic case since <code>ρ</code> is always only an estimate.</p>
+    </section>
+
+    <section id="bias">
+      <h2><span class="num">11</span>Regularization bias, and the correction on top of it <span class="status done">correction shipped, negativity bug fixed</span></h2>
+      <p>The curvature penalty in §4 that keeps the LOSVD fit well-posed also biases it — a documented
+      property of the whole MPL lineage (Pinkney et al. 2003), not a bug. A synthetic-calibrated correction
+      (Pinkney's own prescription) is wired into <code>bootstrap_losvd</code>/<code>compute_losvd_moments</code>
+      by default, as new <code>_corrected</code>-suffixed fields — no existing key's meaning changes. It
+      corrects <code>σ</code> and <code>h4</code> only (<code>V</code> bias was found consistent with pure
+      noise; nonzero-truth <code>h3</code> bias has no calibration data yet).</p>
+      <div class="callout">
+        <strong class="lbl">a real bug, found by inspecting a sandbox notebook</strong>
+        The correction reconstructs a Gauss-Hermite curve from the corrected <code>(σ, h4)</code> for
+        reporting/comparison purposes. That reconstruction can go <strong>negative</strong> near the core
+        edges — a known property of truncated Gauss-Hermite curves at large <code>|h4|</code> in general, but
+        the correction's additive h4 shift can push a curve that would otherwise have stayed positive into
+        that regime. Found in three call sites (<code>correct_losvd</code>, <code>compute_losvd_moments</code>,
+        <code>bootstrap_losvd</code>) and fixed by clipping non-negative — matching the convention already
+        used everywhere else in the package a Gauss-Hermite curve is treated as a final density. Three
+        regression tests (using a deliberately extreme synthetic calibration to force the failure
+        deterministically) confirm the fix.
+      </div>
+      <div class="callout">
+        <strong class="lbl">a real methodology trap, worth remembering</strong>
+        The first two calibration attempts were checked against the legacy Fortran pipeline's own output
+        (<code>pallmc.out</code>) and looked like they were making things worse. They weren't — the legacy
+        pipeline carries its own real biases, so "agrees with legacy" was never a valid correctness test.
+        Switching to known synthetic truth as the scoreboard reversed the conclusion entirely. See §12.
+      </div>
+    </section>
+
+    <section id="calibration">
+      <h2><span class="num">12</span>Calibration methodology <span class="status done">validated against truth</span></h2>
+      <p>The shipped calibration is built from the real 32/33-template MUSE stellar library with one fixed,
+      representative population mixture, swept across sigma (20-400 km/s) and S/N (10-200) with known truth.
+      Validated against fresh synthetic test cases — not against legacy — it reduces median sigma error
+      <strong>3-10x</strong> across the sigma/S-N range real MUSE data actually spans.</p>
+      <table class="spec">
+        <thead><tr><th>calibration attempt</th><th>validated against</th><th>outcome</th></tr></thead>
+        <tbody>
+          <tr><td>idealized, single template</td><td>legacy pipeline</td><td class="num">worse in ~90% of 100 real bins — rejected</td></tr>
+          <tr><td>real templates, mixture resampled every calibration replicate</td><td>known truth</td><td class="num">88% of cells improved — rejected in favor of the fixed-mixture table below</td></tr>
+          <tr><td><strong>real templates, one fixed mixture (shipped)</strong></td><td>known truth</td><td class="num"><strong>98% of cells improved, median error 4.8 ← down from 14.1 km/s</strong></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="ablation">
+      <h2><span class="num">13</span>The ablation ladder <span class="status done">closed the regularization action item</span></h2>
+      <p>A reusable, extensible framework (<code>AblationConfig</code> + <code>run_ablation_sweep</code>) for
+      quantifying exactly how much bias each individual mechanism contributes, in isolation, on identical
+      synthetic data.</p>
+      <table class="spec">
+        <thead><tr><th>true σ (km/s)</th><th>unregularized</th><th>full shipped stack</th></tr></thead>
+        <tbody>
+          <tr><td class="num">20</td><td class="num">10.7%</td><td class="num">120.4%</td></tr>
+          <tr><td class="num">30</td><td class="num">12.3%</td><td class="num">71.3%</td></tr>
+          <tr><td class="num">50</td><td class="num">15.1%</td><td class="num">29.9%</td></tr>
+          <tr><td class="num">80</td><td class="num">26.1%</td><td class="num">20.5%</td></tr>
+          <tr><td class="num">140</td><td class="num">23.2%</td><td class="num">22.3%</td></tr>
+          <tr><td class="num">220</td><td class="num">45.8%</td><td class="num">39.1%</td></tr>
+          <tr><td class="num">300</td><td class="num">51.6%</td><td class="num">39.2%</td></tr>
+          <tr><td class="num">400</td><td class="num">65.0%</td><td class="num">46.9%</td></tr>
+        </tbody>
+      </table>
+      <p><strong>A genuine crossover, not noise:</strong> below roughly σ = 80 km/s, the curvature penalty
+      (<code>λ = 2.0</code>) is a net bias <em>source</em>. Above roughly σ = 140 km/s, it's doing real,
+      net-positive work. This table was the original motivation for building the adaptive-regularization
+      alternative in §8 — that work is now underway and validated, closing the action item this ladder
+      first identified.</p>
+    </section>
+
+    <section id="coupling">
+      <h2><span class="num">14</span>The calibration/adaptive-λ coupling <span class="status progress">decision made, build pending</span></h2>
+      <p>Every existing bias-correction calibration table (§11-12) was built by fitting at a fixed
+      <code>λ=2.0</code>. §8's adaptive selection picks wildly different <code>λ</code> depending on σ
+      (roughly 0.5-1.0 at σ=50, up to 16-36 at σ=300) — meaning the two mechanisms are not independent.
+      Using adaptive regularization together with the existing calibration table is inconsistent: the
+      correction's validity was only ever established at <code>λ=2.0</code>, and adaptive selection deviates
+      furthest from that exactly where correction matters most (high σ).</p>
+      <p>Decision: given how central correct regularization is to this project's actual scientific goal,
+      the calibration will be <strong>extended to a real second axis</strong> — <code>m_eff</code> (effective
+      degrees of freedom, already computed as part of adaptive selection) rather than raw <code>λ</code>,
+      since <code>m_eff</code> already absorbs velocity-grid scaling that makes a given <code>λ</code> mean
+      different things on different grids. The fixed-<code>λ</code> path stays fully supported and
+      well-calibrated too, for users who want deterministic behavior — this is an addition, not a
+      replacement. Sequencing: firm up §8's evidence first (running now), then build the extended
+      calibration.</p>
+    </section>
+
+    <section id="emiles">
+      <h2><span class="num">15</span>E-MILES templates <span class="status progress">viable with caveats, not yet integrated</span></h2>
+      <p>The 33-star real MUSE library used everywhere above has zero template/instrument LSF mismatch by
+      construction (it's real MUSE data), but limited stellar-population coverage. E-MILES SSP models
+      (LSF-matched to MUSE via a Gaussian quadrature-difference convolution) would give much broader
+      age/metallicity coverage — and are a hard requirement for instruments without their own dedicated
+      library (e.g. HST STIS).</p>
+      <p>The first mismatch test (fitting a mock built from real MUSE stars, using an E-MILES template set,
+      with continuum-cofitting <em>off</em>) showed catastrophic bias — sigma-bias up to +209%, velocity-bias
+      up to −336 km/s in a wide (1400 Å) window. Rerunning with continuum-cofitting on (§7, not available
+      when this test was first built) resolved most, but not all, of it:</p>
+      <table class="spec">
+        <thead><tr><th>window</th><th>σ regime</th><th>E-MILES vs. MUSE library</th></tr></thead>
+        <tbody>
+          <tr><td>narrow (CaT, 400 Å)</td><td>low σ (30-80)</td><td class="num">worse (+58% to +207% vs. +32-77%)</td></tr>
+          <tr><td>narrow (CaT, 400 Å)</td><td>high σ (140-300)</td><td class="num"><strong>better</strong> (+7-22% vs. +21-61%)</td></tr>
+          <tr><td>wide (1400 Å)</td><td>high σ (220-300)</td><td class="num">catastrophically worse either direction</td></tr>
+        </tbody>
+      </table>
+      <p>A fairer, reversed test (mock built <em>from</em> an E-MILES population mixture, checking how well
+      the MUSE library recovers <em>that</em>) confirms the narrow-window mismatch cost is real but modest
+      and bidirectional — not the catastrophic, one-sided story the first test alone would suggest.
+      <strong>Fit-window width, not which template library, is the dominant risk factor</strong>: a wide
+      window punishes whichever library is mismatched, severely; the already-validated narrow CaT window
+      stays safe either way.</p>
+      <div class="callout amber">
+        <strong class="lbl">status</strong>
+        Viable, but only with continuum-cofitting on and confined to the validated narrow window — not a
+        "wire it in" situation yet. Investigating this also surfaced the continuum-block ABNORMAL-flag
+        question in §7, which is now understood and not a blocker.
+      </div>
+    </section>
+
+    <section id="varpro">
+      <h2><span class="num">16</span>Variable projection (VARPRO) <span class="status open">tried, not adopted</span></h2>
+      <p>A classical reformulation (Golub &amp; Pereyra 1973) of the alternating scheme in §6: instead of
+      alternating between solving <code>w</code> and <code>b</code>, profile <code>w</code> out entirely
+      (fresh NNLS at every trial <code>b</code>) and hand a single outer optimizer the reduced objective
+      directly. A tiny smoke test (3 reps) looked excellent — matching bias, ~9x faster. The full grid test
+      told a different story: consistently <em>worse</em> bias than the current alternating scheme in most
+      cells, and one badly broken cell (S/N=60, σ=150: 8 of 15 fits failed, vs. 0 for the current scheme).</p>
+      <p>Likely cause: the multi-start pool for this experiment was seeded from a single arbitrary template
+      rather than a sensible initial mixture, unlike the current scheme's per-iteration, better-informed
+      restarts — a fixable implementation gap, not necessarily proof the underlying technique is unsound.
+      As tested, though, it made things worse, not better — the small-sample smoke test was misleading, a
+      recurring lesson in this project. Not adopted; not worth pursuing further without a specific,
+      motivated reason to revisit the multi-start design.</p>
+    </section>
+
+    <section id="logwave">
+      <h2><span class="num">17</span>Log-wavelength <span class="status open">considered, not adopted</span></h2>
+      <p>Most spectral-fitting codes in this field (pPXF included) work in log-wavelength, since a Doppler
+      shift is multiplicative in λ and only becomes a fixed, translation-invariant shift after taking a log —
+      the coordinate system where the LOSVD convolution is a literal, FFT-friendly convolution. This package
+      does not do that: <code>forward_model.shift_template</code> applies the exact division
+      <code>λ_rest = λ_obs/(1+v/c)</code> per pixel, directly on the native linear-Å grid, via direct
+      interpolation rather than a shift-invariant shortcut.</p>
+      <p>Direct profiling settled whether switching would help: building the template stack (the part
+      log-λ+FFT would speed up) is <strong>23.6 ms</strong>, versus <strong>6985 ms</strong> for the
+      optimization itself — <strong>0.3%</strong> of total fit time. Switching would not deliver a measurable
+      speedup at current problem sizes, and would be a large, invasive rewrite (LSF matching, the continuum
+      spline, and the entire test suite's mock generation all currently assume a linear grid). The current
+      exact per-pixel approach is mathematically correct regardless of grid spacing — there is no correctness
+      defect from staying in linear-λ, only a small, already-quantified effective-resolution variation
+      (~4-5%) across a wide fit window. Documented as the right fix <em>if</em> E-MILES-scale template counts
+      (hundreds of SSPs, §15) ever make template-stack construction a measurable fraction of cost — not a
+      currently justified change.</p>
+    </section>
+
+    <section id="limitations">
+      <h2><span class="num">18</span>Known limitations</h2>
+      <ul>
+        <li><strong>h3 recovery is severely suppressed</strong> at low-to-moderate σ for genuinely nonzero true
+        h3 — stays near zero (full suppression) across σ = 20-80, only starting to recover above σ ≈ 140. No
+        calibration data exists yet to correct this.</li>
+        <li><strong>σ ≈ 300 km/s has an unresolved "sloppy manifold" over-coverage issue</strong> — bootstrap
+        intervals become measurably too wide as S/N <em>improves</em>, the opposite of the naive expectation.</li>
+        <li><strong>Fixed regularization is still the default</strong> (§8) — adaptive selection is validated
+        but not yet promoted, pending the firming-up run and the calibration coupling in §14.</li>
+        <li><strong>E-MILES integration is not production-ready</strong> (§15) — viable in the validated narrow
+        window with continuum-cofitting on, not yet wired into the standard template-loading path.</li>
+        <li><strong><code>shape_aware_correction</code></strong> (a separate, self-referential geometric
+        correction for the taper's own windowing bias) is real and validated for skewed/kurtotic truth, but
+        measurably worsens σ above σ ≈ 300 — off by default, opt-in only.</li>
+        <li><strong>One shared LOSVD and one shared continuum across all templates</strong> — no per-population
+        kinematics (a grouped-component extension has been discussed at length but not built) and no
+        per-template continuum.</li>
+        <li><strong>Noise covariance is a single scalar <code>ρ</code></strong> (AR(1)), not a measured kernel
+        shape — deliberately the simplest model that could be right, not yet stress-tested outside the
+        calibration regime it was measured in.</li>
+      </ul>
+    </section>
+
+    <section id="next">
+      <h2><span class="num">19</span>What's next</h2>
+      <p>In order: (1) finish firming up the adaptive-regularization evidence (§8, running now) with a larger
+      replicate count and both Gaussian and genuine-wing truth; (2) build the extended, <code>m_eff</code>-axis
+      calibration (§14) so adaptive regularization and bias correction can be used together correctly; (3) a
+      full stress-test matrix across every axis this session touched (σ, S/N, h4, continuum on/off, ρ, λ,
+      template library) to know precisely where the package does and doesn't work, not just where it's been
+      spot-checked; (4) a direct head-to-head comparison against the original (non-lite) <code>kinextract</code>
+      Fortran pipeline once this package reaches rough feature parity with it.</p>
+    </section>
+
+    <footer>
+      kinextract_lite — internal reference, generated from the current codebase. Not for external
+      distribution without review.
+    </footer>
+  </main>
+</div>

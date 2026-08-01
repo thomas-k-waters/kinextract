@@ -1,0 +1,26 @@
+loaded 33 real MUSE templates from /Users/waterstk/Documents/Gultekin_Astrophysics/sco_framework_updated/sco_workdir_example/analysis/muse_templates/old
+fixed Dirichlet mixture weights (seed=20000): [0.033 0.053 0.003 0.054 0.033 0.024 0.001 0.003 0.032 0.017 0.016 0.007
+ 0.014 0.047 0.052 0.003 0.081 0.004 0.09  0.008 0.106 0.003 0.019 0.085
+ 0.061 0.004 0.003 0.001 0.035 0.039 0.033 0.027 0.005]
+h4_true=0.15 (genuine wing, not h4=0)
+sigma=    30  S/N=    25  n= 20  sig_bias= +31.22+/-7.95  ( +80.5%)  h4=+0.0510  t=29s
+sigma=    30  S/N=    40  n= 20  sig_bias= +23.24+/-5.46  ( +59.9%)  h4=+0.0489  t=84s
+sigma=    30  S/N=    60  n= 20  sig_bias= +16.92+/-2.85  ( +43.6%)  h4=+0.0459  t=147s
+sigma=    30  S/N=   100  n= 20  sig_bias= +13.62+/-3.54  ( +35.1%)  h4=+0.0489  t=248s
+sigma=    30  S/N=   150  n= 20  sig_bias= +11.52+/-3.99  ( +29.7%)  h4=+0.0527  t=373s
+sigma=    50  S/N=    25  n= 20  sig_bias= +27.61+/-9.62  ( +42.7%)  h4=+0.0445  t=408s
+sigma=    50  S/N=    40  n= 20  sig_bias= +16.76+/-7.10  ( +25.9%)  h4=+0.0509  t=455s
+sigma=    50  S/N=    60  n= 20  sig_bias= +13.43+/-6.25  ( +20.8%)  h4=+0.0476  t=517s
+sigma=    50  S/N=   100  n= 20  sig_bias=  +9.84+/-7.46  ( +15.2%)  h4=+0.0565  t=607s
+sigma=    50  S/N=   150  n= 20  sig_bias= +15.03+/-5.56  ( +23.2%)  h4=+0.0790  t=687s
+sigma=    80  S/N=    25  n= 20  sig_bias= +18.62+/-14.05  ( +18.0%)  h4=+0.0519  t=723s
+sigma=    80  S/N=    40  n= 20  sig_bias= +14.37+/-12.29  ( +13.9%)  h4=+0.0600  t=774s
+sigma=    80  S/N=    60  n= 20  sig_bias= +20.22+/-18.65  ( +19.5%)  h4=+0.0796  t=839s
+sigma=    80  S/N=   100  n= 20  sig_bias= +19.57+/-15.14  ( +18.9%)  h4=+0.0994  t=911s
+sigma=    80  S/N=   150  n= 20  sig_bias= +29.04+/-7.15  ( +28.1%)  h4=+0.1221  t=959s
+sigma=   140  S/N=    25  n= 20  sig_bias= +49.50+/-38.13  ( +27.3%)  h4=+0.0973  t=1003s
+sigma=   140  S/N=    40  n= 20  sig_bias= +22.42+/-38.71  ( +12.4%)  h4=+0.1040  t=1062s
+sigma=   140  S/N=    60  n= 20  sig_bias= +39.59+/-31.61  ( +21.9%)  h4=+0.1161  t=1113s
+sigma=   140  S/N=   100  n= 20  sig_bias= +37.10+/-17.37  ( +20.5%)  h4=+0.1365  t=1154s
+sigma=   140  S/N=   150  n= 20  sig_bias= +34.41+/-14.50  ( +19.0%)  h4=+0.1324  t=1191s
+wrote 20 rows to regularization_bias_h4wing_muse.txt, total time 1191s

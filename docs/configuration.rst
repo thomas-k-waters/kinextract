@@ -1,35 +1,31 @@
 Configuration
 =============
 
-Copy ``examples/kinextract.config`` to your extraction directory and edit
-the galaxy-specific parameters:
+``FitConfig`` is a plain dataclass -- instantiate it directly with the
+fields you want to override, e.g.:
 
-.. code-block:: toml
+.. code-block:: python
 
-   [wavelength]
-   zgal = 0.00157811      # galaxy redshift
-   wavefitmin = 8400.0    # fit range (Angstrom)
-   wavefitmax = 8800.0
+   from kinextract import FitConfig
 
-   [kinematics]
-   xlam_auto = true       # auto-select regularization
-   xlam_smooth_threshold = 0.25
+   cfg = FitConfig(
+       vmin=-500.0, vmax=500.0,      # velocity grid bounds, km/s
+       lam_selection="aic_local",     # auto-select regularization strength (the default)
+       penalty_order=3,               # third-difference, shrink-toward-Gaussian penalty (the default)
+   )
 
-   [continuum]
-   fit_continuum = true
+There is no configuration-file loader -- every field is a normal
+constructor argument or attribute. For the complete list of tunable
+fields, grouped by subsystem, call ``FitConfig.describe()`` (or
+``FitConfig.describe("lam")`` for just the regularization-selection
+options) or read the class docstring below.
 
-TOML section names are purely organizational -- every field is flattened
-into a single :class:`~kinextract.config.FitConfig` namespace regardless of
-which section it's under. ``examples/kinextract.config`` documents the most
-commonly-tuned fields inline; for the complete list, call
-``FitConfig.describe()`` or read the class docstring below.
-
-``fit_continuum = true`` turns on continuum co-fitting: a penalized-B-spline
-continuum is folded directly into the same optimization as the LOSVD and
-template weights (see :mod:`kinextract.joint`). Alternatively, pre-normalize
-the spectrum once (e.g. via the standalone
-:func:`kinextract.continuum.asymmetric_least_squares_continuum` utility)
-and fit with ``fit_continuum = false``.
+Regularization strength is selected automatically per fit
+(``lam_selection="aic_local"``, the default) via a bootstrap-estimated
+generalized AIC. Continuum handling: either pre-normalize the spectrum
+once before fitting, or co-fit a shared multiplicative continuum directly
+in the same alternating optimization
+(:func:`kinextract.fit_losvd_with_continuum`, :mod:`kinextract.continuum`).
 
 .. autoclass:: kinextract.config.FitConfig
    :members: describe

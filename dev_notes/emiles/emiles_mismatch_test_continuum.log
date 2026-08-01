@@ -1,0 +1,33 @@
+loaded 33 MUSE templates, 25 E-MILES templates
+fit window: 8400-8800 A (400 A wide), continuum_knots=4, lam_c=2.0
+[lam= 0.0][    muse_control] sigma=   30 n= 15 n_fail= 2  V_bias=   +6.73  sig_bias= +23.27 ( +77.6%)  h4=+0.2097  t=181s
+[lam= 0.0][ emiles_mismatch] sigma=   30 n= 15 n_fail= 5  V_bias=  +20.97  sig_bias= +62.03 (+206.8%)  h4=+0.6720  t=181s
+[lam= 0.0][    muse_control] sigma=   50 n= 15 n_fail= 7  V_bias=   +3.31  sig_bias= +23.74 ( +47.5%)  h4=+0.1303  t=349s
+[lam= 0.0][ emiles_mismatch] sigma=   50 n= 15 n_fail= 5  V_bias=  +18.54  sig_bias= +62.10 (+124.2%)  h4=+0.2443  t=349s
+[lam= 0.0][    muse_control] sigma=   80 n= 15 n_fail= 4  V_bias=   -8.34  sig_bias= +40.25 ( +50.3%)  h4=+0.0968  t=510s
+[lam= 0.0][ emiles_mismatch] sigma=   80 n= 15 n_fail= 6  V_bias=  +15.45  sig_bias= +48.66 ( +60.8%)  h4=+0.1041  t=510s
+[lam= 0.0][    muse_control] sigma=  140 n= 15 n_fail= 2  V_bias=  -10.05  sig_bias= +56.97 ( +40.7%)  h4=+0.1112  t=668s
+[lam= 0.0][ emiles_mismatch] sigma=  140 n= 15 n_fail= 6  V_bias=   +7.33  sig_bias= +25.18 ( +18.0%)  h4=+0.0299  t=668s
+[lam= 0.0][    muse_control] sigma=  220 n= 15 n_fail= 3  V_bias=   -3.40  sig_bias=+123.85 ( +56.3%)  h4=+0.1366  t=958s
+[lam= 0.0][ emiles_mismatch] sigma=  220 n= 15 n_fail= 3  V_bias=  +20.63  sig_bias=  +8.64 (  +3.9%)  h4=-0.0172  t=958s
+[lam= 0.0][    muse_control] sigma=  300 n= 15 n_fail= 3  V_bias=  +49.11  sig_bias=+188.97 ( +63.0%)  h4=+0.1347  t=1342s
+[lam= 0.0][ emiles_mismatch] sigma=  300 n= 15 n_fail= 4  V_bias=  +26.08  sig_bias=+105.94 ( +35.3%)  h4=+0.0449  t=1342s
+[lam= 2.0][    muse_control] sigma=   30 n= 15 n_fail= 1  V_bias=   +3.42  sig_bias= +22.01 ( +73.4%)  h4=+0.0456  t=1566s
+[lam= 2.0][ emiles_mismatch] sigma=   30 n= 15 n_fail= 2  V_bias=  +20.84  sig_bias= +52.00 (+173.3%)  h4=+0.2116  t=1566s
+[lam= 2.0][    muse_control] sigma=   50 n= 15 n_fail= 5  V_bias=   +5.10  sig_bias= +21.81 ( +43.6%)  h4=+0.0519  t=1788s
+[lam= 2.0][ emiles_mismatch] sigma=   50 n= 15 n_fail= 3  V_bias=  +21.20  sig_bias= +55.43 (+110.9%)  h4=+0.1204  t=1788s
+[lam= 2.0][    muse_control] sigma=   80 n= 15 n_fail= 3  V_bias=   +2.21  sig_bias= +25.04 ( +31.3%)  h4=+0.0701  t=2604s
+[lam= 2.0][ emiles_mismatch] sigma=   80 n= 15 n_fail= 6  V_bias=  +18.94  sig_bias= +46.33 ( +57.9%)  h4=+0.0780  t=2604s
+[lam= 2.0][    muse_control] sigma=  140 n= 15 n_fail= 5  V_bias=   -2.79  sig_bias= +60.05 ( +42.9%)  h4=+0.0897  t=3471s
+[lam= 2.0][ emiles_mismatch] sigma=  140 n= 15 n_fail= 3  V_bias=  +17.82  sig_bias= +29.37 ( +21.0%)  h4=+0.0088  t=3471s
+[lam= 2.0][    muse_control] sigma=  220 n= 15 n_fail= 4  V_bias=   -2.42  sig_bias=+135.06 ( +61.4%)  h4=+0.1368  t=4168s
+[lam= 2.0][ emiles_mismatch] sigma=  220 n= 15 n_fail= 3  V_bias=  +14.15  sig_bias= +14.97 (  +6.8%)  h4=-0.0122  t=4168s
+[lam= 2.0][    muse_control] sigma=  300 n= 15 n_fail= 3  V_bias=   -3.20  sig_bias=+161.33 ( +53.8%)  h4=+0.1115  t=4893s
+[lam= 2.0][ emiles_mismatch] sigma=  300 n= 15 n_fail= 6  V_bias=   +8.68  sig_bias= +66.89 ( +22.3%)  h4=+0.0194  t=4893s
+loaded 33 MUSE templates, 25 E-MILES templates
+fit window: 7500-8900 A (1400 A wide), continuum_knots=4, lam_c=2.0
+[lam= 2.0][    muse_control] sigma=  220 n= 15 n_fail= 1  V_bias=   -8.43  sig_bias= +59.33 ( +27.0%)  h4=+0.0471  t=789s
+[lam= 2.0][ emiles_mismatch] sigma=  220 n= 15 n_fail= 4  V_bias=  -40.55  sig_bias=+160.42 ( +72.9%)  h4=+0.1122  t=789s
+[lam= 2.0][    muse_control] sigma=  300 n= 15 n_fail= 2  V_bias=   -7.49  sig_bias=+113.93 ( +38.0%)  h4=+0.0668  t=1727s
+[lam= 2.0][ emiles_mismatch] sigma=  300 n= 15 n_fail= 4  V_bias=  -41.33  sig_bias=+475.68 (+158.6%)  h4=+0.5342  t=1727s
+wrote 28 rows to emiles_mismatch_test_continuum_results.txt

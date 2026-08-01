@@ -1,76 +1,22 @@
-# kinextract validation suite
+# benchmarks
 
-A diagnostic, overnight-runnable test suite that generates mock spectra with
-known ground-truth kinematics across many astrophysical regimes (star
-clusters, low/high-mass black holes, different S/N, different instruments,
-emission contamination, non-Gaussian/double-peaked LOSVDs) and fits them with
-kinextract, comparing recovered V/sigma/h3/h4 against truth. Its central
-purpose is a head-to-head comparison between two continuum-fitting modes --
-`fit_continuum=True` (the joint P-spline-in-the-model method, see
-`kinextract.joint`) vs. a raw-flux + multiplicative-polynomial +
-global-amplitude mode (`continuum_poly_mode="multiplicative"` +
-`fit_global_amp=True`) -- plus an oracle/ceiling "none" arm (mock pre-divided
-by its own true continuum). An older separate-continuum-sub-fit approach
-(asymmetric least squares, "ALS") was compared here too before it was
-retired from the fitting pipeline entirely (see `kinextract.joint`'s module
-docstring); the standalone ALS math still exists as
-`kinextract.continuum.asymmetric_least_squares_continuum`, a one-time
-pre-normalization utility, but is no longer a continuum-cofitting mode this
-suite exercises.
+This directory previously held a diagnostic suite (`run_suite.py`,
+`mock_spectrum.py`, `calibrate_xlam.py`, `scenarios.py`, `score.py`,
+`report.py`) built against the pre-1.0 architecture: `kinextract.joint`'s
+P-spline-in-the-model continuum-cofitting, `fit_continuum=True`,
+`continuum_poly_mode`. None of that API exists in this version -- the
+non-parametric LOSVD engine and continuum-cofitting mechanism were both
+rebuilt from scratch (see `../VALIDATION_CAMPAIGN.md`), so those scripts
+would not run and have been removed rather than left as silently-broken
+dead code.
 
-This is a diagnostic/reporting tool, distinct from and independent of the
-pytest suite in `tests/` (which only tests `benchmarks/mock_spectrum.py`'s
-own correctness, in `tests/test_mock_spectrum.py`).
-
-## Running the fast tier (MAP fits only, ~1.5-3 hours)
-
-```bash
-cd /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract
-python -m benchmarks.run_suite --n-workers 6 --replicates 8
-```
-
-This is resumable: if interrupted (killed, machine sleep, etc.), just run
-the same command again -- `benchmarks/results/checkpoint.jsonl` tracks
-completed `(scenario, continuum_mode, replicate_seed)` triples and only
-remaining jobs are (re-)run.
-
-Useful flags:
-
-- `--only-axis sigma` -- restrict to one scenario axis (see `scenarios.py`
-  for the full axis list: `sigma`, `snr`, `instrument`, `template`,
-  `emission`, `losvd_shape`, `bug`), for quick reruns/debugging.
-- `--continuum-modes joint` -- restrict to one continuum mode.
-- `--replicates 2` -- fewer noise realizations per scenario, for a fast smoke test.
-
-## Generating the report
-
-```bash
-python -m benchmarks.report
-```
-
-Writes `benchmarks/results/report.md` (headline continuum-mode comparison
-table, bias-vs-axis plots, flagged-scenario table, runtime table) plus
-`raw_results.csv` and `plots/*.png`. Can be re-run at any time, including
-while `run_suite.py` is still running (against whatever's checkpointed so far).
-
-## Adjusting what counts as "falls short"
-
-`benchmarks/score.py`'s `THRESHOLDS` dict defines the numeric bias/chi2_red
-cutoffs used to flag a scenario in the report. These are proposals (see the
-docstring for the reasoning behind each), not fixed truth -- edit them
-directly to match your own science precision requirements, then re-run
-`python -m benchmarks.report` (no need to re-run the fits).
-
-## Slow tier (Laplace + bootstrap error bars on a curated subset)
-
-Not yet implemented -- see the plan this suite was built from
-(`~/.claude/plans/sorted-chasing-rainbow-agent-adb527942b716d2eb.md`)
-Section 5.3 for the design (select the BASE scenario, the two named `bug_*`
-scenarios, and the worst-scoring fast-tier point per axis; run
-`estimate_losvd_errors(..., n_bootstrap=30)` on each to check whether the
-ALS-vs-poly bias difference exceeds the bootstrap-estimated uncertainty).
-
-## Dependencies
-
-`pandas` is required for `score.py`/`report.py` (not for `run_suite.py`
-itself) -- install via `pip install -e ".[benchmarks]"` from the repo root.
+**The current equivalent lives in `../dev_notes/validation_suite/`**:
+`sweep.py` (randomized bias/coverage sweeps across sigma/S-N/h3/h4, GH and
+spline truth generators, the "safe" preset used for the package's own
+validation campaign), `coverage_sweep.py` (does a reported bootstrap
+interval actually cover truth at the rate it claims?), `mocks.py` (the
+randomized mock generator both scripts share), and `build_notebook.py`
+(regenerates a results notebook from the sweep CSVs). These are actively
+maintained and were rerun end-to-end as part of the 1.0 merge -- see
+`../dev_notes/HISTORY.md` for the full index of what's been validated and
+where to find it.

@@ -15,187 +15,221 @@ Configuration
    :nosignatures:
 
    kinextract.FitConfig
-   kinextract.load_config_from_toml
 
-Top-level fitting API
-----------------------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.run_spectral_fit
-   kinextract.fit_state_map_with_optional_clean
-   kinextract.build_parameter_xscale
-   kinextract.run_iterative_clean_map
-   kinextract.compute_losvd_roughness
-   kinextract.compute_losvd_n_peaks
-
-State
------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.FitState
-   kinextract.precompute_losvd_interp
-   kinextract.precompute_ip_map
-   kinextract.getnlosvd_fast_from_b
-
-Spectrum loading
+Core LOSVD fitter
 -----------------
 
 .. autosummary::
    :toctree: generated
    :nosignatures:
 
-   kinextract.load_spectrum_for_fit
-   kinextract.make_fit_state
-   kinextract.build_initial_guess_nonparam
-   kinextract.choose_norm_wavelength_frame
-   kinextract.fortran_rebin_after_redshift
+   kinextract.build_bspline_basis
+   kinextract.build_spline_truth
+   kinextract.difference_matrix
+   kinextract.default_initial_coeffs
+   kinextract.fit_log_spline_map
+   kinextract.tapered_lam_vector
+   kinextract.penalty_row_velocities
 
-Continuum
----------
+Forward model
+-------------
 
 .. autosummary::
    :toctree: generated
    :nosignatures:
 
-   kinextract.asymmetric_least_squares_continuum
-   kinextract.grow_boolean_mask
-   kinextract.grow_boolean_mask_A
-   kinextract.robust_sigma
+   kinextract.build_velocity_grid
+   kinextract.shift_template
+   kinextract.build_template_stack
+   kinextract.mask_wavelength_windows
 
-``asymmetric_least_squares_continuum``/``robust_sigma`` are standalone,
-one-time pre-normalization utilities -- not part of the main fitting
-pipeline.
+Gauss-Hermite moments
+---------------------
 
-Joint continuum-in-the-model fit
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.gauss_hermite_model
+   kinextract.fit_gauss_hermite
+   kinextract.compute_direct_moments
+   kinextract.fit_h3_h4
+   kinextract.compute_losvd_moments
+   kinextract.shape_aware_taper_correction
+
+Multi-template fitting (main entry point)
+------------------------------------------
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.fit_losvd
+   kinextract.fit_losvd_basis
+   kinextract.fit_losvd_parallel
+
+Uncertainty (parametric bootstrap)
+------------------------------------
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.bootstrap_losvd
+   kinextract.bootstrap_losvd_parallel
+   kinextract.calibrate_noise_scale
+
+Cleaning and emission-line masking
+-------------------------------------
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.fit_losvd_clean
+   kinextract.detect_emission_lines
+   kinextract.DEFAULT_CAT_EMISSION_LINES
+   kinextract.detect_emission_from_residual
+
+Continuum-cofitting
+--------------------
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.fit_continuum_block
+   kinextract.fit_losvd_with_continuum
+
+Regularization-bias correction
 ---------------------------------
 
-The continuum-cofitting method (``FitConfig.fit_continuum = True``). See
-:mod:`kinextract.joint` for the full rationale.
+Synthetic-calibrated (Pinkney et al. 2003-style) correction for
+regularization/shrinkage bias in recovered sigma/h4 -- opt-in, not the
+default (see :mod:`kinextract.bias_correction`'s own module docstring for
+current trust status).
 
 .. autosummary::
    :toctree: generated
    :nosignatures:
 
-   kinextract.run_joint_fit
-   kinextract.fit_joint
-   kinextract.fit_joint_auto_xlam
-   kinextract.fit_joint_auto_xlam_sigl0
-   kinextract.build_pspline_design
-   kinextract.evaluate_model_gp_joint
+   kinextract.BiasCalibration
+   kinextract.PerLamCalibration
+   kinextract.load_calibration_table
+   kinextract.load_per_lam_calibration_table
+   kinextract.estimate_snr_whitened
+   kinextract.correct_moments
+   kinextract.correct_losvd
+   kinextract.calibration_has_lam_axis
+   kinextract.get_default_lam_axis_calibration
+   kinextract.run_calibration_sweep
+   kinextract.save_calibration_table
 
-LOSVD analysis
---------------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.fit_losvd_gauss_hermite
-   kinextract.fit_losvd_gauss_hermite_higher
-   kinextract.gauss_hermite_losvd_model
-   kinextract.gauss_hermite_losvd_model_ho
-   kinextract.fh3_fortran_like
-   kinextract.fh4_fortran_like
-   kinextract.getfwhm_fortran_like
-
-Numerics
---------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.evaluate_model_gp
-   kinextract.objective_map
-   kinextract.objective_components
-   kinextract.compute_weighted_template_spectrum
-
-Templates
----------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.interp_template_tp_with_outside
-   kinextract.build_template_matrix_fortran
-   kinextract.resolution_mismatch_sigma_A
-   kinextract.convolve_gaussian_pixels
-
-Masking
--------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.build_emission_line_mask
-   kinextract.build_clean_protect_mask
-
-Plotting
---------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.plot_fit
-   kinextract.plot_losvd
-   kinextract.plot_continuum
-
-Error estimation
------------------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.LOSVDErrorEstimator
-   kinextract.estimate_losvd_errors
-
-Recovery-bias validation
---------------------------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.assess_recovery_bias
-   kinextract.correct_recovered_losvd
-   kinextract.build_matched_mock
-   kinextract.true_losvd_on_grid
-
-I/O
----
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.read_galaxy_index_flux_err
-   kinextract.read_norm_spectrum
-   kinextract.read_template_xy
-   kinextract.read_template_list
-   kinextract.read_galaxy_params
-   kinextract.write_fitlov_outputs
-   kinextract.write_losvd_errors_file
-   kinextract.write_gh_errors_file
-
-Optional Bayesian (NUTS) path
+Ablation / diagnostic sweeps
 -------------------------------
 
-Not part of the top-level namespace (requires ``pip install
-kinextract[bayesian]``); import directly from :mod:`kinextract.bayesian`.
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.AblationConfig
+   kinextract.fit_one
+   kinextract.run_ablation_sweep
+   kinextract.save_ablation_table
+   kinextract.load_ablation_table
+
+Line-spread-function (LSF) matching
+--------------------------------------
 
 .. autosummary::
    :toctree: generated
    :nosignatures:
 
-   kinextract.bayesian.fit_state_bayesian
-   kinextract.bayesian.build_numpyro_model
+   kinextract.fwhm_to_sigma
+   kinextract.muse_lsf_fwhm
+   kinextract.variable_gaussian_convolve
+   kinextract.match_gaussian_lsf
+
+Adaptive regularization-strength selection
+---------------------------------------------
+
+Lipka & Thomas (2021)/Thomas & Lipka (2022)-style bootstrap-estimated
+generalized AIC, as an alternative to a fixed ``cfg.lam``.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.AICSelectionResult
+   kinextract.estimate_m_eff
+   kinextract.select_lambda_aic
+   kinextract.estimate_m_eff_local
+   kinextract.select_lambda_aic_local
+
+Correlated-noise (AR(1)) whitening
+------------------------------------
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.build_ar1_covariance
+   kinextract.whiten
+   kinextract.estimate_correlation_length
+
+E-MILES SSP templates
+------------------------
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.parse_emiles_filename
+   kinextract.pack_emiles_templates
+   kinextract.load_emiles_templates
+
+IFU cube I/O
+------------
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.MuseCube
+   kinextract.white_light_image
+   kinextract.extract_aperture_spectrum
+   kinextract.load_muse_cube
+   kinextract.save_muse_cube_fits
+   kinextract.build_mock_cube
+
+Spatial binning
+----------------
+
+"Dartboard" spatial binning (log/linear-radial x equal-angle or
+equal-sin(theta) sectors), for extracting per-bin spectra from an IFU cube.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.DartboardBins
+   kinextract.log_radial_edges
+   kinextract.linear_radial_edges
+   kinextract.uniform_theta_edges
+   kinextract.build_reflected_sin_theta_edges
+   kinextract.assign_spaxels_to_bins
+
+Template reduction
+-------------------
+
+Iterative full-grid-fit + NNLS-threshold reduction to a representative
+template subset, reusable across a whole cube.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.TemplateReductionResult
+   kinextract.reduce_templates_iteratively
+   kinextract.save_template_subset
+   kinextract.load_template_subset

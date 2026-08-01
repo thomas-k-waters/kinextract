@@ -1,851 +1,297 @@
-"""Standalone continuum-estimation utilities for kinextract.
+"""Continuum co-fitting: a shared, structurally-positive multiplicative
+correction, jointly recovered with the LOSVD and template mixture
+weights via three-block alternating minimization.
 
-kinextract's main fitting pipeline (``FitConfig.fit_continuum=True``) always
-co-fits its continuum baseline via a penalized-B-spline folded directly into
-the same optimization as the LOSVD and template weights -- see
-:mod:`kinextract.joint`. An earlier separate-sub-fit approach (an
-asymmetric-least-squares baseline, with a hyperparameter search and
-pPXF-like iterative absorption-clipping around it) was removed from the
-pipeline after being found prone to a real oversmoothing failure mode on
-real data.
+    f(lambda) = C(lambda) * [ sum_k w_k * (T_k conv b)(lambda) ]
 
-The core Eilers (2003) asymmetric-least-squares math
-(:func:`asymmetric_least_squares_continuum`) is kept here as a standalone
-utility: it's still useful for **one-time, manual continuum normalization**
-of a raw spectrum outside the main fitting pipeline (fit a continuum once,
-divide it out, save a normalized spectrum for later cheap fitting with
-``fit_continuum=False``) -- see ``examples/notebooks/06_prenormalized_workflow.ipynb``
-for a worked example. :func:`robust_sigma` (a normalized-MAD noise
-estimate) is reused elsewhere in the package (e.g. sigma-clipping in
-``masking.py``). The stellar/nebular line tables and
-:func:`query_nist_lines` NIST line-list utility below are independent of
-continuum fitting entirely and are reused by ``masking.py``/``plotting.py``
-for line labeling and masking.
+See `kinextract_test_suite/CONTINUUM_ARCHITECTURE_PLAN.md` for the full
+design rationale (why the continuum is shared across templates rather
+than per-template, why LSF matching isn't a fourth fitted block, the
+template-continuum-trust hierarchy noted below).
+
+**`C(lambda) = exp(spline_continuum(lambda))`** -- the same
+structurally-positive `exp`-link construction as `b(v)` itself, over
+wavelength instead of velocity, reusing the same B-spline/P-spline
+machinery (`kinextract.losvd.build_bspline_basis`, `difference_matrix`)
+on the wavelength grid. Deliberately much lower flexibility than the
+LOSVD's own spline (a handful of knots by default) -- its job is mopping
+up smooth residual gaps, not carrying real spectral information.
+
+**Three-block alternating minimization**, fixing two of `(b, w, C)` and
+solving the third each step, in forward-model form throughout (never
+dividing the data by the current continuum estimate, which would silently
+mis-weight pixel noise by how large the local continuum happens to be):
+
+1. **Fix `(w, C)`, solve `b`.** Fold both into the effective design
+   matrix, `A_eff[i,j] = C(lambda_i) * (sum_k w_k * A_stack[k])[i,j]`,
+   and reuse `fit_log_spline_map` unchanged.
+2. **Fix `(b, C)`, solve `w`.** NNLS against continuum-multiplied
+   per-template columns, `design[i,k] = C(lambda_i) * (A_stack[k]@b)[i]`.
+3. **Fix `(b, w)`, solve `C`.** `M(lambda) = sum_k w_k*(T_k conv b)(lambda)`
+   is now fully known; fit `C(lambda)*M(lambda) ~ y_w(lambda)` via
+   `fit_continuum_block` (a dedicated, smaller nonlinear solve).
+
+**Requires templates already at a consistent continuum-trust level**
+(e.g. already continuum-normalized) -- the template-continuum-trust
+hierarchy (library-keyed presets for how much of each raw template's own
+continuum to trust) is not implemented. Best suited to a clean,
+already-normalized template library; not recommended for raw,
+non-normalized templates without independently re-checking agreement
+against a reference. Wavelength-dependent LSF matching is out of scope.
+
+**`fit_losvd_with_continuum` is a thin wrapper over
+`kinextract.multi_template.fit_losvd_basis`'s shared alternation
+driver** (given `continuum_basis`/`D2_c`), not a separately-maintained
+copy of the loop -- the tapered roughness penalty is applied in the
+LOSVD sub-fit like any other fit.
+
+**Regularization has two independent terms, and both matter.** The
+continuum's curvature penalty (`lam_c * D2_c`) controls smoothness, but a
+second-order-difference penalty has an exact null space -- the constant
+and *linear* directions in coefficient space, a standard property of any
+such P-spline penalty -- so `lam_c` alone cannot bound an arbitrary
+near-linear trend in the recovered continuum. `ridge_c` (see
+`fit_continuum_block`'s own docstring) is a direct L2 penalty on the
+coefficients themselves that closes exactly that gap. Both are always
+active; treat them as a pair, not `lam_c` alone, when reasoning about how
+constrained the recovered continuum is. Substantially de-risked by a
+recent fix (see `dev_notes/VALIDATION_CAMPAIGN.md` Stage 15 for the investigation
+this addressed); a first multi-seed bias sweep now exists
+(`dev_notes/continuum/FINDINGS.md`, 2026-07-30, 288 fits, one mock
+regime) -- treat continuum-cofitting as still maturing (one mock regime
+is not full production validation) rather than production-hardened, but
+no longer entirely unvalidated.
+
+**Penalty-order recommendation, updated by that sweep.** Adaptive
+`lam_selection` doesn't support continuum-cofitting yet, so a fixed `lam`
+is required either way. Earlier guidance (this module's docstring and
+`examples/notebooks/02_realistic_mock_fit.ipynb`'s own Section 8) pinned
+`penalty_order=2, lam=2.0` as "the documented-working combination" and
+called `penalty_order=3` untested. The sweep found the opposite: at every
+S/N tested (30/60/100), a fixed order-3 `lam` (4096-32768 range) beat
+order-2/lam=2.0 on both `sigma` bias and, especially, `h4` bias (order-2's
+h4 bias was 3-4x larger, at every S/N -- worse than not cofitting a
+continuum at all). Prefer `penalty_order=3` with a fixed `lam` in that
+range for new continuum-cofitting work; `penalty_order=2, lam=2.0` is no
+longer the recommended default, though it still works and is still the
+`FitConfig` default's own automatic fallback when adaptive selection is
+left on with continuum-cofitting active (see `multi_template.fit_losvd`'s
+own `UserWarning` for that fallback -- it does not yet know about this
+finding and still falls back to order 2).
 """
-
 from __future__ import annotations
 
-import warnings
-from typing import Optional
+import time
 
+import jax
+import jax.numpy as jnp
 import numpy as np
-from scipy.linalg import solve_banded
+from scipy.optimize import minimize as scipy_minimize
 
-try:
-    from numba import njit
-except Exception:
-    def njit(*a, **k):
-        return a[0] if a and callable(a[0]) else lambda f: f
-    warnings.warn(
-        "Numba is not installed or failed to import. JIT-compiled inner loops "
-        "(chi-squared, convolution, ALS) will run as plain Python, which is "
-        "10-50x slower. Install with: pip install numba",
-        RuntimeWarning, stacklevel=1,
-    )
-from ._utils import log
-from .config import FitConfig
-
-# =============================================================================
-# Section 1 - Asymmetric least-squares continuum math (standalone utility)
-# =============================================================================
-
-def robust_sigma(values: np.ndarray) -> float:
-    """Robust standard-deviation estimate via the normalized MAD.
-
-    Used throughout kinextract wherever a noise scale is needed but the
-    sample may contain outliers (e.g. sigma-clipping continuum residuals
-    or LOSVD-fit residuals) that would bias an ordinary ``np.std``.
-
-    Parameters
-    ----------
-    values : ndarray
-        Sample of residuals or values to estimate the scatter of.
-        Non-finite entries are dropped before the estimate is computed.
-
-    Returns
-    -------
-    float
-        ``1.4826 * median(|values - median(values)|)``, which is a
-        consistent estimator of the standard deviation for Gaussian data.
-        Falls back to ``np.std`` if the MAD is exactly zero (e.g. a sample
-        with many repeated values), and returns ``0.0`` for a single finite
-        value or ``nan`` if no finite values remain.
-    """
-    v = np.asarray(values, float)
-    v = v[np.isfinite(v)]
-    if v.size == 0:
-        return np.nan
-    mad = np.median(np.abs(v - np.median(v)))
-    return 1.4826 * mad if mad > 0 else (float(np.std(v)) if v.size > 1 else 0.0)
+from .losvd import build_bspline_basis, difference_matrix
+from .multi_template import fit_losvd_basis
 
 
-def _als_dtd_bands(L: int, lam: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Precompute the lam * D'D penalty bands for the ALS banded system.
-
-    D is the (L-2) x L second-difference matrix.  D'D has an exact
-    analytic form; all three non-zero band arrays are returned so that
-    only the weight diagonal w needs to be added inside the iteration loop.
-
-    Returns (main, off1, off2) with lengths L, L-1, L-2 respectively.
-    The boundary values are derived analytically:
-      main  : [1, 5, 6, ..., 6, 5, 1]  (4 for the centre pixel when L==3)
-      off1  : [-2, -4, ..., -4, -2]
-      off2  : [1, 1, ..., 1]
-    All values are pre-multiplied by lam.
-    """
-    main = np.zeros(L, dtype=float)
-    off1 = np.zeros(max(L - 1, 0), dtype=float)
-    off2 = np.zeros(max(L - 2, 0), dtype=float)
-
-    if L >= 3:
-        main[0] = lam
-        main[-1] = lam
-        # Interior: 6 everywhere except second-from-edge which is 5.
-        # Special case L==3: the single interior pixel is touched by only
-        # one row of D so D'D[1,1] = (-2)^2 = 4, not 5.
-        main[2:-2] = 6.0 * lam
-        if L == 3:
-            main[1] = 4.0 * lam
-        else:
-            main[1] = 5.0 * lam
-            main[-2] = 5.0 * lam
-
-        off1[0] = -2.0 * lam
-        off1[-1] = -2.0 * lam
-        if L > 3:
-            off1[1:-1] = -4.0 * lam
-
-    if L >= 4:
-        off2[:] = lam
-
-    return main, off1, off2
+def _neg_log_post_continuum(coeffs, M, y_w, basis, D2, lam_c, ridge_c):
+    C = jnp.exp(basis @ coeffs)
+    resid = M * C - y_w
+    chi2 = 0.5 * jnp.sum(resid ** 2)
+    rough = 0.5 * lam_c * jnp.sum((D2 @ coeffs) ** 2)
+    ridge = 0.5 * ridge_c * jnp.sum(coeffs ** 2)
+    return chi2 + rough + ridge
 
 
-def asymmetric_least_squares_continuum(
-    y: np.ndarray,
-    base_mask: Optional[np.ndarray] = None,
-    lam: float = 1e7,
-    p: float = 0.5,
-    niter: int = 10,
-    eps: float = 1e-6,
-    return_weights: bool = False,
-):
-    """
-    Fit a smooth asymmetric-least-squares baseline to a spectrum (Eilers 2003).
+# Module-level, not defined fresh inside fit_continuum_block: a closure captures
+# M/y_w/basis/D2/lam_c as baked-in constants, which are a *new* Python object every
+# call even when their shapes are identical -- jax.jit's cache is keyed on the jitted
+# function object's identity plus argument shapes/dtypes, so a fresh closure defeats
+# it entirely and forces a full retrace+recompile on every single call (every
+# alternating-minimization iteration, every bootstrap replicate). Same fix already
+# applied to losvd.fit_log_spline_map's identical anti-pattern -- see that module for
+# the measured (modest but real) speedup. `lam_c` is passed as a traced argument
+# (not a Python/static one) so different lam_c values don't themselves force
+# recompilation either.
+_val_fn_continuum = jax.jit(_neg_log_post_continuum)
+_vg_fn_continuum = jax.jit(jax.value_and_grad(_neg_log_post_continuum))
 
-    The baseline ``z`` minimizes a weighted sum of squared residuals to ``y``
-    plus a roughness penalty ``lam * ||D z||^2`` on the second difference of
-    ``z``, with asymmetric weights that penalize the baseline lying above the
-    data (``p``) much less than lying below it (``1 - p``). Iterating this
-    reweighted least squares drives the baseline toward the lower envelope of
-    the data by an amount controlled by ``p``, which is the desired behavior
-    for continuum estimation when most deviations from the continuum are
-    absorption (troughs), not emission (peaks). The linear system at each
-    iteration is banded (bandwidth 4) and solved directly with
-    ``scipy.linalg.solve_banded``, which is O(n) per iteration.
+
+def fit_continuum_block(M: np.ndarray, y_w: np.ndarray, basis_c: np.ndarray, D2_c: np.ndarray,
+                         lam_c: float = 2.0, ridge_c: float = 0.1,
+                         coeffs0: np.ndarray | None = None) -> dict:
+    """Block 3 of the alternating minimization: given a known "model"
+    `M(lambda)` (the current template-mixture-and-LOSVD prediction) and
+    target `y_w`, fit `C(lambda) = exp(basis_c @ coeffs)` minimizing
+    `0.5*||M*C - y_w||^2 + 0.5*lam_c*||D2_c @ coeffs||^2 + 0.5*ridge_c*
+    ||coeffs||^2` via L-BFGS-B with JAX autodiff -- structurally the
+    *same kind* of problem as `fit_log_spline_map` (an `exp`-linked
+    spline fit by curvature-penalized nonlinear least squares) but not
+    literally reusable as that function, since here the spline multiplies
+    `M` elementwise at each wavelength rather than acting as `b(v)`
+    convolved through a Doppler-shift design matrix -- a genuinely
+    different forward-model structure, not just a renamed call.
+
+    **`ridge_c` closes the curvature penalty's zero-cost null space.** A
+    second-order difference penalty (`D2_c`) assigns zero cost to the
+    constant and *linear* directions in coefficient space (a standard
+    property of any such P-spline penalty), so `lam_c` alone cannot bound
+    a near-linear trend in the recovered continuum. `ridge_c` is a direct
+    L2 penalty on the coefficients themselves, which has a real, nonzero
+    cost along that same direction -- see `dev_notes/VALIDATION_CAMPAIGN.md` Stage
+    15 for the investigation this closes. Default `0.1`: recovery RMS
+    against a known injected continuum is unaffected by `ridge_c` across
+    its whole 0-1.0 range, so the value mainly needs to be decisively
+    nonzero, not precisely tuned.
+
+    **`result["success"]` is frequently False for reasons unrelated to fit
+    quality -- don't filter on it.** This function's own L-BFGS-B call
+    intermittently reports an "ABNORMAL" line-search termination on an
+    already-well-converged solution (every multi-start candidate typically
+    agrees to several decimal places regardless of the flag). Measured
+    directly: mean recovered sigma-bias is statistically indistinguishable
+    between `success=True`- and `success=False`-flagged fits. Treat this
+    flag as a diagnostic curiosity, not a hard filter for discarding fits.
+
+    **Multi-start** guards against competing local minima the same way
+    `fit_log_spline_map`'s own multi-start does, even though the continuum
+    block's low flexibility (a handful of knots) makes that less of a
+    concern here. Unlike `fit_log_spline_map`, an explicit `coeffs0` (a
+    warm start from the previous alternating-minimization iteration) is
+    *added* to the multi-start pool rather than used exclusively, since
+    this function is always called with a warm start in practice (from
+    `_alternate_once`'s own state) -- using it exclusively would mean this
+    never actually multi-starts.
 
     Parameters
     ----------
-    y : ndarray
-        1-D flux array to fit the continuum baseline to.
-    base_mask : ndarray of bool, optional
-        Boolean mask, same length as `y`; True marks pixels that
-        participate in the fit as continuum (e.g. non-absorption-line,
-        non-emission-line pixels). Pixels outside the mask get only the
-        floor weight `eps` and thus barely constrain the baseline directly,
-        but the roughness penalty still interpolates the baseline smoothly
-        through them. Defaults to all pixels participating.
-    lam : float, optional
-        Roughness-penalty strength. Larger values produce a smoother,
-        stiffer baseline; smaller values let the baseline track the data
-        more closely.
-    p : float, optional
-        Asymmetry weight, in (0, 1). Small values (e.g. 0.001-0.01) push
-        the baseline toward the upper envelope of the noise so that
-        absorption troughs sit below it. A value of 0.5 is symmetric
-        (ordinary smoothing spline).
-    niter : int, optional
-        Number of asymmetric-reweighting iterations.
-    eps : float, optional
-        Minimum weight floor applied everywhere, preventing the banded
-        system from becoming singular where `base_mask` is False or where
-        the reweighting would otherwise assign exactly zero weight.
-    return_weights : bool, optional
-        If True, also return the final iteration's weight vector and the
-        precomputed penalty bands, e.g. for a caller that wants to inspect
-        the converged fit's effective degrees of freedom without
-        re-running the ALS iteration from scratch.
+    M : ndarray, shape (n_pix,)
+        Current template-mixture-and-LOSVD model, `sum_k w_k*(T_k conv b)`.
+    y_w : ndarray, shape (n_pix,)
+        Noise-whitened observed flux (the *same*, undivided array used
+        throughout this package -- never `y_w / M`, see module docstring).
+    basis_c, D2_c : B-spline design matrix and roughness-penalty operator
+        on the wavelength grid, from `build_bspline_basis`/
+        `difference_matrix` called on `wave_fit` instead of `v_grid`.
+    lam_c : curvature penalty weight for the continuum spline. Default
+        2.0, unvalidated -- inherited from `lam`'s own default as a
+        starting point, not independently calibrated (see
+        `tests/test_continuum.py` for what has and hasn't been checked).
+    ridge_c : direct L2 penalty on the continuum coefficients themselves,
+        default 0.1 -- see this function's own docstring above for why
+        this exists.
+    coeffs0 : optional warm-start coefficients (e.g. the previous
+        alternating-minimization iteration's own continuum coefficients).
+        Added to the multi-start pool alongside a flat (`C=1`) start and a
+        couple of small perturbed starts -- see module docstring above for
+        why this doesn't disable the pool the way `fit_log_spline_map`'s
+        `coeffs0` does.
 
     Returns
     -------
-    ndarray or tuple
-        If `return_weights` is False (default), returns the fitted
-        continuum baseline `z` as a 1-D ndarray the same length as `y`.
-        If `return_weights` is True, returns
-        ``(z, w_final, dtd_main, dtd_off1, dtd_off2)`` where `w_final` is
-        the converged weight vector and `dtd_main`/`dtd_off1`/`dtd_off2`
-        are the precomputed ``lam * D'D`` band arrays.
-
-    Notes
-    -----
-    The ``lam * D'D`` penalty bands depend only on `lam` and the array
-    length, not on the data, so they are precomputed once by
-    `_als_dtd_bands` outside the reweighting loop; only the diagonal
-    weight vector `w` is rebuilt each iteration. If the banded solve fails
-    (e.g. due to a degenerate mask), this falls back to a cubic smoothing
-    spline through the unmasked, finite pixels, or to a constant (median)
-    baseline if fewer than 6 good pixels remain.
+    dict with `C` (ndarray, shape (n_pix,), the recovered continuum
+    curve), `coeffs`, `success`, `message`, `n_coef`, `objective`,
+    `objective_gap` (gap between the best and second-best start's final
+    objective -- small means every start agreed, large means this result
+    only survived because of the multi-start search).
     """
-    from scipy.interpolate import UnivariateSpline
-    y = np.asarray(y, float)
-    L = y.size
-    base_mask = np.ones(L, dtype=bool) if base_mask is None else np.asarray(base_mask, bool)
+    n_coef = basis_c.shape[1]
+    starts = _default_continuum_starts(n_coef, coeffs0)
 
-    # Precompute penalty bands once — only w changes each iteration.
-    dtd_main, dtd_off1, dtd_off2 = _als_dtd_bands(L, lam)
+    M_j, y_w_j, basis_j, D2_j = jnp.array(M), jnp.array(y_w), jnp.array(basis_c), jnp.array(D2_c)
+    lam_c_j, ridge_c_j = jnp.asarray(lam_c), jnp.asarray(ridge_c)
 
-    w = np.where(base_mask, 1.0, eps).astype(float)
-    z = np.copy(y)
-    for _ in range(niter):
-        ab = np.zeros((5, L), dtype=float)
-        ab[2] = w + dtd_main
-        if L >= 2:
-            ab[1, 1:] = dtd_off1
-            ab[3, :-1] = dtd_off1
-        if L >= 3:
-            ab[0, 2:] = dtd_off2
-            ab[4, :-2] = dtd_off2
-        try:
-            z = solve_banded((2, 2), ab, w * y, overwrite_ab=True, overwrite_b=True, check_finite=False)
-        except Exception:
-            good = base_mask & np.isfinite(y)
-            if np.count_nonzero(good) < 6:
-                fallback = np.full(L, np.nanmedian(y))
-                if return_weights:
-                    return fallback, w, dtd_main, dtd_off1, dtd_off2
-                return fallback
-            spline = UnivariateSpline(
-                np.flatnonzero(good), y[good], k=3,
-                s=max(1.0, np.count_nonzero(good) * 0.1),
-            )
-            fallback = spline(np.arange(L))
-            if return_weights:
-                return fallback, w, dtd_main, dtd_off1, dtd_off2
-            return fallback
-        w = np.where(
-            y > z,
-            base_mask * p + (~base_mask) * eps,
-            base_mask * (1 - p) + (~base_mask) * eps,
-        )
-        w = np.maximum(w, eps)
-    if return_weights:
-        return z, w, dtd_main, dtd_off1, dtd_off2
-    return z
+    # Fused value_and_grad, not separate val_fn/grad_fn calls -- see
+    # losvd.fit_log_spline_map's identical change for the measured 1.45x
+    # speedup and the reasoning (computing the gradient already requires
+    # the forward pass, so separate calls pay for it twice per iteration).
+    val_fn = lambda c: _val_fn_continuum(c, M_j, y_w_j, basis_j, D2_j, lam_c_j, ridge_c_j)
+    vg_fn = lambda c: _vg_fn_continuum(c, M_j, y_w_j, basis_j, D2_j, lam_c_j, ridge_c_j)
+
+    def _obj_and_grad(c):
+        v, g = vg_fn(jnp.array(c))
+        return float(v), np.array(g)
+
+    fits = []
+    for c0 in starts:
+        res = scipy_minimize(_obj_and_grad, c0, jac=True, method='L-BFGS-B')
+        fits.append(res)
+
+    objectives = [float(val_fn(jnp.array(res.x))) for res in fits]
+    best_idx = int(np.argmin(objectives))
+    res = fits[best_idx]
+    objective_gap = None
+    if len(fits) > 1:
+        sorted_obj = sorted(objectives)
+        objective_gap = sorted_obj[1] - sorted_obj[0]
+
+    coeffs = res.x
+    C = np.exp(basis_c @ coeffs)
+    return dict(C=C, coeffs=coeffs, success=bool(res.success), message=str(res.message),
+                n_coef=n_coef, objective=objectives[best_idx], objective_gap=objective_gap)
 
 
-def grow_boolean_mask(mask: np.ndarray, grow_pix: int) -> np.ndarray:
+def _default_continuum_starts(n_coef: int, coeffs0: np.ndarray | None) -> list[np.ndarray]:
+    """Multi-start pool for `fit_continuum_block`: a flat (`C=1`) start,
+    a couple of small perturbed starts, and the given warm-start
+    `coeffs0` (if any) -- see `fit_continuum_block`'s own docstring for
+    why a warm start is added to the pool rather than used exclusively.
     """
-    Dilate a boolean mask by a fixed number of pixels on each side.
+    starts = [np.zeros(n_coef), np.full(n_coef, 0.05), np.full(n_coef, -0.05)]
+    if coeffs0 is not None and not np.allclose(coeffs0, 0.0):
+        starts.append(np.asarray(coeffs0, dtype=float))
+    return starts
 
-    Used to extend rejection/exclusion masks (e.g. absorption-clean
-    rejections or emission-line masks) a few pixels beyond the originally
-    flagged pixels, so that line wings adjacent to a flagged pixel are
-    also excluded rather than leaving a single unmasked pixel at the edge
-    of a feature.
+
+def fit_losvd_with_continuum(A_stack: np.ndarray, y_w: np.ndarray, wave_fit: np.ndarray,
+                              basis: np.ndarray, D2: np.ndarray,
+                              n_continuum_knots: int = 4, lam: float = 2.0, lam_c: float = 2.0,
+                              ridge_c: float = 0.1,
+                              ridge_lam: float = 1.0, w0: np.ndarray | None = None,
+                              max_iter: int = 15, tol: float = 1e-4, patience: int = 2) -> dict:
+    """Three-block alternating minimization -- LOSVD, template weights,
+    shared multiplicative continuum. See this module's own docstring for
+    the algorithm. A thin wrapper: builds the continuum's own B-spline
+    basis/penalty from `wave_fit`/`n_continuum_knots`, then calls
+    `kinextract.multi_template.fit_losvd_basis` with them -- the
+    actual three-block alternation lives there now (shared with the
+    plain two-block path), not duplicated here.
 
     Parameters
     ----------
-    mask : ndarray of bool
-        Input mask where True means rejected/masked/excluded.
-    grow_pix : int
-        Number of pixels by which to grow the mask on each side. Values
-        ``<= 0`` return a copy of `mask` unchanged.
+    A_stack, y_w, basis, D2, lam, ridge_lam : as in `fit_losvd_basis`.
+    wave_fit : ndarray, shape (n_pix,), the wavelength (not velocity)
+        grid `y_w`/`A_stack` correspond to -- used to build the
+        continuum's own B-spline basis.
+    n_continuum_knots : interior knots for the continuum spline. Default
+        4 -- deliberately much coarser than the LOSVD's own knot count.
+    lam_c : curvature penalty for the continuum block (see
+        `fit_continuum_block`).
+    ridge_c : direct L2 penalty on the continuum coefficients themselves
+        (see `fit_continuum_block`'s own docstring for why this exists).
+        Default 0.1.
+    w0 : optional starting weight vector (shape `(n_templates,)`).
+        Defaults to equal weights. Note: unlike `fit_losvd_basis`'s own
+        `w0_pool`, this takes a single vector, not a pool -- continuum-
+        cofitting does not multi-start over the weight vector.
+    max_iter, tol, patience : as in `fit_losvd_basis`'s alternation loop.
 
     Returns
     -------
-    ndarray of bool
-        Grown mask, same shape as `mask`; True wherever any pixel within
-        `grow_pix` samples was True in the input.
+    dict with `b`, `w`, `C`, `coeffs` (LOSVD), `continuum_coeffs`,
+    `success`, `n_iter`, `objective`, `objective_history`, plus
+    `n_coef_continuum`, `lam_c`, and `runtime_s` (wall time for this call).
     """
-    mask = np.asarray(mask, bool)
-    if grow_pix <= 0 or mask.size == 0:
-        return mask.copy()
-    kernel = np.ones(2 * grow_pix + 1, dtype=int)
-    grown = np.convolve(mask.astype(int), kernel, mode="same") > 0
-    return grown
-
-
-def grow_boolean_mask_A(mask: np.ndarray, x: np.ndarray, grow_A: float) -> np.ndarray:
-    """
-    Dilate a boolean mask by approximately a fixed wavelength on each side.
-
-    Converts `grow_A` (in Angstroms) to a pixel count using the median
-    pixel spacing of `x`, then calls `grow_boolean_mask`. This is the
-    wavelength-aware counterpart of `grow_boolean_mask`, useful when the
-    desired growth is naturally expressed in Angstroms (e.g. "grow the
-    emission mask by 4 Å") rather than in pixels.
-
-    Parameters
-    ----------
-    mask : ndarray of bool
-        Input mask where True means rejected/masked/excluded.
-    x : ndarray
-        Wavelength array (Å) corresponding to `mask`, used only to
-        estimate the pixel scale.
-    grow_A : float
-        Approximate growth distance in Angstroms on each side. Values
-        ``<= 0`` return a copy of `mask` unchanged.
-
-    Returns
-    -------
-    ndarray of bool
-        Grown mask, same shape as `mask`.
-    """
-    if grow_A <= 0:
-        return np.asarray(mask, bool).copy()
-    dx = np.diff(np.asarray(x, float))
-    dx = dx[np.isfinite(dx)]
-    if dx.size == 0:
-        grow_pix = 0
-    else:
-        step = float(np.median(np.abs(dx)))
-        grow_pix = int(np.ceil(grow_A / max(step, 1e-12)))
-
-    return grow_boolean_mask(mask, grow_pix)
-
-
-# =============================================================================
-# Section 2 - Stellar/nebular line tables and NIST line-list lookup
-# =============================================================================
-
-# Common rest-frame features in the 8300-8900 Å region, reused by
-# masking.py (build_emission_line_mask, the main pre-fit emission masking)
-# and plotting.py (reference-line labeling).
-DEFAULT_CAI_REGION_LINES = (
-    # H I Paschen series, approximate rest air wavelengths in Å.
-    ("paschen", "H I Pa25", 8323.42),
-    ("paschen", "H I Pa24", 8333.78),
-    ("paschen", "H I Pa23", 8345.55),
-    ("paschen", "H I Pa22", 8359.00),
-    ("paschen", "H I Pa21", 8374.48),
-    ("paschen", "H I Pa20", 8392.40),
-    ("paschen", "H I Pa19", 8413.32),
-    ("paschen", "H I Pa18", 8437.96),
-    ("paschen", "H I Pa17", 8467.25),
-    ("paschen", "H I Pa16", 8502.49),
-    ("paschen", "H I Pa15", 8545.38),
-    ("paschen", "H I Pa14", 8598.39),
-    ("paschen", "H I Pa13", 8665.02),
-    ("paschen", "H I Pa12", 8750.47),
-    ("paschen", "H I Pa11", 8862.79),
-
-    # Ca II triplet.
-    ("abs", "Ca II", 8498.02),
-    ("abs", "Ca II", 8542.09),
-    ("abs", "Ca II", 8662.14),
-
-    # Fe I stellar absorption — wavelengths from Kurucz/VALD line lists,
-    # selected for significant equivalent width in K-giant spectra.
-    ("abs", "Fe I",          8327.06),
-    ("abs", "Fe I",          8346.51),
-    ("abs", "Fe I",          8387.77),
-    ("abs", "Fe I / Ni I",   8471.84),
-    ("abs", "Fe I",          8514.08),
-    ("abs", "Fe I",          8536.87),
-    ("abs", "Fe I",          8582.26),
-    ("abs", "Fe I",          8611.80),
-    ("abs", "Fe I",          8621.61),
-    ("abs", "Fe I",          8643.63),
-    ("abs", "Fe I",          8688.63),
-    ("abs", "Fe I",          8699.46),
-    ("abs", "Fe I",          8710.39),
-    ("abs", "Fe I",          8824.22),
-    ("abs", "Fe I",          8838.43),
-
-    # Ti I — very strong in K-M giants; wavelengths from Kurucz/VALD.
-    ("abs", "Ti I",          8357.68),
-    ("abs", "Ti I",          8382.54),
-    ("abs", "Ti I",          8408.90),
-    ("abs", "Ti I",          8412.36),
-    ("abs", "Ti I",          8435.65),
-    ("abs", "Ti I",          8468.40),
-    ("abs", "Ti I",          8510.74),
-    ("abs", "Ti I",          8518.35),
-    ("abs", "Ti I",          8521.13),
-    ("abs", "Ti I",          8529.44),
-    ("abs", "Ti I",          8556.98),
-    ("abs", "Ti I",          8666.70),
-    ("abs", "Ti I",          8682.98),
-    ("abs", "Ti I",          8734.46),
-    ("abs", "Ti I",          8759.84),
-    ("abs", "Ti I",          8786.04),
-
-    # Ca I
-    ("abs", "Ca I",          8539.15),
-
-    # Mg I
-    ("abs", "Mg I",          8806.76),
-
-    # Si I
-    ("abs", "Si I",          8728.01),
-    ("abs", "Si I",          8742.45),
-
-    # Ni I
-    ("abs", "Ni I",          8361.92),
-    ("abs", "Ni I",          8476.85),
-    ("abs", "Ni I",          8692.85),
-    ("abs", "Ni I",          8703.25),
-
-    # Cr I
-    ("abs", "Cr I",          8308.45),
-    ("abs", "Cr I",          8344.09),
-    ("abs", "Cr I",          8465.42),
-
-    # Ba II — strong in luminous giants due to s-process enhancement
-    ("abs", "Ba II",         8559.60),
-
-    # V I (Vanadium) — significant in K giants
-    ("abs", "V I",           8675.20),
-
-    # TiO δ (0,0) bandhead — strong in M2+ giants; sits just longward of CaT
-    ("abs", r"TiO $\delta$",         8859.0),
-
-    # Near-IR Ca I
-    ("abs", "Ca I",          9257.0),   # moderately strong in K giants
-
-    # CN red system A²Π–X²Σ⁺ band; significant in K giants and CN-rich stars
-    ("abs", "CN",            9350.0),   # (0,0) band onset ~9100–9400 Å
-
-    # Paschen series beyond Pa11: Pa8/Pa7 are the strongest in 8900–9500 Å
-    ("paschen", "H I Pa9",   8863.0),   # Pa9 (n=12→3); often blended with TiO δ
-    ("paschen", "H I Pa8",   9015.0),   # Pa8 (n=11→3)
-    ("paschen", "H I Pa7",   9229.0),   # Pa-δ (n=10→3); strongest Paschen in this window
-
-    # Possible emission/nebular lines or emission-like contaminants.
-    ("em", "O I",            8446.36),
-    ("em", "[Cl II]",        8578.70),
-    ("em", "[Fe II]",        8616.95),
-    ("em", "[N I]",          8680.28),
-    ("em", "[N I]",          8683.40),
-    ("em", "[C I]",          8727.13),
-    ("em", "[S III]",        9068.60),
-    ("em", "[S III]",        9530.60),
-)
-
-# Strong stellar absorption features in the Mg b / green region (rest air, Å).
-# Tags: "abs" = stellar absorption, "em" = nebular/emission-line contaminant.
-DEFAULT_MGB_REGION_LINES = (
-    # Balmer series
-    ("abs", "H I Hbeta",     4861.33),
-    ("abs", "H I Hgamma",    4340.47),
-
-    # Fe I / blends — strong in old stellar populations; Lick Fe5015 index at 5015
-    ("abs", "Fe I",          5015.20),  # Fe5015 Lick index; Fe I + Ti I blend
-    ("abs", "Fe I / blend",  4957.60),
-    ("abs", "Fe I / blend",  5041.10),
-    ("abs", "Fe I / blend",  5056.50),
-    ("abs", "Fe I / blend",  5270.40),
-    ("abs", "Fe I / blend",  5328.04),
-    ("abs", "Fe I / blend",  5371.49),
-    ("abs", "Fe I / blend",  5397.13),
-    ("abs", "Fe I / blend",  5406.00),  # Fe5406 Lick index
-    ("abs", "Fe I / blend",  5446.92),
-
-    # Mg b triplet — almost always present in early-type spectra
-    ("abs", "Mg b",          5167.32),
-    ("abs", "Mg b",          5172.68),
-    ("abs", "Mg b",          5183.60),
-
-    # Mg I / MgH
-    ("abs", "Mg I",          5528.41),
-    ("abs", "MgH",           5138.70),  # A²Π-X²Σ⁺ (0,0) bandhead; gravity-sensitive
-
-    # Common nebular emitters in this window (should be clipped, not protected)
-    ("em", "[O III]",        4958.91),
-    ("em", "[O III]",        5006.84),
-    ("em", "He I",           5015.68),
-    ("em", "[N I]",          5197.90),
-    ("em", "[N I]",          5200.26),
-)
-
-# Stellar absorption and nebular emission features in the 5500–8300 Å gap
-# between the Mg b and Ca II triplet windows.
-DEFAULT_OPTICAL_RED_LINES = (
-    # ── Fe I / blends (5600–6500 Å) ─────────────────────────────────────────
-    # Fe5709/Fe5782 Lick indices; measurable in K giants
-    ("abs", "Fe I",            5709.38),
-    ("abs", "Fe I",            5780.38),  # Fe5782 Lick index
-    ("abs", "Fe I",            6136.61),
-    ("abs", "Fe I",            6191.56),
-    ("abs", "Fe I",            6355.03),
-    ("abs", "Fe I",            6393.60),
-    ("abs", "Fe I",            6421.36),
-    ("abs", "Fe I",            6430.85),
-    ("abs", "Fe I",            7511.02),
-    ("abs", "Fe I",            7531.15),
-
-    # ── Na I D doublet — among the strongest features in K giants; very IMF-sensitive
-    ("abs", "Na I D",          5889.95),
-    ("abs", "Na I D",          5895.92),
-
-    # ── Ca I — moderately strong in K/G giants ───────────────────────────────
-    ("abs", "Ca I",            6122.22),
-    ("abs", "Ca I",            6162.17),
-    ("abs", "Ca I",            6347.23),  # stronger Ca I in K giants
-    ("abs", "Ca I",            6373.48),
-
-    # ── Ba II — s-process marker; strong in luminous K giants ────────────────
-    ("abs", "Ba II",           6496.90),
-
-    # ── Mg I ────────────────────────────────────────────────────────────────
-    ("abs", "Mg I",            5528.41),
-
-    # ── O I triplet — photospheric absorption (NOT the emission at 6300 Å) ───
-    ("abs", "O I",             7771.94),
-    ("abs", "O I",             7774.17),
-    ("abs", "O I",             7775.39),
-
-    # ── K I resonance doublet — gravity-sensitive; significant in K/M giants ─
-    ("abs", "K I",             7664.91),
-    ("abs", "K I",             7698.96),
-
-    # ── Na I NIR doublet — IMF-sensitive indicator ───────────────────────────
-    ("abs", "Na I",            8183.27),
-    ("abs", "Na I",            8194.82),
-
-    # ── TiO molecular bands (K5–M9 giants; multiple band systems) ────────────
-    # γ' system (B³Π–X³Δ): bandheads at ~5847, ~6159, ~6651 Å
-    ("abs", r"TiO $\gamma'$",          5847.0),   # (1,0) bandhead; onset K5 giants
-    ("abs", r"TiO $\gamma'$",          6159.0),   # (0,0) bandhead; "TiO₁/₂" Lick region onset
-    ("abs", r"TiO $\gamma'$",          6651.0),   # (0,1) bandhead; Lick TiO₃ region
-    # γ system (A³Φ–X³Δ): prominent bandheads 7054–7676 Å
-    ("abs", r"TiO $\gamma$",           7055.0),   # (0,0) bandhead; strongest optical TiO feature
-    ("abs", r"TiO $\gamma$",           7087.0),   # secondary feature in (0,0) complex
-    ("abs", r"TiO $\gamma$",           7126.0),   # (1,1) bandhead; Lick TiO₃/₄ region
-    ("abs", r"TiO $\gamma$",           7589.0),   # (0,1) bandhead; Lick TiO₄ region
-    ("abs", r"TiO $\gamma$",           7676.0),   # (1,2) bandhead
-    # δ system: prominent bandhead at 8432 Å (in gap between Na I NIR and CaT)
-    ("abs", r"TiO $\delta$",           8432.0),   # (1,0) bandhead
-
-    # ── Common nebular emission lines in this window ──────────────────────────
-    ("em",  "[O I]",           5577.34),  # sky/nebular [O I]
-    ("em",  "He I",            5875.62),  # AGN/HII region; also stellar in hot types
-    ("em",  "[O I]",           6300.30),
-    ("em",  "[O I]",           6363.78),
-    ("em",  "[N II]",          5754.60),  # faint but present in low-ionization nebulae
-    ("em",  r"H$\alpha$",      6562.80),
-    ("em",  "[N II]",          6548.05),
-    ("em",  "[N II]",          6583.45),
-    ("em",  "[S II]",          6716.44),
-    ("em",  "[S II]",          6730.82),
-    ("em",  "[Ar III]",        7135.80),
-    ("em",  "[S III]",         9068.60),
-    ("em",  "[S III]",         9530.60),
-)
-
-# Combined look-up: maps tag+name to rest wavelength for all windows.
-_STELLAR_ABSORPTION_LINE_TABLES = (
-    DEFAULT_CAI_REGION_LINES,
-    DEFAULT_MGB_REGION_LINES,
-    DEFAULT_OPTICAL_RED_LINES,
-)
-
-# Default set of stellar photosphere species to query from NIST.
-_NIST_STELLAR_ELEMENTS: tuple[str, ...] = (
-    "Fe I", "Fe II",
-    "Ca I", "Ca II",
-    "Ti I", "Ti II",
-    "Mg I", "Mg II",
-    "Si I", "Si II",
-    "Cr I",
-    "Ni I",
-    "Mn I",
-    "V I",
-    "Ba II",
-    "Co I",
-    "Sc I", "Sc II",
-)
-
-
-def query_nist_lines(
-    wavemin_A: float,
-    wavemax_A: float,
-    elements: tuple[str, ...] = _NIST_STELLAR_ELEMENTS,
-    min_rel_intensity: float = 10.0,
-    default_half_width_A: float = 3.0,
-    cache_path: "str | None" = None,
-    force_refresh: bool = False,
-) -> "list[tuple[float, float, str]]":
-    """Query NIST Atomic Spectra Database for stellar absorption lines.
-
-    Returns a list of ``(center_A, half_width_A, name)`` tuples suitable for
-    direct assignment to ``cfg.extra_absorption_lines``.
-
-    Parameters
-    ----------
-    wavemin_A, wavemax_A
-        Wavelength range in Angstroms (vacuum).
-    elements
-        Iterable of species strings such as ``"Fe I"``, ``"Ca II"``.
-        Defaults to ``_NIST_STELLAR_ELEMENTS``.
-    min_rel_intensity
-        Minimum NIST relative intensity to include (rough line-strength proxy).
-        Lines where intensity cannot be parsed are included by default.
-    default_half_width_A
-        Half-width assigned to every returned line for use in masking.
-    cache_path
-        If given, cache query results to this JSON file and re-use on subsequent
-        calls (unless ``force_refresh=True``).
-    force_refresh
-        Ignore the cache file and re-query NIST.
-
-    Returns
-    -------
-    list of (center_A, half_width_A, name) tuples.
-
-    Notes
-    -----
-    Tries ``astroquery.nist`` first (most reliable).  Falls back to a direct
-    HTTP request to ``physics.nist.gov`` with line-by-line HTML parsing when
-    astroquery is unavailable.  If both fail, raises ``RuntimeError`` with a
-    diagnostic message.
-
-    The NIST ASD ``Rel.`` intensity column contains a mix of integers and
-    annotated strings (e.g. ``"100*"``); non-numeric suffixes are stripped
-    before comparison.
-    """
-    import json
-    import re
-    from pathlib import Path
-
-    # ------------------------------------------------------------------ cache
-    cache_key = {
-        "wavemin": wavemin_A,
-        "wavemax": wavemax_A,
-        "elements": sorted(elements),
-        "min_rel_intensity": min_rel_intensity,
-    }
-
-    if cache_path is not None and not force_refresh:
-        cp = Path(cache_path)
-        if cp.exists():
-            try:
-                stored = json.loads(cp.read_text())
-                if stored.get("_cache_key") == cache_key:
-                    lines = stored["lines"]
-                    log(f"query_nist_lines: loaded {len(lines)} lines from cache {cp}")
-                    return [(float(c), float(hw), str(n)) for c, hw, n in lines]
-            except Exception:
-                pass  # corrupt cache — fall through to query
-
-    results: list[tuple[float, float, str]] = []
-    errors: list[str] = []
-
-    # ------------------------------------------------------------------ astroquery path
-    try:
-        import astropy.units as u  # type: ignore
-        from astroquery.nist import Nist  # type: ignore
-
-        _logged_cols: bool = False
-        for species in elements:
-            try:
-                tbl = Nist.query(
-                    wavemin_A * u.AA,
-                    wavemax_A * u.AA,
-                    linename=species,
-                    wavelength_type="vacuum",
-                )
-                if tbl is None or len(tbl) == 0:
-                    continue
-                if not _logged_cols:
-                    log(f"query_nist_lines: astroquery columns: {tbl.colnames}")
-                    _logged_cols = True
-                # astroquery.nist column names: "Observed", "Ritz", "Rel.", etc.
-                # Older versions used names containing "wave"; check both.
-                wave_col = next(
-                    (
-                        c for c in tbl.colnames
-                        if c.lower() in ("observed", "ritz")
-                        or "wave" in c.lower()
-                        or "obs" in c.lower()
-                    ),
-                    None,
-                )
-                reli_col = next(
-                    (c for c in tbl.colnames if c.strip(".").lower() == "rel"
-                     or "rel" in c.lower()),
-                    None,
-                )
-                if wave_col is None:
-                    errors.append(
-                        f"{species}: unrecognised column names {tbl.colnames!r}"
-                    )
-                    continue
-                for row in tbl:
-                    try:
-                        raw_wav = row[wave_col]
-                        # astroquery returns MaskedColumn rows; skip masked entries
-                        import numpy.ma as _ma
-                        if _ma.is_masked(raw_wav):
-                            continue
-                        wav = float(raw_wav)
-                    except (TypeError, ValueError):
-                        continue
-                    if not np.isfinite(wav):
-                        continue
-                    if not (wavemin_A <= wav <= wavemax_A):
-                        continue
-                    if reli_col is not None:
-                        raw = str(row[reli_col]).strip()
-                        # Strip annotations like '*', '?', 'b', 'c', etc.
-                        num = re.sub(r"[^\d.]", "", raw)
-                        if num:
-                            try:
-                                if float(num) < min_rel_intensity:
-                                    continue
-                            except ValueError:
-                                pass
-                    results.append((wav, default_half_width_A, species))
-            except Exception as e:
-                errors.append(f"{species}: {e}")
-
-        if results:
-            log(
-                f"query_nist_lines (astroquery): {len(results)} lines"
-                + (f"; {len(errors)} species skipped" if errors else "")
-            )
-            results.sort(key=lambda t: t[0])
-            _nist_cache_write(cache_path, cache_key, results)
-            return results
-
-    except ImportError:
-        errors.append("astroquery not installed")
-
-    # ------------------------------------------------------------------ HTTP fallback
-    try:
-        import urllib.parse
-        import urllib.request
-
-        for species in elements:
-            try:
-                params = urllib.parse.urlencode(
-                    {
-                        "spectra": species,
-                        "limits_type": "0",
-                        "low_w": f"{wavemin_A:.2f}",
-                        "upp_w": f"{wavemax_A:.2f}",
-                        "unit": "0",  # 0 = Angstrom
-                        "de": "0",
-                        "format": "3",  # tab-separated ASCII
-                        "line_out": "0",
-                        "en_unit": "0",
-                        "output": "0",
-                        "bibrefs": "0",
-                        "show_obs_wl": "1",
-                        "show_calc_wl": "0",
-                        "order_out": "0",
-                        "max_low_enrg": "",
-                        "show_av": "2",  # vacuum wavelengths
-                        "max_upp_enrg": "",
-                        "tsb_value": "0",
-                        "min_str": "",
-                        "A_out": "0",
-                        "intens_out": "on",
-                        "allowed_out": "1",
-                        "forbid_out": "1",
-                        "conf_out": "0",
-                        "term_out": "0",
-                        "enrg_out": "0",
-                        "J_out": "0",
-                    }
-                )
-                url = f"https://physics.nist.gov/cgi-bin/ASD/lines1.pl?{params}"
-                req = urllib.request.Request(
-                    url, headers={"User-Agent": "kinextract/1.0 (science)"}
-                )
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    text = resp.read().decode("utf-8", errors="replace")
-
-                for line in text.splitlines():
-                    parts = line.split("\t")
-                    if len(parts) < 2:
-                        continue
-                    wav_str = parts[0].strip().strip('"')
-                    if not wav_str or wav_str.lower().startswith("obs"):
-                        continue
-                    try:
-                        wav = float(wav_str)
-                    except ValueError:
-                        continue
-                    if not (wavemin_A <= wav <= wavemax_A):
-                        continue
-                    if len(parts) >= 2:
-                        raw = parts[1].strip().strip('"')
-                        num = re.sub(r"[^\d.]", "", raw)
-                        if num:
-                            try:
-                                if float(num) < min_rel_intensity:
-                                    continue
-                            except ValueError:
-                                pass
-                    results.append((wav, default_half_width_A, species))
-            except Exception as e:
-                errors.append(f"{species}: {e}")
-
-        if results:
-            log(
-                f"query_nist_lines (HTTP): {len(results)} lines"
-                + (f"; {len(errors)} species had errors" if errors else "")
-            )
-            results.sort(key=lambda t: t[0])
-            _nist_cache_write(cache_path, cache_key, results)
-            return results
-
-    except Exception as e:
-        errors.append(f"HTTP fallback failed: {e}")
-
-    raise RuntimeError(
-        "query_nist_lines: all query methods failed.\n"
-        "Install astroquery (pip install astroquery) for the most reliable path.\n"
-        "Errors:\n" + "\n".join(f"  {e}" for e in errors)
-    )
-
-
-def _nist_cache_write(
-    cache_path: "str | None",
-    cache_key: dict,
-    results: "list[tuple[float, float, str]]",
-) -> None:
-    """Write `query_nist_lines` results to `cache_path` as JSON, if given."""
-    if cache_path is None:
-        return
-    import json
-    from pathlib import Path
-
-    try:
-        data = {"_cache_key": cache_key, "lines": results}
-        Path(cache_path).write_text(json.dumps(data, indent=2))
-    except Exception as e:
-        log(f"query_nist_lines: could not write cache: {e}")
-
-
-def _center_to_fit_frame(center: float, frame: str, cfg: FitConfig) -> float:
-    """
-    Convert a line center to the frame of st.x.
-
-    For raw .spec files, st.x is rest-frame because load_spectrum_for_fit()
-    divides wavelengths by 1 + zgal. Therefore observed-frame masks must be
-    divided by 1 + zgal.
-    """
-    frame = frame.lower().strip()
-    c = float(center)
-
-    if frame == "observed":
-        c = c / (1.0 + cfg.zgal)
-    elif frame != "rest":
-        raise ValueError(f"Mask frame must be 'rest' or 'observed', got {frame!r}")
-
-    return c
-
-
+    if max_iter < 1:
+        raise ValueError(f"max_iter must be >= 1 (got {max_iter}).")
+
+    n_templates = A_stack.shape[0]
+    basis_c, n_coef_c = build_bspline_basis(wave_fit, n_interior_knots=n_continuum_knots, degree=3)
+    dw = (wave_fit.max() - wave_fit.min()) / (n_continuum_knots + 1)
+    D2_c = difference_matrix(n_coef_c, order=2, dv=dw, dv_ref=dw)  # no cross-grid rescaling needed here
+    w0 = np.ones(n_templates) if w0 is None else np.asarray(w0, dtype=float)
+
+    t0 = time.perf_counter()
+    result = fit_losvd_basis(A_stack, y_w, basis, D2, lam=lam, ridge_lam=ridge_lam,
+                              w0_pool=[w0], max_iter=max_iter, tol=tol, patience=patience,
+                              continuum_basis=basis_c, D2_c=D2_c, lam_c=lam_c, ridge_c=ridge_c)
+    result["runtime_s"] = time.perf_counter() - t0
+    return result

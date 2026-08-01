@@ -1,193 +1,149 @@
-"""
-kinextract — Non-parametric LOSVD spectral fitting package.
+"""kinextract: a non-parametric LOSVD (line-of-sight velocity
+distribution) extractor for galaxy spectroscopy.
 
-The top-level namespace (``import kinextract`` / ``from kinextract import
-...``) exposes the public API: configuration (:class:`FitConfig`), the
-main entry point (:func:`run_spectral_fit`), error estimation
-(:class:`LOSVDErrorEstimator`), empirical recovery-bias validation
-(:func:`assess_recovery_bias`), plotting, and commonly reused standalone
-utilities (asymmetric-least-squares continuum normalization,
-Gauss-Hermite LOSVD characterization, legacy-format file I/O).
+Recovers the LOSVD as a smoothly-positive, low-dimensional log-density
+spline directly from an absorption-line galaxy spectrum, without assuming
+a Gauss-Hermite (or any other fixed-shape) functional form for the
+kinematics themselves -- see `kinextract.losvd` for the method and
+`kinextract.config.FitConfig` for the tunable parameters.
 
-Internal implementation helpers (leading-underscore names such as
-``_fit_map_once`` or ``_update_clean_mask``) are intentionally *not*
-imported here; they remain documented and importable from their defining
-submodule (e.g. ``from kinextract.fitting import _fit_map_once``) for
-advanced use, but are left out of tab-completion/``dir(kinextract)`` and
-``__all__`` so the public surface stays easy to scan. See
-``FitConfig.describe()`` for a similar "what can I tune" overview of the
-configuration object specifically.
+One fitting engine handles any number of templates (`kinextract.
+multi_template.fit_losvd`, `n_templates >= 1`) -- there is no separate
+single-template code path.
+
+Submodules:
+  losvd          -- the core LOSVD fitter (`fit_log_spline_map`).
+  config         -- `FitConfig`, the tunable parameters.
+  forward_model  -- template Doppler-shifting and design-matrix construction.
+  gh_moments     -- summarizing a recovered LOSVD as (V, sigma, h3, h4).
+  multi_template -- `fit_losvd`, the end-to-end fitting entry point.
+  uncertainty    -- parametric-bootstrap uncertainty quantification.
+  cleaning       -- iterative sigma-clipping for unmodeled contamination,
+                    plus pre-fit emission-line detection/masking.
+  continuum      -- shared multiplicative continuum, 3-block alternating fit.
+  bias_correction -- synthetic-calibrated (Pinkney et al. 2003-style) correction
+                     for regularization/shrinkage bias in recovered sigma/h4.
+  lsf            -- instrument/template line-spread-function (LSF) matching,
+                     needed before using any template library not already
+                     natively at the target instrument's own resolution.
+  aic_regularization -- data-driven regularization-strength selection via
+                     Lipka & Thomas (2021)/Thomas & Lipka (2022)'s
+                     bootstrap-estimated generalized AIC, as an alternative
+                     to a fixed `cfg.lam`.
+  noise_model    -- pluggable AR(1) noise-covariance whitening, replacing
+                     the implicit independent-per-pixel-noise assumption;
+                     `rho=0.0` (the default) reproduces old behavior exactly.
+  emiles         -- E-MILES SSP template packing/loading, LSF-matched at
+                     pack time; a first-class template source alongside
+                     the real 33-star MUSE library.
+  muse_cube      -- shared IFU-cube container + FITS I/O, for real or
+                     synthetic MUSE-like data.
+  mock_cube      -- synthetic Sersic-profile MUSE-like cube generator,
+                     for testing spatial binning/template-reduction with
+                     known ground truth.
+  binning        -- "dartboard" spatial binning (log/linear-radial x
+                     equal-angle sectors), for extracting per-bin spectra
+                     from an IFU cube.
+  template_reduction -- iterative full-grid-fit + NNLS-threshold
+                     reduction to a representative template subset,
+                     reusable across a whole cube.
+
+See `examples/notebooks/` for worked examples and `README.md` for current
+package status and scope.
 """
 from __future__ import annotations
 
-# ── Utilities ──────────────────────────────────────────────────────────────
-from ._utils import BIG, CEE, Timer, log, set_verbose
-from ._version import __version__
+import os as _os
 
-# ── Configuration ──────────────────────────────────────────────────────────
-from .config import FitConfig, load_config_from_toml
+# JAX float64 by default (opt out with KINEXTRACT_NO_X64=1). This is a
+# correctness requirement, not a preference: under JAX's default float32,
+# L-BFGS-B demonstrably stalls far from the optimum in the stiff
+# heavy-penalty regime the (now default) third-difference penalty operates
+# in on wide velocity grids -- measured at sigma=300/S N=30, lam=65536:
+# 35% vs 6% shape residual, objective 80 units above the true minimum,
+# reported as `success=True`. Float64 was validated as statistically
+# neutral for the order-2 penalty path on the full 480-case grid before
+# becoming the default (dev_notes/REGULARIZATION_INVESTIGATION_LOG.md,
+# 2026-07-27; ~2x runtime cost). Must run before any jax-using submodule
+# import below creates arrays.
+if _os.environ.get("KINEXTRACT_NO_X64", "") != "1":
+    import jax as _jax
+    _jax.config.update("jax_enable_x64", True)
 
-# ── Continuum ──────────────────────────────────────────────────────────────
-from .continuum import (
-    asymmetric_least_squares_continuum,
-    grow_boolean_mask,
-    grow_boolean_mask_A,
-    robust_sigma,
-)
-
-# ── Error estimation ───────────────────────────────────────────────────────
-from .errors import LOSVDErrorEstimator, estimate_losvd_errors
-
-# ── Fitting ────────────────────────────────────────────────────────────────
-from .fitting import (
-    build_parameter_xscale,
-    compute_losvd_n_peaks,
-    compute_losvd_roughness,
-    fit_state_map_with_optional_clean,
-    run_iterative_clean_map,
-    run_spectral_fit,
-)
-
-# ── I/O helpers ────────────────────────────────────────────────────────────
-from .io import (
-    build_wavelength_from_index,
-    count_in_window,
-    estimate_step_from_wavelength,
-    infer_output_prefix,
-    nint_fortran,
-    read_galaxy_index_flux_err,
-    read_galaxy_params,
-    read_norm_spectrum,
-    read_template_list,
-    read_template_xy,
-    select_region_with_errors,
-    setbadreg,
-    write_fitlov_outputs,
-    write_fitlov_outputs_from_model,
-    write_gh_errors_file,
-    write_losvd_errors_file,
-)
-
-# ── Joint continuum-in-the-model fit ────────────────────────────────────────
-from .joint import (
-    build_pspline_design,
-    evaluate_model_gp_joint,
-    fit_joint,
-    fit_joint_auto_xlam,
-    fit_joint_auto_xlam_sigl0,
-    run_joint_fit,
-)
-
-# ── LOSVD analysis ─────────────────────────────────────────────────────────
 from .losvd import (
-    fh3_fortran_like,
-    fh4_fortran_like,
-    fit_losvd_gauss_hermite,
-    fit_losvd_gauss_hermite_higher,
-    gauss_hermite_losvd_model,
-    gauss_hermite_losvd_model_ho,
-    getfwhm_fortran_like,
+    build_bspline_basis, build_spline_truth, difference_matrix, default_initial_coeffs, fit_log_spline_map,
+    tapered_lam_vector, penalty_row_velocities,
 )
-
-# ── Masking ────────────────────────────────────────────────────────────────
-from .masking import (
-    build_clean_protect_mask,
-    build_emission_line_mask,
+from .forward_model import (
+    build_velocity_grid, shift_template, build_template_stack,
+    mask_wavelength_windows,
 )
-
-# ── Recovery-bias validation ───────────────────────────────────────────────
-from .mocks import build_matched_mock, true_losvd_on_grid
-
-# ── Numerics ───────────────────────────────────────────────────────────────
-# Expose jax at package level for `import kinextract as sf; sf.jax`
-from .numerics import (
-    compute_weighted_template_spectrum,
-    evaluate_model_gp,
-    jax,
-    objective_components,
-    objective_map,
+from .gh_moments import (
+    gauss_hermite_model, fit_gauss_hermite,
+    compute_direct_moments, fit_h3_h4, compute_losvd_moments, shape_aware_taper_correction,
 )
-
-# ── Plotting ───────────────────────────────────────────────────────────────
-from .plotting import (
-    PROMINENT_STELLAR_LINES,
-    plot_continuum,
-    plot_fit,
-    plot_losvd,
+from .config import FitConfig
+from .multi_template import fit_losvd, fit_losvd_basis, fit_losvd_parallel
+from .uncertainty import bootstrap_losvd, bootstrap_losvd_parallel, calibrate_noise_scale
+from .cleaning import (
+    fit_losvd_clean, fit_losvd_clean_parallel, detect_emission_lines, DEFAULT_CAT_EMISSION_LINES,
+    detect_emission_from_residual, compute_fit_rms,
 )
-
-# ── Spectrum loading ────────────────────────────────────────────────────────
-from .spectrum import (
-    build_initial_guess_nonparam,
-    choose_norm_wavelength_frame,
-    fortran_rebin_after_redshift,
-    load_spectrum_for_fit,
-    make_fit_state,
+from .continuum import fit_continuum_block, fit_losvd_with_continuum
+from .bias_correction import (
+    BiasCalibration, PerLamCalibration, load_calibration_table, load_per_lam_calibration_table,
+    estimate_snr_whitened, correct_moments, correct_losvd, calibration_has_lam_axis,
+    get_default_lam_axis_calibration,
 )
-
-# ── State ──────────────────────────────────────────────────────────────────
-from .state import (
-    FitState,
-    getnlosvd_fast_from_b,
-    precompute_ip_map,
-    precompute_losvd_interp,
+from .calibrate_bias import run_calibration_sweep, save_calibration_table
+from .ablation import (
+    AblationConfig, fit_one, run_ablation_sweep, save_ablation_table, load_ablation_table,
 )
-
-# ── Templates ──────────────────────────────────────────────────────────────
-from .templates import (
-    build_template_matrix_fortran,
-    convolve_gaussian_pixels,
-    interp_template_tp_with_outside,
-    resolution_mismatch_sigma_A,
+from .lsf import fwhm_to_sigma, muse_lsf_fwhm, variable_gaussian_convolve, match_gaussian_lsf
+from .aic_regularization import (
+    AICSelectionResult, estimate_m_eff, select_lambda_aic,
+    estimate_m_eff_local, select_lambda_aic_local,
 )
-from .validation import assess_recovery_bias, correct_recovered_losvd
+from .noise_model import build_ar1_covariance, whiten, estimate_correlation_length
+from .emiles import parse_emiles_filename, pack_emiles_templates, load_emiles_templates
+from .muse_cube import MuseCube, white_light_image, extract_aperture_spectrum, load_muse_cube, save_muse_cube_fits
+from .mock_cube import build_mock_cube
+from .binning import (
+    DartboardBins, log_radial_edges, linear_radial_edges, uniform_theta_edges,
+    build_reflected_sin_theta_edges, assign_spaxels_to_bins,
+)
+from .template_reduction import (
+    TemplateReductionResult, reduce_templates_iteratively, save_template_subset, load_template_subset,
+)
 
 __all__ = [
-    "__version__",
-    # utils
-    "CEE", "BIG", "log", "Timer", "set_verbose",
-    # config
-    "FitConfig", "load_config_from_toml",
-    # state
-    "FitState", "precompute_losvd_interp", "precompute_ip_map",
-    "getnlosvd_fast_from_b",
-    # io
-    "read_galaxy_index_flux_err", "read_norm_spectrum", "read_template_xy",
-    "read_template_list", "infer_output_prefix", "nint_fortran", "setbadreg",
-    "build_wavelength_from_index", "select_region_with_errors",
-    "estimate_step_from_wavelength", "count_in_window", "read_galaxy_params",
-    "write_fitlov_outputs", "write_fitlov_outputs_from_model",
-    "write_losvd_errors_file", "write_gh_errors_file",
-    # joint continuum-in-the-model fit
-    "run_joint_fit", "fit_joint", "fit_joint_auto_xlam", "fit_joint_auto_xlam_sigl0",
-    "build_pspline_design", "evaluate_model_gp_joint",
-    # templates
-    "interp_template_tp_with_outside", "build_template_matrix_fortran",
-    "resolution_mismatch_sigma_A", "convolve_gaussian_pixels",
-    # continuum
-    "robust_sigma", "asymmetric_least_squares_continuum",
-    "grow_boolean_mask", "grow_boolean_mask_A",
-    # numerics
-    "evaluate_model_gp", "objective_map", "objective_components",
-    "compute_weighted_template_spectrum", "jax",
-    # masking
-    "build_emission_line_mask", "build_clean_protect_mask",
-    # spectrum
-    "choose_norm_wavelength_frame", "fortran_rebin_after_redshift",
-    "load_spectrum_for_fit", "make_fit_state", "build_initial_guess_nonparam",
-    # fitting
-    "build_parameter_xscale", "run_iterative_clean_map",
-    "compute_losvd_roughness", "compute_losvd_n_peaks",
-    "fit_state_map_with_optional_clean", "run_spectral_fit",
-    # losvd
-    "fh3_fortran_like", "fh4_fortran_like", "gauss_hermite_losvd_model",
-    "gauss_hermite_losvd_model_ho", "fit_losvd_gauss_hermite",
-    "fit_losvd_gauss_hermite_higher", "getfwhm_fortran_like",
-    # plotting
-    "plot_fit", "plot_losvd", "plot_continuum", "PROMINENT_STELLAR_LINES",
-    # errors
-    "LOSVDErrorEstimator", "estimate_losvd_errors",
-    # recovery-bias validation
-    "build_matched_mock", "true_losvd_on_grid",
-    "assess_recovery_bias", "correct_recovered_losvd",
+    "build_bspline_basis", "build_spline_truth", "difference_matrix", "default_initial_coeffs", "fit_log_spline_map",
+    "tapered_lam_vector", "penalty_row_velocities",
+    "build_velocity_grid", "shift_template", "build_template_stack",
+    "mask_wavelength_windows",
+    "gauss_hermite_model", "fit_gauss_hermite",
+    "compute_direct_moments", "fit_h3_h4", "compute_losvd_moments", "shape_aware_taper_correction",
+    "FitConfig",
+    "fit_losvd", "fit_losvd_basis", "fit_losvd_parallel",
+    "bootstrap_losvd", "bootstrap_losvd_parallel", "calibrate_noise_scale",
+    "fit_losvd_clean", "detect_emission_lines", "DEFAULT_CAT_EMISSION_LINES",
+    "detect_emission_from_residual", "compute_fit_rms",
+    "fit_continuum_block", "fit_losvd_with_continuum",
+    "BiasCalibration", "PerLamCalibration", "load_calibration_table", "load_per_lam_calibration_table",
+    "estimate_snr_whitened", "correct_moments", "correct_losvd", "calibration_has_lam_axis",
+    "get_default_lam_axis_calibration",
+    "run_calibration_sweep", "save_calibration_table",
+    "AblationConfig", "fit_one", "run_ablation_sweep", "save_ablation_table", "load_ablation_table",
+    "fwhm_to_sigma", "muse_lsf_fwhm", "variable_gaussian_convolve", "match_gaussian_lsf",
+    "AICSelectionResult", "estimate_m_eff", "select_lambda_aic",
+    "estimate_m_eff_local", "select_lambda_aic_local",
+    "build_ar1_covariance", "whiten", "estimate_correlation_length",
+    "parse_emiles_filename", "pack_emiles_templates", "load_emiles_templates",
+    "MuseCube", "white_light_image", "extract_aperture_spectrum", "load_muse_cube", "save_muse_cube_fits",
+    "build_mock_cube",
+    "DartboardBins", "log_radial_edges", "linear_radial_edges", "uniform_theta_edges",
+    "build_reflected_sin_theta_edges", "assign_spaxels_to_bins",
+    "TemplateReductionResult", "reduce_templates_iteratively", "save_template_subset", "load_template_subset",
 ]
+
+__version__ = "1.0.0"

@@ -1,0 +1,49 @@
+
+=== check_extreme_narrow_sigma ===
+<string>:22: UserWarning: FitConfig.lam=0.5 is below 1.0, the observed sweet spot under the current velocity-spacing-scaled curvature penalty. Worst-case shape residual was measured at 18% (lam=0.5) rising to 43% (lam=0.1) in validation testing from noise overfitting -- see `lam`'s own help text (`FitConfig.describe('lam')`). Only proceed if you've validated this value against more than the one case you're tuning for.
+<string>:22: UserWarning: FitConfig with vmin=-35.0, vmax=35.0 resolves to a knot spacing of 4.1 km/s -- much finer than the 95 km/s `knot_spacing_kms` is calibrated against (this happens when the grid is narrow enough that `min_interior_knots` sets the knot count, not `knot_spacing_kms`). Because the curvature penalty is scaled by real velocity spacing (see `kinextract_lite.losvd.difference_matrix`), this makes lam=4.0 behave like an effective lam of 92 -- confirmed to cause severe oversmoothing (>100% sigma bias) at this kind of extreme scale factor in validation testing. This does not happen at the validated NSIG=7 velocity-grid convention (`vmin/vmax = V -+ 7*sigma`) even down to sigma~20 km/s -- it means this grid is unusually narrow for its `min_interior_knots`. Consider a wider grid, a smaller `min_interior_knots`, or an explicit `n_interior_knots` override.
+<string>:22: UserWarning: FitConfig with vmin=-35.0, vmax=35.0 resolves to a knot spacing of 4.1 km/s -- much finer than the 95 km/s `knot_spacing_kms` is calibrated against (this happens when the grid is narrow enough that `min_interior_knots` sets the knot count, not `knot_spacing_kms`). Because the curvature penalty is scaled by real velocity spacing (see `kinextract_lite.losvd.difference_matrix`), this makes lam=8.0 behave like an effective lam of 185 -- confirmed to cause severe oversmoothing (>100% sigma bias) at this kind of extreme scale factor in validation testing. This does not happen at the validated NSIG=7 velocity-grid convention (`vmin/vmax = V -+ 7*sigma`) even down to sigma~20 km/s -- it means this grid is unusually narrow for its `min_interior_knots`. Consider a wider grid, a smaller `min_interior_knots`, or an explicit `n_interior_knots` override.
+<string>:22: UserWarning: FitConfig with vmin=-35.0, vmax=35.0 resolves to a knot spacing of 4.1 km/s -- much finer than the 95 km/s `knot_spacing_kms` is calibrated against (this happens when the grid is narrow enough that `min_interior_knots` sets the knot count, not `knot_spacing_kms`). Because the curvature penalty is scaled by real velocity spacing (see `kinextract_lite.losvd.difference_matrix`), this makes lam=16.0 behave like an effective lam of 369 -- confirmed to cause severe oversmoothing (>100% sigma bias) at this kind of extreme scale factor in validation testing. This does not happen at the validated NSIG=7 velocity-grid convention (`vmin/vmax = V -+ 7*sigma`) even down to sigma~20 km/s -- it means this grid is unusually narrow for its `min_interior_knots`. Consider a wider grid, a smaller `min_interior_knots`, or an explicit `n_interior_knots` override.
+[PASS] extreme_narrow_sigma(5 km/s): sigma_rec=14.99 (true 5.0), success=True
+
+=== check_extreme_broad_sigma ===
+[NOTE] extreme_broad_sigma(800 km/s): sigma_rec=854.7 (true 800), bias=+6.8%
+
+=== check_extreme_low_snr ===
+[NOTE] extreme_low_snr(S/N=5): sigma_rec=82.1 (true 100), success=True
+
+=== check_extreme_high_snr ===
+[PASS] extreme_high_snr(S/N=10000): sigma_rec=98.68 (true 100), bias=-1.32%
+
+=== check_full_636_template_grid_single_fit ===
+[NOTE] full_636_template_single_fit: runtime=85.9s, sigma_rec=100.7 (true 100), n_templates_with_nonzero_weight=8/636
+
+=== check_wing_lam_plus_continuum_combo ===
+[PASS] wing_lam_plus_continuum_combo: sigma_rec=51.4 (true 50), success=True, warnings=[]
+
+=== check_bootstrap_n_boot_1 ===
+[NOTE] bootstrap_n_boot_1: sherm_std=nan (n_boot=1, expect 0.0 or nan, not a crash)
+
+=== check_bootstrap_large_n_boot ===
+<string>:22: UserWarning: FitConfig.lam=0.5 is below 1.0, the observed sweet spot under the current velocity-spacing-scaled curvature penalty. Worst-case shape residual was measured at 18% (lam=0.5) rising to 43% (lam=0.1) in validation testing from noise overfitting -- see `lam`'s own help text (`FitConfig.describe('lam')`). Only proceed if you've validated this value against more than the one case you're tuning for.
+[PASS] bootstrap_n_boot_200: runtime=656.4s, sherm_std=6.04
+
+=== check_mask_wavelength_windows_all_masked ===
+[NOTE] mask_all_wavelengths: returned 0 pixels (of 320) with a window covering the whole range -- empty result, as expected
+
+=== check_single_pixel_fit ===
+[NOTE] single_5_pixel_fit: n_pix=5, n_coef=20, success=True, sigma_rec=269.8 (true 100) -- massively underdetermined, reported as a NOTE not PASS/FAIL since there's no 'correct' behavior to check against, only whether it fails loudly (it doesn't) or silently (it does)
+
+
+=== SUMMARY ===
+4 pass, 0 fail, 3 note (of 10 checks)
+  [PASS] extreme_narrow_sigma(5 km/s): sigma_rec=14.99 (true 5.0), success=True
+  [NOTE] extreme_broad_sigma(800 km/s): sigma_rec=854.7 (true 800), bias=+6.8%
+  [NOTE] extreme_low_snr(S/N=5): sigma_rec=82.1 (true 100), success=True
+  [PASS] extreme_high_snr(S/N=10000): sigma_rec=98.68 (true 100), bias=-1.32%
+  [NOTE] full_636_template_single_fit: runtime=85.9s, sigma_rec=100.7 (true 100), n_templates_with_nonzero_weight=8/636
+  [PASS] wing_lam_plus_continuum_combo: sigma_rec=51.4 (true 50), success=True, warnings=[]
+  [NOTE] bootstrap_n_boot_1: sherm_std=nan (n_boot=1, expect 0.0 or nan, not a crash)
+  [PASS] bootstrap_n_boot_200: runtime=656.4s, sherm_std=6.04
+  [NOTE] mask_all_wavelengths: returned 0 pixels (of 320) with a window covering the whole range -- empty result, as expected
+  [NOTE] single_5_pixel_fit: n_pix=5, n_coef=20, success=True, sigma_rec=269.8 (true 100) -- massively underdetermined, reported as a NOTE not PASS/FAIL since there's no 'correct' behavior to check against, only whether it fails loudly (it doesn't) or silently (it does)

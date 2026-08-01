@@ -2,47 +2,28 @@
 
 ## Notebooks
 
-Interactive tutorials covering the full workflow.
-Open with `jupyter lab` or `jupyter notebook`.
+A continuous pedagogical arc: basics -> increasingly complex features ->
+real data -> a full galaxy analysis. Open with `jupyter lab` or
+`jupyter notebook`; run each from its own directory (`examples/notebooks/`)
+so relative data/template paths resolve correctly.
 
 | Notebook | What it demonstrates |
 | - | - |
-| `01_basic_mock_fit.ipynb` | Full pipeline on a normalized synthetic spectrum; all key outputs; `FitConfig.describe()` for config introspection |
-| `02_realistic_mock_fit.ipynb` | Fitting a raw (non-normalized) spectrum with the joint continuum-cofitting method (`fit_continuum=True`), plus Laplace + bootstrap uncertainty estimation |
-| `03_real_data_muse.ipynb` | Real NGC 5102 MUSE central bin — bundled data, runs out of the box, plus error estimation |
+| `01_basic_mock_fit.ipynb` | Build your own synthetic spectrum and recover its LOSVD; all key outputs |
+| `02_realistic_mock_fit.ipynb` | A genuinely degenerate multi-template mixture, plus continuum-cofitting |
+| `03_emiles_templates.ipynb` | The full E-MILES SSP template API -- a real, dense stellar-population library |
+| `04_template_calibration.ipynb` | Get a MUSE cube, bin it, and pick a representative template subset |
+| `05_real_data_muse.ipynb` | Fitting real MUSE spectra end-to-end, across the S/N range |
+| `06_real_data_stis.ipynb` | Fitting one real HST/STIS spectrum end-to-end |
+| `07_noise_correlation.ipynb` | Real MUSE pixel-noise correlation and AR(1) whitening |
+| `08_full_galaxy_analysis.ipynb` | Full galaxy analysis, start to finish: dartboard binning, bootstrap uncertainty, moment maps, radial kinematic profiles |
 
-Plot styling is applied automatically by `kinextract.plotting` (no separate
-style file to load), so no setup beyond installing `kinextract` is needed;
-run notebooks with their own directory as the working directory (the default
-when opening from `jupyter lab`/`jupyter notebook` in-place), since data/
-template paths inside each notebook are relative to it.
+Bundled data used by several notebooks lives in `examples/data/`; notebooks
+that need a real MUSE cube either use a bundled subset or fetch one via
+`kinextract.eso_archive.query_muse_phase3` (see each notebook's own setup
+cell for its data mode).
 
 ```bash
-pip install kinextract   # includes JAX + Numba for fast fitting by default
+pip install -e ".[dev]"
+jupyter lab examples/notebooks/
 ```
-
-## Bundled data (`data/`)
-
-Real spectra and stellar templates for notebooks 02 (template normalization
-demo) and 03.
-
-```text
-data/
-  muse/
-    bin0105sp.spec   spaxel on the galactic center — VLT/MUSE WFM, NGC 5102 (notebook 03)
-    bin0105sp.norm   the same spaxel, already continuum-normalized
-    <template>.dat   one or more template spectra (any number supported)
-    Tlist            template list file: one template filename per line
-```
-
-`Tlist` is just a plain-text list of template filenames (resolved relative to
-`template_dir`) — kinextract places no constraint on the template count or which
-library they come from, similar in spirit to how pPXF consumes a template set. The
-exact templates bundled for these examples may change over time; check each
-directory's `Tlist` for the current contents rather than relying on this table.
-
-## Config file template (`kinextract.config`)
-
-A fully-commented TOML template for CLI/scripted use (`python -m kinextract
-spectrum.spec kinextract.config`) — see the top-level README's Configuration
-section for how it's loaded from Python.

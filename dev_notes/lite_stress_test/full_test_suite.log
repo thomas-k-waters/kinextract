@@ -1,0 +1,88 @@
+........................................................................ [ 42%]
+........................................................................ [ 85%]
+........................                                                 [100%]
+=============================== warnings summary ===============================
+tests/test_ablation.py::test_fit_one_unregularized_vs_default_differ
+tests/test_ablation.py::test_run_ablation_sweep_produces_one_row_per_config_per_cell
+tests/test_ablation.py::test_save_and_load_ablation_table_roundtrips
+tests/test_aic_regularization.py::test_m_eff_local_does_not_crash_at_lam_zero_on_a_narrow_grid
+  <string>:22: UserWarning: FitConfig.lam=0.0 is below 1.0, the observed sweet spot under the current velocity-spacing-scaled curvature penalty. Worst-case shape residual was measured at 18% (lam=0.5) rising to 43% (lam=0.1) in validation testing from noise overfitting -- see `lam`'s own help text (`FitConfig.describe('lam')`). Only proceed if you've validated this value against more than the one case you're tuning for.
+
+tests/test_aic_regularization.py::test_m_eff_is_higher_for_less_regularized_fits
+tests/test_aic_regularization.py::test_m_eff_local_is_higher_for_less_regularized_fits
+  <string>:22: UserWarning: FitConfig.lam=0.01 is below 1.0, the observed sweet spot under the current velocity-spacing-scaled curvature penalty. Worst-case shape residual was measured at 18% (lam=0.5) rising to 43% (lam=0.1) in validation testing from noise overfitting -- see `lam`'s own help text (`FitConfig.describe('lam')`). Only proceed if you've validated this value against more than the one case you're tuning for.
+
+tests/test_aic_regularization.py::test_m_eff_is_higher_for_less_regularized_fits
+tests/test_aic_regularization.py::test_m_eff_local_is_higher_for_less_regularized_fits
+  <string>:22: UserWarning: FitConfig with vmin=-700.0, vmax=700.0 resolves to a knot spacing of 82.4 km/s -- much finer than the 95 km/s `knot_spacing_kms` is calibrated against (this happens when the grid is narrow enough that `min_interior_knots` sets the knot count, not `knot_spacing_kms`). Because the curvature penalty is scaled by real velocity spacing (see `kinextract_lite.losvd.difference_matrix`), this makes lam=50.0 behave like an effective lam of 58 -- confirmed to cause severe oversmoothing (>100% sigma bias) at this kind of extreme scale factor in validation testing. This does not happen at the validated NSIG=7 velocity-grid convention (`vmin/vmax = V -+ 7*sigma`) even down to sigma~20 km/s -- it means this grid is unusually narrow for its `min_interior_knots`. Consider a wider grid, a smaller `min_interior_knots`, or an explicit `n_interior_knots` override.
+
+tests/test_aic_regularization.py::test_select_lambda_aic_picks_a_value_from_the_grid_with_matching_arrays
+tests/test_aic_regularization.py::test_select_lambda_aic_chi2_decreases_as_lam_decreases
+tests/test_aic_regularization.py::test_select_lambda_aic_local_picks_a_value_from_the_grid_with_matching_arrays
+  <string>:22: UserWarning: FitConfig.lam=0.1 is below 1.0, the observed sweet spot under the current velocity-spacing-scaled curvature penalty. Worst-case shape residual was measured at 18% (lam=0.5) rising to 43% (lam=0.1) in validation testing from noise overfitting -- see `lam`'s own help text (`FitConfig.describe('lam')`). Only proceed if you've validated this value against more than the one case you're tuning for.
+
+tests/test_bias_correction.py: 2 warnings
+tests/test_calibrate_bias.py: 2 warnings
+tests/test_cleaning.py: 4 warnings
+tests/test_feature_composition.py: 5 warnings
+tests/test_forward_model.py: 1 warning
+tests/test_gh_moments.py: 5 warnings
+tests/test_losvd.py: 6 warnings
+tests/test_multi_template.py: 4 warnings
+tests/test_uncertainty.py: 16 warnings
+  <string>:22: UserWarning: FitConfig.lam=0.5 is below 1.0, the observed sweet spot under the current velocity-spacing-scaled curvature penalty. Worst-case shape residual was measured at 18% (lam=0.5) rising to 43% (lam=0.1) in validation testing from noise overfitting -- see `lam`'s own help text (`FitConfig.describe('lam')`). Only proceed if you've validated this value against more than the one case you're tuning for.
+
+tests/test_bias_correction.py::test_correction_reduces_low_sigma_bias
+  <string>:22: UserWarning: FitConfig with vmin=-210.0, vmax=210.0 resolves to a knot spacing of 24.7 km/s -- much finer than the 95 km/s `knot_spacing_kms` is calibrated against (this happens when the grid is narrow enough that `min_interior_knots` sets the knot count, not `knot_spacing_kms`). Because the curvature penalty is scaled by real velocity spacing (see `kinextract_lite.losvd.difference_matrix`), this makes lam=16.0 behave like an effective lam of 62 -- confirmed to cause severe oversmoothing (>100% sigma bias) at this kind of extreme scale factor in validation testing. This does not happen at the validated NSIG=7 velocity-grid convention (`vmin/vmax = V -+ 7*sigma`) even down to sigma~20 km/s -- it means this grid is unusually narrow for its `min_interior_knots`. Consider a wider grid, a smaller `min_interior_knots`, or an explicit `n_interior_knots` override.
+
+tests/test_cleaning.py::test_localized_contaminant_is_identified_and_clipped[1]
+  /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract_lite/tests/test_cleaning.py:116: UserWarning: fit_losvd_clean: clipped 10.3% of pixels (33/321), above the 10% sanity threshold -- this is more consistent with a large, systematic mismatch (wrong redshift, missing template coverage, wildly wrong noise level) than a few genuinely bad pixels. Inspect `clipped_mask` before trusting this result.
+    cleaned = fit_losvd_clean(A_stack_w, y_w_contaminated, cfg, clip_sigma=3.0)
+
+tests/test_cleaning.py::test_localized_contaminant_is_identified_and_clipped[1]
+tests/test_cleaning.py::test_localized_contaminant_is_identified_and_clipped[3]
+  /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract_lite/tests/test_cleaning.py:116: UserWarning: fit_losvd_clean: clipped 12.8% of pixels (41/321), above the 10% sanity threshold -- this is more consistent with a large, systematic mismatch (wrong redshift, missing template coverage, wildly wrong noise level) than a few genuinely bad pixels. Inspect `clipped_mask` before trusting this result.
+    cleaned = fit_losvd_clean(A_stack_w, y_w_contaminated, cfg, clip_sigma=3.0)
+
+tests/test_cleaning.py::test_localized_contaminant_is_identified_and_clipped[1]
+  /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract_lite/tests/test_cleaning.py:116: UserWarning: fit_losvd_clean: clipped 11.2% of pixels (36/321), above the 10% sanity threshold -- this is more consistent with a large, systematic mismatch (wrong redshift, missing template coverage, wildly wrong noise level) than a few genuinely bad pixels. Inspect `clipped_mask` before trusting this result.
+    cleaned = fit_losvd_clean(A_stack_w, y_w_contaminated, cfg, clip_sigma=3.0)
+
+tests/test_cleaning.py::test_localized_contaminant_is_identified_and_clipped[1]
+  /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract_lite/tests/test_cleaning.py:116: UserWarning: fit_losvd_clean: clipped 10.6% of pixels (34/321), above the 10% sanity threshold -- this is more consistent with a large, systematic mismatch (wrong redshift, missing template coverage, wildly wrong noise level) than a few genuinely bad pixels. Inspect `clipped_mask` before trusting this result.
+    cleaned = fit_losvd_clean(A_stack_w, y_w_contaminated, cfg, clip_sigma=3.0)
+
+tests/test_cleaning.py::test_localized_contaminant_is_identified_and_clipped[1]
+tests/test_cleaning.py::test_localized_contaminant_is_identified_and_clipped[3]
+  /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract_lite/tests/test_cleaning.py:116: UserWarning: fit_losvd_clean: clipped 12.1% of pixels (39/321), above the 10% sanity threshold -- this is more consistent with a large, systematic mismatch (wrong redshift, missing template coverage, wildly wrong noise level) than a few genuinely bad pixels. Inspect `clipped_mask` before trusting this result.
+    cleaned = fit_losvd_clean(A_stack_w, y_w_contaminated, cfg, clip_sigma=3.0)
+
+tests/test_cleaning.py::test_localized_contaminant_is_identified_and_clipped[3]
+  /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract_lite/tests/test_cleaning.py:116: UserWarning: fit_losvd_clean: clipped 13.4% of pixels (43/321), above the 10% sanity threshold -- this is more consistent with a large, systematic mismatch (wrong redshift, missing template coverage, wildly wrong noise level) than a few genuinely bad pixels. Inspect `clipped_mask` before trusting this result.
+    cleaned = fit_losvd_clean(A_stack_w, y_w_contaminated, cfg, clip_sigma=3.0)
+
+tests/test_cleaning.py::test_localized_contaminant_is_identified_and_clipped[3]
+  /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract_lite/tests/test_cleaning.py:116: UserWarning: fit_losvd_clean: clipped 16.5% of pixels (53/321), above the 10% sanity threshold -- this is more consistent with a large, systematic mismatch (wrong redshift, missing template coverage, wildly wrong noise level) than a few genuinely bad pixels. Inspect `clipped_mask` before trusting this result.
+    cleaned = fit_losvd_clean(A_stack_w, y_w_contaminated, cfg, clip_sigma=3.0)
+
+tests/test_cleaning.py::test_localized_contaminant_is_identified_and_clipped[3]
+  /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract_lite/tests/test_cleaning.py:116: UserWarning: fit_losvd_clean: clipped 11.5% of pixels (37/321), above the 10% sanity threshold -- this is more consistent with a large, systematic mismatch (wrong redshift, missing template coverage, wildly wrong noise level) than a few genuinely bad pixels. Inspect `clipped_mask` before trusting this result.
+    cleaned = fit_losvd_clean(A_stack_w, y_w_contaminated, cfg, clip_sigma=3.0)
+
+tests/test_cleaning.py::test_continuum_knots_can_be_combined_with_cleaning
+  /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract_lite/src/kinextract_lite/cleaning.py:77: UserWarning: fit_losvd: cfg.lam_selection='aic_local' (the default) does not support continuum-cofitting yet (cfg.continuum_knots is set) -- falling back to the fixed cfg.lam value for this fit. Set lam_selection='fixed' explicitly to silence this warning.
+    result = fit_losvd(A_stack_w[:, keep, :], y_w[keep], cfg, wave_fit=wave_fit_kept)
+
+tests/test_losvd.py::test_knot_count_scales_with_grid_width
+  <string>:22: UserWarning: FitConfig.n_interior_knots=5 implies 640 km/s per knot on this grid (vmin=-1600.0, vmax=1600.0) -- coarser than the ~95 km/s/knot validated as safe. A fixed knot count this coarse relative to grid width caused 47-58% shape residual in validation testing. Leave `n_interior_knots=None` to auto-scale via `knot_spacing_kms` instead of pinning a count explicitly.
+
+tests/test_multi_template.py::test_fit_losvd_with_continuum_knots_set_runs_and_returns_C
+  /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract_lite/tests/test_multi_template.py:218: UserWarning: fit_losvd: cfg.lam_selection='aic_local' (the default) does not support continuum-cofitting yet (cfg.continuum_knots is set) -- falling back to the fixed cfg.lam value for this fit. Set lam_selection='fixed' explicitly to silence this warning.
+    result = fit_losvd(A_stack_w, y_w, cfg, wave_fit=wave_fit)
+
+tests/test_uncertainty.py::test_bootstrap_losvd_with_continuum_knots_runs_and_the_injected_noise_model_includes_C
+  /Users/waterstk/Documents/Gultekin_Astrophysics/kinextract_lite/src/kinextract_lite/uncertainty.py:303: UserWarning: fit_losvd: cfg.lam_selection='aic_local' (the default) does not support continuum-cofitting yet (cfg.continuum_knots is set) -- falling back to the fixed cfg.lam value for this fit. Set lam_selection='fixed' explicitly to silence this warning.
+    result0 = fit_losvd(A_stack_w, y_w, cfg, wave_fit=wave_fit)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+168 passed, 71 warnings in 6964.59s (1:56:04)

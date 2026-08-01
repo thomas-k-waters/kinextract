@@ -1,0 +1,36 @@
+  4/90 done, t=147s
+  8/90 done, t=199s
+  12/90 done, t=316s
+  16/90 done, t=355s
+  20/90 done, t=429s
+  24/90 done, t=551s
+  28/90 done, t=618s
+  32/90 done, t=712s
+  36/90 done, t=754s
+  40/90 done, t=879s
+  44/90 done, t=934s
+  48/90 done, t=1036s
+  52/90 done, t=1113s
+  56/90 done, t=1198s
+  60/90 done, t=1361s
+  64/90 done, t=1458s
+  68/90 done, t=1540s
+  72/90 done, t=1698s
+  76/90 done, t=1772s
+  80/90 done, t=1935s
+  84/90 done, t=2058s
+  88/90 done, t=2127s
+[sigma=   30][   fixed]  V= +2.40  sig= +24.37 ( +81.2%)  h3=+0.0152  h4=+0.0474
+[sigma=   30][adaptive]  V= +1.59  sig= +18.98 ( +63.3%)  h3=+0.0448  h4=+0.0578  mean_lam=0.50
+[sigma=   50][   fixed]  V= +6.69  sig= +25.72 ( +51.4%)  h3=+0.0420  h4=+0.0590
+[sigma=   50][adaptive]  V= +6.16  sig= +23.39 ( +46.8%)  h3=+0.0563  h4=+0.0740  mean_lam=0.87
+[sigma=   80][   fixed]  V= +7.28  sig= +24.67 ( +30.8%)  h3=+0.0298  h4=+0.0610
+[sigma=   80][adaptive]  V= +6.94  sig= +24.73 ( +30.9%)  h3=+0.0402  h4=+0.0656  mean_lam=1.43
+[sigma=  140][   fixed]  V= +4.93  sig= +51.07 ( +36.5%)  h3=-0.0073  h4=+0.0796
+[sigma=  140][adaptive]  V= +5.37  sig= +35.53 ( +25.4%)  h3=-0.0091  h4=+0.0551  mean_lam=6.83
+[sigma=  220][   fixed]  V= -8.98  sig=+110.08 ( +50.0%)  h3=-0.0102  h4=+0.1269
+[sigma=  220][adaptive]  V= -2.72  sig= +33.68 ( +15.3%)  h3=+0.0029  h4=+0.0508  mean_lam=24.00
+[sigma=  300][   fixed]  V= -7.37  sig=+124.93 ( +41.6%)  h3=+0.0073  h4=+0.0942
+[sigma=  300][adaptive]  V= +1.93  sig= +79.50 ( +26.5%)  h3=+0.0169  h4=+0.0592  mean_lam=48.00
+total wall time: 2149s (8 workers)
+wrote 12 rows to bias_sweep_fixed_vs_adaptive_results.txt

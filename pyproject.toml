@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kinextract"
-version = "0.4.0"
+version = "1.0.0"
 description = "Non-parametric binned-LOSVD spectral fitter for galaxy kinematics"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -27,22 +27,14 @@ dependencies = [
     "numpy>=1.24",
     "scipy>=1.10",
     "matplotlib>=3.7",
-    "tomli>=2.0; python_version < '3.11'",
-    "numba>=0.57",
     "jax[cpu]>=0.4",
     "threadpoolctl>=3.0",
     "astropy>=5.0",
 ]
 
 [project.optional-dependencies]
-bayesian = [
-    "numpyro>=0.21",
-]
-lines = [
-    "astroquery>=0.4",
-]
-benchmarks = [
-    "pandas>=2.0",
+eso = [
+    "astroquery>=0.4.6",
 ]
 docs = [
     "sphinx>=7.0",
@@ -58,9 +50,6 @@ dev = [
     "black>=24.0",
 ]
 
-[project.scripts]
-kinextract = "kinextract.__main__:main"
-
 [project.urls]
 "Homepage" = "https://github.com/thomas-k-waters/kinextract"
 "Bug Tracker" = "https://github.com/thomas-k-waters/kinextract/issues"
@@ -72,9 +61,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--tb=short"
-markers = [
-    "slow: marks tests that run long fits (deselect with -m 'not slow')",
-]
 
 [tool.ruff]
 line-length = 99

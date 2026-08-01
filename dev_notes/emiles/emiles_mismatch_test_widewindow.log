@@ -1,0 +1,7 @@
+loaded 33 MUSE templates, 25 E-MILES templates
+fit window: 7500-8900 A (1400 A wide)
+[lam= 2.0][    muse_control] sigma=  220 n= 15  sig_bias= +48.00 ( +21.8%)  h4=+0.0324  t=57s
+[lam= 2.0][ emiles_mismatch] sigma=  220 n= 15  sig_bias=+374.60 (+170.3%)  h4=+0.4929  t=57s
+[lam= 2.0][    muse_control] sigma=  300 n= 15  sig_bias= +90.17 ( +30.1%)  h4=+0.0463  t=131s
+[lam= 2.0][ emiles_mismatch] sigma=  300 n= 15  sig_bias=+625.52 (+208.5%)  h4=+0.7034  t=131s
+done

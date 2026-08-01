@@ -1,0 +1,13 @@
+loaded 35 RAW (non-pre-normalized) templates
+bin0105    r=  +0.01  n_iter=15  success=True  V=  +4.27 (legacy   -0.53)  sig= 57.81 (legacy  54.35)  h4=+0.035 (legacy -0.048)  t=11s
+bin0504    r=  +0.19  n_iter=15  success=True  V=  +0.74 (legacy   -2.38)  sig= 56.08 (legacy  52.02)  h4=+0.037 (legacy -0.060)  t=22s
+bin0601    r=  +0.30  n_iter=15  success=True  V=  -5.66 (legacy   -4.47)  sig= 53.32 (legacy  50.90)  h4=+0.039 (legacy -0.054)  t=32s
+bin0704    r=  +0.46  n_iter=15  success=True  V=  -1.12 (legacy   -7.99)  sig= 51.68 (legacy  46.90)  h4=+0.038 (legacy -0.056)  t=43s
+bin0902    r=  +1.05  n_iter= 7  success=True  V= -11.01 (legacy   -7.50)  sig= 52.90 (legacy  43.40)  h4=+0.041 (legacy -0.047)  t=48s
+bin1005    r=  +1.57  n_iter=15  success=True  V=  +2.47 (legacy  -11.48)  sig= 50.77 (legacy  42.38)  h4=+0.038 (legacy -0.050)  t=58s
+bin1401    r=  +7.66  n_iter=15  success=True  V=  -4.13 (legacy  -27.05)  sig= 52.68 (legacy  41.87)  h4=+0.037 (legacy -0.044)  t=65s
+bnn1603    r= -16.79  n_iter=15  success=True  V=  +3.05 (legacy   +1.38)  sig= 54.77 (legacy  44.71)  h4=+0.036 (legacy -0.055)  t=72s
+bnn1604    r= -16.79  n_iter=15  success=True  V=  +1.20 (legacy  -18.62)  sig= 55.10 (legacy  42.74)  h4=+0.038 (legacy -0.049)  t=78s
+bnn1605    r= -16.79  n_iter=15  success=True  V=  -1.79 (legacy  -24.13)  sig= 52.01 (legacy  40.68)  h4=+0.036 (legacy -0.047)  t=84s
+
+time: 84s

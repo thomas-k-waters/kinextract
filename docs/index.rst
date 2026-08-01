@@ -3,18 +3,25 @@ kinextract
 
 Non-parametric binned-LOSVD spectral fitter for galaxy kinematics.
 
-``kinextract`` fits galaxy spectra using a non-parametric line-of-sight
-velocity distribution (LOSVD) represented directly on a velocity grid -- no
-Gauss-Hermite parametrisation assumed. When continuum co-fitting is enabled
-(``FitConfig.fit_continuum = True``), a penalized-B-spline continuum is
-folded directly into the same single optimization as the LOSVD and template
-weights (see :mod:`kinextract.joint`), rather than fit as a separate
-sub-fit. Alternatively, a spectrum can be pre-normalized once (e.g. via the
-standalone asymmetric-least-squares utility,
-:func:`kinextract.continuum.asymmetric_least_squares_continuum`) and fit
-with ``fit_continuum = False``. Regularization strength is
-selected automatically. The package uses spectroscopic data for use in
-stellar dynamical modeling.
+``kinextract`` recovers the line-of-sight velocity distribution (LOSVD)
+directly from an absorption-line galaxy spectrum as a smoothly-positive,
+low-dimensional log-density spline -- no Gauss-Hermite (or any other
+fixed-shape) functional form assumed for the kinematics themselves. One
+fitting engine (:func:`kinextract.fit_losvd`) handles any number of
+templates; regularization strength is selected automatically via a
+bootstrap-estimated generalized AIC (Lipka & Thomas 2021), with an optional
+synthetic-calibrated correction for the residual shrinkage bias that
+regularization itself introduces (see :mod:`kinextract.bias_correction`).
+
+Beyond the core LOSVD fit, the package includes: parametric-bootstrap
+uncertainty quantification (:mod:`kinextract.uncertainty`), iterative
+sigma-clipping and pre-fit emission-line masking
+(:mod:`kinextract.cleaning`), shared multiplicative continuum-cofitting
+(:mod:`kinextract.continuum`), AR(1) correlated-noise whitening
+(:mod:`kinextract.noise_model`), E-MILES SSP template packing/LSF-matching
+(:mod:`kinextract.emiles`, :mod:`kinextract.lsf`), and IFU-cube spatial
+binning + template reduction for full-galaxy analyses
+(:mod:`kinextract.binning`, :mod:`kinextract.template_reduction`).
 
 .. toctree::
    :maxdepth: 2

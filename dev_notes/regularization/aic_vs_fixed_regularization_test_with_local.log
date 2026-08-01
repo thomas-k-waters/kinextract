@@ -1,0 +1,32 @@
+loaded 33 MUSE templates
+  sigma=   50 rep= 0  AIC best_lam=  0.50  AIC_local best_lam=  0.50  t=551s
+  sigma=   50 rep= 1  AIC best_lam=  0.00  AIC_local best_lam=  1.00  t=1035s
+  sigma=   50 rep= 2  AIC best_lam=  0.50  AIC_local best_lam=  0.50  t=1681s
+  sigma=   50 rep= 3  AIC best_lam=  2.00  AIC_local best_lam=  1.00  t=2108s
+  sigma=   50 rep= 4  AIC best_lam=  2.00  AIC_local best_lam=  0.50  t=2423s
+  sigma=   50 rep= 5  AIC best_lam=  1.00  AIC_local best_lam=  2.00  t=2673s
+[sigma=   50][ lam0] n= 6  sig_bias= +20.20 ( +31.2%)  h4_bias=-0.0685 (true h4=0.15)  
+[sigma=   50][ lam2] n= 6  sig_bias= +14.84 ( +22.9%)  h4_bias=-0.0958 (true h4=0.15)  
+[sigma=   50][  aic] n= 6  sig_bias= +13.34 ( +20.6%)  h4_bias=-0.0604 (true h4=0.15)  mean_lam=1.00
+[sigma=   50][aic_local] n= 6  sig_bias= +13.49 ( +20.9%)  h4_bias=-0.0886 (true h4=0.15)  mean_lam=0.92
+  sigma=  150 rep= 0  AIC best_lam= 20.00  AIC_local best_lam= 10.00  t=3011s
+  sigma=  150 rep= 1  AIC best_lam=  2.00  AIC_local best_lam=  5.00  t=3340s
+  sigma=  150 rep= 2  AIC best_lam=  5.00  AIC_local best_lam=  5.00  t=3609s
+  sigma=  150 rep= 3  AIC best_lam= 10.00  AIC_local best_lam= 10.00  t=3896s
+  sigma=  150 rep= 4  AIC best_lam= 50.00  AIC_local best_lam= 20.00  t=4152s
+  sigma=  150 rep= 5  AIC best_lam= 20.00  AIC_local best_lam=  5.00  t=4400s
+[sigma=  150][ lam0] n= 6  sig_bias= +56.86 ( +29.3%)  h4_bias=+0.0441 (true h4=0.15)  
+[sigma=  150][ lam2] n= 6  sig_bias= +54.95 ( +28.3%)  h4_bias=+0.0180 (true h4=0.15)  
+[sigma=  150][  aic] n= 6  sig_bias= +41.94 ( +21.6%)  h4_bias=-0.0274 (true h4=0.15)  mean_lam=17.83
+[sigma=  150][aic_local] n= 6  sig_bias= +41.15 ( +21.2%)  h4_bias=-0.0178 (true h4=0.15)  mean_lam=9.17
+  sigma=  300 rep= 0  AIC best_lam= 10.00  AIC_local best_lam= 50.00  t=4846s
+  sigma=  300 rep= 1  AIC best_lam= 50.00  AIC_local best_lam=  5.00  t=5689s
+  sigma=  300 rep= 2  AIC best_lam= 20.00  AIC_local best_lam= 50.00  t=6435s
+  sigma=  300 rep= 3  AIC best_lam= 10.00  AIC_local best_lam= 10.00  t=9085s
+  sigma=  300 rep= 4  AIC best_lam=  5.00  AIC_local best_lam= 50.00  t=10465s
+  sigma=  300 rep= 5  AIC best_lam=  2.00  AIC_local best_lam= 50.00  t=11618s
+[sigma=  300][ lam0] n= 6  sig_bias=+126.72 ( +32.7%)  h4_bias=+0.0189 (true h4=0.15)  
+[sigma=  300][ lam2] n= 6  sig_bias=+121.49 ( +31.3%)  h4_bias=+0.0193 (true h4=0.15)  
+[sigma=  300][  aic] n= 6  sig_bias=+104.04 ( +26.8%)  h4_bias=+0.0039 (true h4=0.15)  mean_lam=16.17
+[sigma=  300][aic_local] n= 6  sig_bias= +59.70 ( +15.4%)  h4_bias=-0.0102 (true h4=0.15)  mean_lam=35.83
+wrote 12 rows to aic_vs_fixed_regularization_results_with_local.txt

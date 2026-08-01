@@ -3,64 +3,69 @@ Quick start
 
 .. code-block:: python
 
-   from kinextract import run_spectral_fit, load_config_from_toml
+   import numpy as np
+   from kinextract import FitConfig, build_template_stack, compute_losvd_moments
+   from kinextract.multi_template import fit_losvd
 
-   cfg = load_config_from_toml("kinextract.config")
-   fit = run_spectral_fit(cfg, gal_file="bin0105.spec")
+   # wave_fit, galaxy, errors: your observed (rest-frame) wavelength grid,
+   # normalized flux, and per-pixel noise, all the same length.
+   # template_wave, templates: a template library's common wavelength grid
+   # and a list of per-template flux arrays (see the E-MILES notebook for
+   # how to build one, or `kinextract.emiles.load_emiles_templates`).
 
-   # Inspect the fit
-   v  = fit["state"].xl           # velocity grid (km/s)
-   b  = fit["outputs"]["b"]       # recovered LOSVD
-   chi2_red = fit["outputs"]["chi2_red"]
-   print(f"chi2_red = {chi2_red:.3f}")
+   cfg = FitConfig(vmin=-500.0, vmax=500.0)   # velocity grid bounds, km/s
+   v_grid = cfg.build_velocity_grid()
+   A_stack = build_template_stack(wave_fit, template_wave, templates, v_grid)
 
-   # Plot
-   from kinextract import plot_fit, plot_continuum
-   plot_fit(fit)
-   plot_continuum(fit)   # only if cfg.fit_continuum = True
+   A_stack_w = A_stack / errors[None, :, None]
+   y_w = galaxy / errors
+   result = fit_losvd(A_stack_w, y_w, cfg)
 
-``cfg.fit_continuum = True`` co-fits the continuum baseline: a
-penalized-B-spline continuum is folded directly into the same optimization
-as the LOSVD and template weights (see :mod:`kinextract.joint`).
-Alternatively, pre-normalize the spectrum once (e.g. via the standalone
-:func:`kinextract.continuum.asymmetric_least_squares_continuum` utility)
-and fit with ``fit_continuum = False``.
+   print(f"success: {result['success']}  lam_used: {result['lam_used']:.3g}")
 
-See :meth:`~kinextract.config.FitConfig.describe` (or ``help(FitConfig)``)
-for every tunable field, grouped by subsystem, e.g.
-``FitConfig.describe("xlam")`` for just the regularization-selection
-options.
+   moments = compute_losvd_moments(v_grid, result["b"])
+   print(f"V={moments['vherm']:.1f}  sigma={moments['sherm']:.1f}  "
+         f"h3={moments['h3']:.3f}  h4={moments['h4']:.3f}")
+
+Regularization strength (``cfg.lam``) is selected automatically per fit via
+``cfg.lam_selection="aic_local"`` (the default) -- pass
+``FitConfig(lam_selection="fixed", lam=...)`` for a fixed value instead. See
+:meth:`~kinextract.config.FitConfig.describe` (or ``help(FitConfig)``) for
+every tunable field grouped by subsystem, e.g. ``FitConfig.describe("lam")``
+for just the regularization options.
+
+If the spectrum is not already continuum-normalized, either pre-normalize it
+once, or co-fit a shared multiplicative continuum directly
+(:func:`kinextract.fit_losvd_with_continuum`, :mod:`kinextract.continuum`) --
+see ``02_realistic_mock_fit.ipynb``.
 
 Error estimation
 -----------------
 
 .. code-block:: python
 
-   from kinextract import LOSVDErrorEstimator, load_config_from_toml, run_spectral_fit
+   from kinextract import bootstrap_losvd
 
-   cfg  = load_config_from_toml("kinextract.config")
-   fit  = run_spectral_fit(cfg, gal_file="bin0105.spec")
-   est  = LOSVDErrorEstimator(fit, cfg)
+   boot = bootstrap_losvd(A_stack_w, y_w, cfg, n_boot=200, n_jobs=4)
+   print(f"sigma = {boot['point0']['sherm']:.1f} +/- {boot['sherm_std']:.1f}")
 
-   laplace = est.laplace_covariance()
-   boot    = est.residual_bootstrap(n_bootstrap=200, n_jobs=4)
-   summary = est.summarize(laplace_result=laplace, bootstrap_result=boot)
-   est.plot_losvd_with_errors(summary)
+See ``01_basic_mock_fit.ipynb`` and ``02_realistic_mock_fit.ipynb`` for the
+full worked pattern, including Laplace-approximation and bias-corrected
+variants.
 
 Characterizing recovery bias
 -----------------------------
 
-Near the instrumental resolution limit, recovered velocity/dispersion carry
-a real, condition-dependent bias. :func:`~kinextract.validation.assess_recovery_bias`
-measures this directly for a specific target by fitting matched mock spectra
-(same instrument, templates, continuum, and noise level) on a grid of known
-truths:
+Regularization biases recovered sigma/h4, worse at low S/N. A
+synthetic-calibrated correction is available
+(:func:`kinextract.correct_moments`) but is opt-in, not the default -- see
+:mod:`kinextract.bias_correction`'s own module docstring for its current
+trust status, and ``04_template_calibration.ipynb`` for building a
+calibration matched to your own template library.
 
 .. code-block:: python
 
-   from kinextract import assess_recovery_bias, correct_recovered_losvd
+   from kinextract import correct_moments, estimate_snr_whitened
 
-   bias_table = assess_recovery_bias(
-       fit, cfg, v_true_grid=[0.0, 50.0], sigma_true_grid=[80.0, 150.0], n_seeds=8,
-   )
-   corrected = correct_recovered_losvd(v_recovered=42.0, sigma_recovered=90.0, bias_table=bias_table)
+   snr = estimate_snr_whitened(model_w)   # model_w: the fit's own best-fit model, whitened units
+   corrected = correct_moments(moments["vherm"], moments["sherm"], moments["h4"], snr)

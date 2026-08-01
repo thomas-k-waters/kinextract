@@ -1,0 +1,20 @@
+loaded 33 MUSE templates
+[h4_true=0.00][sigma=   50][     lam0] n=25  sig_bias= +25.29 ( +50.6%)  h4_bias=+0.1627    t=1011s
+[h4_true=0.00][sigma=   50][     lam2] n=25  sig_bias= +20.96 ( +41.9%)  h4_bias=+0.0496    t=1011s
+[h4_true=0.00][sigma=   50][aic_local] n=25  sig_bias= +14.15 ( +28.3%)  h4_bias=+0.0499  mean_lam=0.72  t=1011s
+[h4_true=0.00][sigma=  150][     lam0] n=25  sig_bias= +62.88 ( +41.9%)  h4_bias=+0.0807    t=1827s
+[h4_true=0.00][sigma=  150][     lam2] n=25  sig_bias= +52.20 ( +34.8%)  h4_bias=+0.0750    t=1827s
+[h4_true=0.00][sigma=  150][aic_local] n=25  sig_bias= +34.56 ( +23.0%)  h4_bias=+0.0510  mean_lam=7.28  t=1827s
+[h4_true=0.00][sigma=  300][     lam0] n=25  sig_bias=+156.75 ( +52.2%)  h4_bias=+0.1048    t=2747s
+[h4_true=0.00][sigma=  300][     lam2] n=25  sig_bias=+117.14 ( +39.0%)  h4_bias=+0.0808    t=2747s
+[h4_true=0.00][sigma=  300][aic_local] n=25  sig_bias= +83.56 ( +27.9%)  h4_bias=+0.0658  mean_lam=40.56  t=2747s
+[h4_true=0.15][sigma=   50][     lam0] n=25  sig_bias= +20.45 ( +31.6%)  h4_bias=+0.0778    t=3620s
+[h4_true=0.15][sigma=   50][     lam2] n=25  sig_bias= +13.24 ( +20.5%)  h4_bias=-0.0934    t=3620s
+[h4_true=0.15][sigma=   50][aic_local] n=25  sig_bias= +10.40 ( +16.1%)  h4_bias=-0.0728  mean_lam=0.82  t=3620s
+[h4_true=0.15][sigma=  150][     lam0] n=25  sig_bias= +50.51 ( +26.0%)  h4_bias=-0.0068    t=4478s
+[h4_true=0.15][sigma=  150][     lam2] n=25  sig_bias= +38.00 ( +19.6%)  h4_bias=-0.0279    t=4478s
+[h4_true=0.15][sigma=  150][aic_local] n=25  sig_bias= +16.24 (  +8.4%)  h4_bias=-0.0571  mean_lam=7.78  t=4478s
+[h4_true=0.15][sigma=  300][     lam0] n=25  sig_bias=+151.74 ( +39.1%)  h4_bias=+0.0278    t=5461s
+[h4_true=0.15][sigma=  300][     lam2] n=25  sig_bias=+129.47 ( +33.4%)  h4_bias=+0.0115    t=5461s
+[h4_true=0.15][sigma=  300][aic_local] n=25  sig_bias= +91.20 ( +23.5%)  h4_bias=-0.0099  mean_lam=36.68  t=5461s
+wrote 18 rows to aic_local_firming_up_results.txt

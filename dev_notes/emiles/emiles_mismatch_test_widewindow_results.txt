@@ -1,0 +1,5 @@
+           label   lam  sigma    n    V_bias_mean  V_bias_std    sig_bias_mean  sig_bias_std  sig_bias_pct     h4_mean   h4_std
+    muse_control   2.0    220   15          -6.19       12.52           +48.00         26.12        +21.8%     +0.0324   0.0299
+ emiles_mismatch   2.0    220   15        -172.21       33.87          +374.60         34.34       +170.3%     +0.4929   0.1239
+    muse_control   2.0    300   15          -3.08       26.43           +90.17         49.28        +30.1%     +0.0463   0.0444
+ emiles_mismatch   2.0    300   15        -335.98       56.11          +625.52         35.59       +208.5%     +0.7034   0.1409

@@ -1,493 +1,516 @@
-"""Gauss-Hermite characterization of the non-parametric LOSVD.
+"""Non-parametric LOSVD recovery: a low-dimensional, smoothly-positive
+log-density spline, fit by a deterministic MAP optimization from a small
+pool of starting points.
 
-This module provides tools to *summarize* a non-parametric line-of-sight
-velocity distribution (LOSVD) — a histogram ``b`` over ``nl`` velocity bins
-on a grid ``xl`` (km/s), recovered by the main spectral-fitting pipeline —
-with a compact parametric Gauss-Hermite (GH) model. Following the van der
-Marel & Franx (1993) convention,
+**Representation.** The line-of-sight velocity distribution `b(v)` is
+represented as `b(v) = exp(spline(v))`: a cubic B-spline in `log(b)`,
+with a modest number of coefficients matched to how much velocity
+information the spectrum actually contains, rather than one free
+parameter per fine histogram bin. Two properties of this matter for
+correctness, not just convenience:
 
-    LOSVD(v) = amp / (sqrt(2*pi) * sigma) * exp(-w^2/2)
-               * (1 + h3*H3(w) + h4*H4(w) + ...),   w = (v - V) / sigma,
+- **Positivity is structural, not enforced.** `exp(...)` is positive
+  everywhere by construction -- there is no boundary at `b=0` for the
+  optimizer to get stuck against, and no post-hoc clipping step that
+  would make the reported `b` the solution to a different problem than
+  the one actually optimized.
+- **Dimensionality matches identifiability.** A handful of spline
+  coefficients spanning the full velocity range keeps the inverse
+  problem well-posed without needing heavy explicit shrinkage on top.
 
-this GH fit is *not* the primary fit performed against the galaxy spectrum;
-it is a post-hoc least-squares fit of the parametric model to the already-
-recovered non-parametric LOSVD, used to compress it into physically
-interpretable numbers (V, sigma, h3, h4, ...) for reporting and comparison
-across spectra. Two numerically distinct Hermite-polynomial normalizations
-are implemented and clearly distinguished: a legacy "fortran-like" 4-moment
-convention (``fh3_fortran_like``, ``fh4_fortran_like``,
-``gauss_hermite_losvd_model``, ``fit_losvd_gauss_hermite``) matching the
-original Fortran pipeline, and the van der Marel & Franx (1993) polynomial
-normalization used by pPXF and by the higher-order fitter
-(``gauss_hermite_losvd_model_ho``, ``fit_losvd_gauss_hermite_higher``). The
-two conventions give numerically different h3/h4 values for the same LOSVD
-shape, so they must not be mixed.
+Each candidate start is optimized deterministically by L-BFGS-B, with JAX
+autodiff providing exact gradients through the `exp` link, minimizing
+data chi^2 plus a P-spline (Eilers & Marx 1996) curvature penalty on the
+spline coefficients' second differences. The penalty acts on curvature,
+not raw coefficient magnitude -- a plain L2-on-magnitude penalty measurably
+underperforms the curvature form.
+
+**Multi-start initialization.** Because `b = exp(spline(v))` is a
+nonlinear reparameterization, the optimization landscape in coefficient
+space is not convex, and a single starting point -- even a good,
+data-driven one -- can converge to a real but meaningfully-suboptimal
+local minimum. `default_initial_coeffs` provides a cheap, data-driven
+start (a closed-form ridge estimate of `b`, clipped positive,
+log-transformed, and projected onto the spline basis), which is a
+substantially better average starting point than a flat one, but is not
+by itself a safe substitute for trying more than one basin: in validation
+testing this kind of failure -- reported as `success=True` by the
+optimizer, with no other visible warning sign -- occurs in roughly
+1-in-150 noisy fits, and the basin that wins can depend on which start is
+used. `fit_log_spline_map` therefore runs a small pool of different
+starts by default (the ridge estimate plus two flat starts at different
+scales, see `_default_multi_starts`) and keeps whichever converges to the
+lowest final objective, rather than trusting any single starting point.
+
+**Knot density scales with the velocity grid.** A fixed
+`n_interior_knots` under-resolves the LOSVD once the velocity grid widens
+for a broader target (large sigma requires `vmin`/`vmax` far out to hold
+the wings) -- validated: an absolute knot spacing coarser than roughly
+150 km/s/knot produces 47-58% shape residual, versus comfortably under 5%
+at ~95 km/s/knot or finer. `FitConfig` (see `config.py`) auto-derives
+`n_interior_knots` from a target *absolute* knot spacing
+(`knot_spacing_kms`, default 95 km/s) rather than exposing a bare count as
+the primary knob, so the same configuration stays well-resolved across
+different target sigmas.
+
+**The curvature penalty is scaled by real velocity spacing, not raw
+coefficient index.** A plain difference operator on coefficient index
+treats every pair of adjacent coefficients as one "unit" apart regardless
+of the actual km/s between their knots, so the same `lam` would represent
+different physical smoothing strengths on different grids -- this was the
+root cause of a systematic sigma bias that grew with grid width even
+after knot density was auto-scaled to a safe absolute spacing, and of why
+a given `lam` value could be catastrophically unsafe on one grid and fine
+on another. `difference_matrix` accepts `dv` (the grid's actual knot
+spacing) and `dv_ref` (`FitConfig.knot_spacing_kms`, the spacing `lam` is
+calibrated against) and scales the penalty by `dv_ref/dv`, removing this
+grid-width dependence; `config.fit_losvd` always passes these. `lam`'s
+default (2.0) is calibrated against this scaled penalty -- see its help
+text in `config.py`.
+
+**Sigma bias is dominated by two mechanisms, not one.** (1)
+`compute_losvd_moments`'s windowing (see `gh_moments.py`) truncates real
+tail variance -- a deterministic, shape-independent ~-1.2% bias for a
+near-Gaussian LOSVD, present even on the exact noiseless truth. (2) A
+roughness penalty cannot tell a compact LOSVD from one carrying a broad,
+low-amplitude pedestal across the velocity grid; any moment estimator
+integrates that pedestal, so it inflates the reported sigma while leaving
+the *core* correct. Mechanism (2) is the dominant one on real data --
+measured on real MUSE spectra at 81 km/s recovered against an independent
+~54 km/s reference measurement -- and is essentially invisible in this package's own
+synthetic validation, because mocks built from the same design matrix the
+fit inverts give the pedestal nothing to absorb. `tapered_lam_vector`
+(opt-in via `FitConfig.lam_wing`) exists to attack mechanism (2); see
+`dev_notes/real_data_sigma/FINDINGS.md` for the full diagnosis and
+`dev_notes/PORT_STATUS.md` for its current, honest status.
+
+- **Strongly negative h4 (platykurtic, flat-topped LOSVDs) recovers less
+  well than other shapes.** At h4=-0.1 (S/N~100), worst-case shape
+  residual is ~12%, versus comfortably under 5% for the rest of the
+  standard validation grid. Partly a structural limit, not a fit
+  artifact: the raw Gauss-Hermite curve at this parameter combination is
+  not a valid probability density (it goes negative over more than half
+  the velocity grid), a known pathology of the truncated GH expansion.
+- **No continuum model at this layer.** This module expects a template
+  mixture (and, if active, a continuum) already fixed before the design
+  matrix is built -- see `kinextract.multi_template` for the
+  template-mixture extension and `kinextract.continuum` for
+  continuum-cofitting.
+- **JAX runs in float64 here as of 2026-07** (`kinextract/__init__.py`
+  enables `jax_enable_x64` at import; opt out with
+  KINEXTRACT_NO_X64=1). This changed from the historical float32
+  default after the shape-residual investigation measured a systematic
+  optimizer failure, not just basin jitter: in the stiff heavy-penalty
+  regime (wide grids, sigma >~ 200, large `lam` -- exactly where the
+  now-default order-3 penalty operates), float32 L-BFGS-B reliably
+  stalls tens of objective units above the true minimum while reporting
+  `success=True` (measured at sigma=300/S N=30, lam=65536: 35% vs 6%
+  shape residual, float32 vs float64 on identical data/starts). The
+  float64 switch was validated as statistically neutral for the
+  order-2 penalty path on a full 480-case paired grid before becoming
+  the default, at ~2x runtime (see
+  `dev_notes/REGULARIZATION_INVESTIGATION_LOG.md`, 2026-07-26/27).
+  Related trap, still relevant at any precision: whitening by errors
+  smaller than ~1e-4 of the signal (the old "noise=1e-6 noiseless
+  benchmark" convention) produces enormous whitened values that degrade
+  the optimizer -- use S/N ~ 1e4 as the noiseless proxy in benchmarks.
 """
-
 from __future__ import annotations
 
-import math
+import time
 
+import jax
+import jax.numpy as jnp
 import numpy as np
-from scipy.optimize import least_squares
+from scipy.interpolate import BSpline
+from scipy.optimize import minimize as scipy_minimize
 
-# =============================================================================
-# Section 15 - LOSVD analysis
-# =============================================================================
+from .config import FitConfig
 
-def fh3_fortran_like(w: np.ndarray) -> np.ndarray:
-    """Third-order Gauss-Hermite basis polynomial, legacy Fortran normalization.
 
-    Evaluates the h3 basis function used by the original Fortran pipeline
-    (pallmc.f-style convention), which differs by a numerical normalization
-    factor from the van der Marel & Franx (1993) polynomial used elsewhere
-    in this package (see :func:`gauss_hermite_losvd_model_ho`). Used inside
-    :func:`gauss_hermite_losvd_model` to build the GH LOSVD model and by
-    :func:`fit_losvd_gauss_hermite` to recover h3 in the fortran convention.
+# Module-level jitted objective/gradient, not defined fresh inside
+# `fit_log_spline_map` -- confirmed directly to matter: a per-call closure
+# (capturing `basis`/`D2`/`A_w`/`y_w`/`lam` as baked-in constants, the
+# original design here) gives JAX no way to recognize "this exact
+# computation was already compiled" across repeated calls with the same
+# array shapes, so every one of `bootstrap_losvd`'s `n_boot` replicates
+# (and every point in `select_lambda_aic_local`'s own `lam` grid) paid a
+# full XLA retrace+recompile, not just a forward/backward pass. Taking
+# `basis`/`D2`/`A_w`/`y_w`/`lam` as ordinary (traced, not closed-over)
+# arguments to a function jitted exactly once at import time lets JAX's
+# own shape/dtype-keyed compilation cache do its job: the same compiled
+# executable is reused across every bootstrap replicate and every `lam`
+# grid point, since none of those change the array shapes, only the
+# values. `lam` is passed as a traced scalar (not marked static) for the
+# same reason -- different `lam` values must not themselves trigger a
+# recompile.
+def _neg_log_post(coeffs, basis, D, A_w, y_w, lam_vec):
+    """chi2 + a *per-row* roughness penalty.
 
-    Parameters
-    ----------
-    w : ndarray
-        Standardized velocity, ``w = (v - V) / sigma`` (dimensionless).
+    `lam_vec` carries one regularization strength per row of `D`, which is
+    what makes the wing taper (see `tapered_lam_vector`) possible: a single
+    scalar cannot express "smooth the core lightly and the wings hard".
+    """
+    b = jnp.exp(basis @ coeffs)
+    resid = A_w @ b - y_w
+    chi2 = 0.5 * jnp.sum(resid ** 2)
+    rough = 0.5 * jnp.sum(lam_vec * (D @ coeffs) ** 2)
+    return chi2 + rough
+
+
+_val_fn = jax.jit(_neg_log_post)
+_vg_fn = jax.jit(jax.value_and_grad(_neg_log_post))
+
+
+def greville_abscissae(v_grid: np.ndarray, n_interior_knots: int, degree: int = 3) -> np.ndarray:
+    """Velocity each B-spline coefficient is centred on -- the Greville
+    abscissa (mean of the `degree` knots spanning it).
+
+    Needed because the wing taper is defined in velocity, while the
+    penalty acts on coefficient differences: each penalty row has to be
+    told where on the velocity axis it lives.
+    """
+    vmin, vmax = float(v_grid.min()), float(v_grid.max())
+    interior = np.linspace(vmin, vmax, n_interior_knots + 2)[1:-1]
+    knots = np.concatenate([[vmin] * (degree + 1), interior, [vmax] * (degree + 1)])
+    n_coef = len(knots) - degree - 1
+    return np.array([knots[i + 1:i + 1 + degree].mean() for i in range(n_coef)])
+
+
+def tapered_lam_vector(row_v: np.ndarray, lam: float, sigl0: float, v_center: float,
+                        sfac: float = 1.8, power: float = 4.0,
+                        lam_wing: float | None = None) -> np.ndarray:
+    """Per-row roughness strength: `lam` in the core, ramped up in the wings.
+
+        ramp_j = 1                                     |dv| <= sfac*sigl0
+        ramp_j = (|dv|/sigl0 / sfac)**power            beyond
+        lam_j  = lam + lam_wing * (ramp_j - 1)
+
+    with `dv = row_v - v_center`. The ramp law and its defaults
+    (`sfac=1.8`, 4th power) are ported from the original `kinextract`
+    pipeline (`numerics._wing_taper_lam_vec`).
+
+    **Why the ramp is measured in units of `sigl0`, the *recovered*
+    width.** A wing penalty defined against the velocity grid changes
+    meaning whenever the grid changes, which is what made a plain
+    amplitude penalty need per-target retuning. In units of the LOSVD's
+    own width, "1.8 sigma out" means the same thing at sigma=20 and
+    sigma=400, so one setting covers the range. `sigl0` is obtained
+    self-consistently by fixed-point iteration (fit, measure width,
+    rebuild, refit), so no prior sigma estimate is needed.
+
+    **Why `lam_wing` is a separate strength and not just `lam`.** The
+    original pipeline multiplies the ramp straight into its own `xlam`,
+    which is safe there because its `xlam` is O(1e5-1e7). Here `lam` is
+    chosen per fit and can legitimately be O(1) for a well-constrained
+    core -- and then `lam * ramp` is far too weak to suppress anything,
+    which was measured directly: with the ramp tied to `lam`, the real
+    NGC 5102 nucleus stayed at 80.6 km/s (against an independent ~54 km/s
+    reference measurement) because selection had driven `lam` to 1. Splitting the two
+    lets the core strength stay a free, per-fit quantity while the wing
+    strength stays absolute, so the wings are suppressed regardless of
+    what the core needs. `lam_wing=None` reproduces the original
+    pipeline's coupled behaviour (`lam_wing = lam`).
+
+    **What this is for.** A roughness penalty alone cannot distinguish a
+    compact LOSVD from one carrying a broad, low pedestal across the
+    grid -- the two can cost the same. That pedestal is not cosmetic: it
+    is integrated by any moment estimator and inflates the reported
+    sigma, with the *core* left correct (measured on real MUSE data:
+    81 km/s recovered vs. an independent ~54 km/s reference measurement, all of the error
+    in the pedestal). Ramping as the 4th power of distance makes the
+    pedestal expensive exactly where the data has no power to justify it
+    -- 59x at 5 sigma, 229x at 7 -- while leaving the core alone.
+    """
+    d = np.abs(np.asarray(row_v, dtype=float) - v_center)
+    sigl0 = max(float(sigl0), 1e-6)
+    ramp = np.where(d > sfac * sigl0, (np.maximum(d / sigl0, sfac) / sfac) ** power, 1.0)
+    lw = float(lam) if lam_wing is None else float(lam_wing)
+    return float(lam) + lw * (ramp - 1.0)
+
+
+def penalty_row_velocities(v_grid: np.ndarray, n_interior_knots: int, order: int,
+                            degree: int = 3) -> np.ndarray:
+    """Velocity of each row of `difference_matrix(order=...)` -- the mean
+    Greville abscissa of the coefficients that row differences.
+    """
+    g = greville_abscissae(v_grid, n_interior_knots, degree)
+    return np.array([g[j:j + order + 1].mean() for j in range(len(g) - order)])
+
+
+def core_width_sigma(v_grid: np.ndarray, b: np.ndarray) -> float:
+    """Gaussian-equivalent sigma from the LOSVD's **half-maximum width**,
+    `FWHM / 2.3548`.
+
+    Used to place the wing taper's onset (`tapered_lam_vector`), where an
+    ordinary second-moment sigma cannot be used: the second moment is
+    exactly what a wing pedestal inflates, so seeding the taper with it
+    creates a self-reinforcing fixed point -- an inflated width pushes the
+    taper onset outward, which leaves the pedestal untapered, which keeps
+    the width inflated. Measured directly on the real NGC 5102 nucleus:
+    the moment-seeded fixed point sat at 81 km/s (against an independent
+    ~54 km/s reference measurement) and the wing ramp never engaged.
+
+    A half-maximum width depends only on the curve near its peak, so a
+    low-amplitude pedestal spanning the grid does not move it, and the
+    taper gets placed against the *core*'s scale -- which is what the
+    "1.8 sigma out" convention means.
+    """
+    b = np.maximum(np.asarray(b, dtype=float), 0.0)
+    v = np.asarray(v_grid, dtype=float)
+    peak = float(b.max()) if b.size else 0.0
+    if peak <= 0.0:
+        return float("nan")
+    half = 0.5 * peak
+    idx = int(np.argmax(b))
+    above = np.flatnonzero(b >= half)
+    if above.size < 2:
+        return float("nan")
+    lo, hi = above[0], above[-1]
+    # linear interpolation onto the exact half-maximum crossings
+    def _cross(i_in, i_out):
+        if i_in == i_out:
+            return v[i_in]
+        f = (half - b[i_out]) / (b[i_in] - b[i_out])
+        return v[i_out] + f * (v[i_in] - v[i_out])
+    v_lo = _cross(lo, lo - 1) if lo > 0 else v[lo]
+    v_hi = _cross(hi, hi + 1) if hi < len(v) - 1 else v[hi]
+    fwhm = abs(v_hi - v_lo)
+    return float(fwhm / 2.354820045)
+
+
+def build_bspline_basis(v_grid: np.ndarray, n_interior_knots: int = 16, degree: int = 3) -> tuple[np.ndarray, int]:
+    """Cubic B-spline design matrix evaluating each basis function on
+    `v_grid`, clamped at both boundaries.
+
+    Size `n_interior_knots` to roughly match the target's own information
+    content (e.g. an SVD effective-rank diagnostic on the whitened design
+    matrix) rather than assuming one value is universal -- and note that
+    the right count scales with `v_grid`'s width; `FitConfig.
+    resolved_n_interior_knots()` handles this automatically by default
+    rather than requiring a fixed count here (see module docstring).
+    """
+    vmin, vmax = float(v_grid.min()), float(v_grid.max())
+    interior = np.linspace(vmin, vmax, n_interior_knots + 2)[1:-1]
+    knots = np.concatenate([[vmin] * (degree + 1), interior, [vmax] * (degree + 1)])
+    n_coef = len(knots) - degree - 1
+    design = BSpline.design_matrix(v_grid, knots, degree).toarray()
+    return design, n_coef
+
+
+def build_spline_truth(v_grid: np.ndarray, vel: float, sigma: float, degree: int = 3,
+                        n_interior_knots: int | None = None, wiggle_scale: float = 0.15,
+                        seed: int | np.random.Generator = 0) -> tuple[np.ndarray, np.ndarray]:
+    """A "truth" LOSVD defined directly as `exp(spline)`, with no
+    Gauss-Hermite step at all -- the recommended way to build a mock LOSVD
+    with known, unambiguous moments.
+
+    **Why this exists.** `gauss_hermite_model`'s `vel`/`sig`/`h3`/`h4`
+    parameters are basis-expansion coefficients, not the resulting curve's
+    actual mean/std/skewness/kurtosis, except in the `h3, h4 -> 0` limit --
+    away from that limit the gap is large and exact, not a fitting
+    artifact (see `gauss_hermite_model`'s own docstring, and
+    `dev_notes/validation_suite/FINDINGS.md` for the full derivation and
+    numbers). A spline truth has no such gap by construction: there is no
+    parametric family being truncated, so whatever `compute_losvd_moments`
+    reports on the resulting curve *is* the truth, not an approximation to
+    it.
+
+    A Gaussian core is projected onto the spline basis by least squares,
+    then perturbed by a random log-space wiggle at each knot (`wiggle_scale`
+    is that perturbation's standard deviation, in units of the Gaussian
+    core's own local log-density curvature scale). **`wiggle_scale=0.0`
+    reproduces a pure Gaussian core** (up to the spline basis's own
+    representation error) -- the spline-truth analog of `h3=h4=0`, so h3/h4
+    recovery is still meaningful to validate against a near-zero-shape
+    truth. 0.15 (the default) keeps the shape recognizably a single
+    asymmetric peak for the sigma/knot-spacing regime this package
+    validates against; larger values increasingly produce multi-modal or
+    heavy-noise curves, a deliberate stress option, not the default.
+
+    `seed` may be an int (seeds a fresh `np.random.Generator`) or an
+    existing `np.random.Generator` (used directly, e.g. to keep replicate
+    generation reproducible from a caller's own RNG stream).
 
     Returns
     -------
-    ndarray
-        Value of the fortran-convention H3 basis polynomial at each ``w``.
+    (b_unit, coeffs) : the unit-area LOSVD on `v_grid`, and the spline
+        coefficients that produced it (`exp(basis @ coeffs)`, before
+        normalization).
     """
-    return (2 * w ** 3 - 3 * w) / np.sqrt(3.0)
+    rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
+    if n_interior_knots is None:
+        n_interior_knots = FitConfig(vmin=float(v_grid.min()), vmax=float(v_grid.max())).resolved_n_interior_knots()
+    basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_interior_knots, degree=degree)
+    gauss_core = -0.5 * ((v_grid - vel) / sigma) ** 2
+    coeffs0, *_ = np.linalg.lstsq(basis, gauss_core, rcond=None)
+    wiggle = rng.normal(0.0, wiggle_scale, size=coeffs0.shape) if wiggle_scale > 0 else np.zeros_like(coeffs0)
+    coeffs = coeffs0 + wiggle
+    b = np.exp(basis @ coeffs)
+    b_unit = b / np.trapezoid(b, v_grid)
+    return b_unit, coeffs
 
 
-def fh4_fortran_like(w: np.ndarray) -> np.ndarray:
-    """Fourth-order Gauss-Hermite basis polynomial, legacy Fortran normalization.
+def difference_matrix(n_coef: int, order: int = 2, dv: float | None = None, dv_ref: float | None = None) -> np.ndarray:
+    """Discrete difference operator on the spline coefficient sequence --
+    the standard P-spline (Eilers & Marx 1996) roughness-penalty operator,
+    `sum((D @ coeffs)**2)`. Operates on the spline *coefficients*, not on
+    `b` itself -- a plain L2-on-magnitude penalty measurably hurt
+    recovery relative to this curvature form.
 
-    Evaluates the h4 basis function used by the original Fortran pipeline
-    (pallmc.f-style convention). See :func:`fh3_fortran_like` for the
-    companion h3 term and a note on the normalization convention; this
-    fortran convention differs numerically from the van der Marel & Franx
-    (1993) polynomials used by :func:`gauss_hermite_losvd_model_ho`.
+    **Scaled by real knot spacing, not just coefficient index.** A plain
+    `np.diff` treats adjacent coefficients as one "unit" apart regardless
+    of how many actual km/s separate their knots, so the same `lam` would
+    represent different physical smoothing strengths on different grids
+    -- see the module docstring for why this matters. Pass `dv` (the
+    actual knot spacing on this grid) and `dv_ref` (the calibration
+    reference, `FitConfig.knot_spacing_kms`) to scale `D` by `dv_ref / dv`
+    -- when `dv == dv_ref` this is a no-op, so `lam`'s calibration is
+    preserved exactly at the reference spacing and only corrected where
+    the actual grid deviates from it. Omit both (the default) to leave
+    `D` unscaled.
+    """
+    D = np.eye(n_coef)
+    for _ in range(order):
+        D = np.diff(D, axis=0)
+    if dv is not None and dv_ref is not None:
+        D = D * (dv_ref / dv)
+    return D
+
+
+def default_initial_coeffs(A_w: np.ndarray, y_w: np.ndarray, basis: np.ndarray, ridge_lam: float = 1.0) -> np.ndarray:
+    """A cheap, data-driven starting point for `fit_log_spline_map`'s
+    optimization: a closed-form ridge estimate of `b` (clipped to a small
+    positive floor, since the true LOSVD is non-negative), log-transformed,
+    and projected onto the spline basis by least squares.
+
+    This is not a sophisticated estimate -- it doesn't need to be. Its job
+    is only to land the optimizer in the right basin; the L-BFGS-B step
+    that follows does the actual precision fitting. See the module
+    docstring for why a single (even data-driven) starting point is not
+    used alone.
+    """
+    n_bins = A_w.shape[1]
+    M = A_w.T @ A_w + ridge_lam * np.eye(n_bins)
+    b0 = np.linalg.solve(M, A_w.T @ y_w)
+    b0_positive = np.clip(b0, 1e-6 * max(float(b0.max()), 1e-6), None)
+    coeffs0, *_ = np.linalg.lstsq(basis, np.log(b0_positive), rcond=None)
+    return coeffs0
+
+
+def _default_multi_starts(A_w: np.ndarray, y_w: np.ndarray, basis: np.ndarray, ridge_lam: float = 1.0) -> list[np.ndarray]:
+    """The default pool of starting points for `fit_log_spline_map`'s
+    multi-start search: the data-driven ridge estimate plus two flat
+    starts at different scales. The ridge estimate is a much better
+    average start than a flat one, but is not by itself a safe substitute
+    for trying more than one basin -- see the module docstring.
+    """
+    n_coef = basis.shape[1]
+    return [
+        default_initial_coeffs(A_w, y_w, basis, ridge_lam=ridge_lam),
+        np.full(n_coef, np.log(0.01)),
+        np.full(n_coef, np.log(0.001)),
+    ]
+
+
+def fit_log_spline_map(A_w: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D: np.ndarray,
+                        lam, coeffs0: np.ndarray | None = None,
+                        ridge_lam: float = 1.0) -> dict:
+    """Fit `b(v) = exp(basis @ coeffs)` by minimizing
+    `0.5*||A_w @ b - y_w||^2 + 0.5*sum(lam_j * (D @ coeffs)_j^2)` via
+    L-BFGS-B, with JAX autodiff for exact gradients through the `exp` link.
+
+    `lam` may be a scalar (uniform smoothing) or a vector with one entry
+    per row of `D` (see `tapered_lam_vector`, which builds the wing-ramped
+    vector this package uses by default). Passing the strength per row is
+    what lets the wings be smoothed far harder than the core, which is how
+    a broad low-amplitude pedestal -- indistinguishable from a compact
+    LOSVD under any single scalar strength -- is suppressed.
+
+    **Multi-start by default.** The optimization landscape is not convex
+    (see module docstring), and no single starting point is safe on its
+    own -- roughly 1-in-150 noisy fits land in a real, meaningfully-worse
+    local minimum with no other visible warning sign. Unless `coeffs0` is
+    given explicitly, this runs from a small pool of different starts
+    (`_default_multi_starts`: one data-driven, two flat at different
+    scales) and keeps whichever converges to the lowest final objective.
+    Pass `coeffs0` explicitly (e.g. to warm-start from a neighbouring
+    iteration's answer) to skip the search and run a single deterministic
+    optimization instead -- which is what `multi_template._alternate_once`
+    does after its first iteration, since the basin has been chosen by
+    then.
 
     Parameters
     ----------
-    w : ndarray
-        Standardized velocity, ``w = (v - V) / sigma`` (dimensionless).
+    A_w : ndarray, shape (n_pix, n_bins)
+        Noise-whitened design matrix (template mixture x LOSVD-grid
+        convolution, divided by the per-pixel error) with template
+        weights and continuum already fixed.
+    y_w : ndarray, shape (n_pix,)
+        Noise-whitened observed flux (`flux / err`).
+    basis : ndarray, shape (n_bins, n_coef)
+        From `build_bspline_basis`, evaluated on the same velocity grid
+        `A_w`'s columns correspond to.
+    D : ndarray
+        From `difference_matrix`.
+    lam : float or ndarray
+        Roughness penalty strength: scalar, or one value per row of `D`.
+    coeffs0 : ndarray, optional
+        A single initial guess in coefficient (log-amplitude) space. If
+        given, disables the multi-start search.
+    ridge_lam : float
+        Ridge strength for the one data-driven start within the
+        multi-start pool (see `default_initial_coeffs`). Ignored if
+        `coeffs0` is given.
 
     Returns
     -------
-    ndarray
-        Value of the fortran-convention H4 basis polynomial at each ``w``.
+    dict with `b` (the recovered LOSVD on the same grid `basis` was built
+    on), `coeffs`, `success`, `message`, `runtime_s`, `n_coef`, `lam`,
+    `objective`, and `objective_gap` (None if `coeffs0` was given --
+    otherwise the gap between the best and second-best start's final
+    objective; large means this fit only survived because of the
+    multi-start search and is worth a second look).
     """
-    return (4 * w ** 4 - 12 * w ** 2 + 3) / np.sqrt(24.0)
+    if not (np.all(np.isfinite(A_w)) and np.all(np.isfinite(y_w))):
+        raise ValueError(
+            "A_w/y_w contain non-finite values (NaN or inf). fit_log_spline_map has no bad-"
+            "pixel masking of its own -- exclude bad pixels (cosmic rays, masked emission "
+            "lines, saturated detector regions, etc.) from A_w/y_w before calling this, e.g. "
+            "`A_w, y_w = A_w[good], y_w[good]` for a boolean `good` mask. Silently fitting "
+            "through non-finite input would otherwise propagate NaN into the entire recovered "
+            "LOSVD with no indication of why."
+        )
 
+    n_coef = basis.shape[1]
+    starts = [coeffs0] if coeffs0 is not None else _default_multi_starts(A_w, y_w, basis, ridge_lam=ridge_lam)
 
-def _gh_poly_vdm(n: int, w: np.ndarray) -> np.ndarray:
-    """Normalized Gauss-Hermite polynomial of order n (van der Marel & Franx 1993).
+    lam_vec = np.broadcast_to(np.asarray(lam, dtype=float), (D.shape[0],))
+    basis_j, D_j, A_w_j, y_w_j = (jnp.array(basis), jnp.array(D), jnp.array(A_w), jnp.array(y_w))
+    lam_j = jnp.asarray(lam_vec)
 
-    H_n(w) = He_n(w) / sqrt(n!) where He_n are probabilist Hermite polynomials
-    generated by He_{k+1} = w*He_k - k*He_{k-1}. Standard pPXF/GH literature convention.
-    """
-    w = np.asarray(w, float)
-    if n == 0:
-        return np.ones_like(w)
-    if n == 1:
-        return w.copy()
-    he_prev = np.ones_like(w)
-    he_curr = w.copy()
-    for k in range(1, n):
-        he_next = w * he_curr - k * he_prev
-        he_prev = he_curr
-        he_curr = he_next
-    return he_curr / np.sqrt(float(math.factorial(n)))
+    # A single fused value_and_grad call, not separate value/grad calls per
+    # L-BFGS-B iteration -- jax.grad computes the forward pass internally
+    # anyway, so calling them separately pays for it twice. Confirmed on the
+    # real MUSE-template setup: 1.45x faster, objectives matching to better
+    # than 1e-8 (mathematically identical, not an approximation).
+    def _obj_and_grad(c):
+        v, g = _vg_fn(jnp.array(c), basis_j, D_j, A_w_j, y_w_j, lam_j)
+        return float(v), np.array(g)
 
+    t0 = time.perf_counter()
+    fits = [scipy_minimize(_obj_and_grad, c0, jac=True, method='L-BFGS-B') for c0 in starts]
+    runtime_s = time.perf_counter() - t0
 
-def gauss_hermite_losvd_model_ho(
-    v: np.ndarray, amp: float, vel: float, sig: float, *hn: float,
-) -> np.ndarray:
-    """Higher-order Gauss-Hermite LOSVD model, van der Marel & Franx (1993) convention.
+    objectives = [float(_val_fn(jnp.array(res.x), basis_j, D_j, A_w_j, y_w_j, lam_j)) for res in fits]
+    best_idx = int(np.argmin(objectives))
+    res = fits[best_idx]
+    objective_gap = None
+    if len(fits) > 1:
+        srt = sorted(objectives)
+        objective_gap = srt[1] - srt[0]
 
-    Evaluates ``amp * exp(-w^2/2) / (sqrt(2*pi)*sig) * (1 + sum_i hn[i] * H_{i+3}(w))``
-    where ``w = (v - vel) / sig`` and ``H_n`` are the vdM1993-normalized
-    Gauss-Hermite polynomials (see :func:`_gh_poly_vdm`). Unlike
-    :func:`gauss_hermite_losvd_model`, this supports an arbitrary number of
-    higher-order moments (h3, h4, h5, h6, ...) passed positionally via
-    ``*hn``, enabling a more flexible characterization of non-Gaussian LOSVD
-    wings. Uses the same polynomial normalization as pPXF, which is
-    numerically distinct from the legacy fortran convention used by
-    :func:`gauss_hermite_losvd_model` — do not compare h3/h4 values between
-    the two model functions directly.
-
-    Parameters
-    ----------
-    v : ndarray
-        Velocities (km/s) at which to evaluate the model.
-    amp : float
-        Overall normalization (total flux/area under the LOSVD).
-    vel : float
-        Mean velocity V (km/s).
-    sig : float
-        Velocity dispersion sigma (km/s). Must be positive and finite; if
-        not, the model returns an array of NaN with the same shape as ``v``.
-    *hn : float
-        Higher-order Gauss-Hermite moments h3, h4, h5, ... (dimensionless),
-        in ascending order starting at h3.
-
-    Returns
-    -------
-    ndarray
-        Model LOSVD amplitude evaluated at each ``v``, same shape as ``v``.
-        All-NaN if ``sig`` is non-positive or non-finite.
-    """
-    sig = float(sig)
-    if sig <= 0 or not np.isfinite(sig):
-        return np.full_like(v, np.nan, float)
-    w = (np.asarray(v, float) - vel) / sig
-    poly_sum = np.ones_like(w, float)
-    for i, h in enumerate(hn):
-        poly_sum = poly_sum + float(h) * _gh_poly_vdm(i + 3, w)
-    return amp * np.exp(-0.5 * w ** 2) / (np.sqrt(2 * np.pi) * sig) * poly_sum
-
-
-def fit_losvd_gauss_hermite_higher(
-    v: np.ndarray, y: np.ndarray, max_order: int = 6,
-) -> dict:
-    """Fit a higher-order Gauss-Hermite model (h3..h_max_order) to a LOSVD.
-
-    Least-squares fits :func:`gauss_hermite_losvd_model_ho` to the sampled,
-    non-parametric LOSVD ``y(v)``, using van der Marel & Franx (1993)
-    normalized Hermite polynomials (vdM1993) — the same convention as pPXF.
-    Including higher-order terms beyond h3/h4 lets the fit absorb
-    non-Gaussian wings that would otherwise bias a truncated 4-moment fit
-    (:func:`fit_losvd_gauss_hermite`), typically giving more accurate
-    recovered V and sigma at the cost of extra nuisance parameters. Initial
-    guesses for amplitude, center, and width are derived from
-    :func:`getfwhm_fortran_like`; all higher-order ``h`` terms start at zero.
-    Bounded least-squares (`scipy.optimize.least_squares`) is used with log
-    parametrization of sigma to keep it positive.
-
-    Parameters
-    ----------
-    v : ndarray
-        Velocity grid (km/s) on which the LOSVD ``y`` is sampled.
-    y : ndarray
-        Non-parametric LOSVD amplitude at each ``v`` (same shape as ``v``).
-    max_order : int, optional
-        Highest Gauss-Hermite moment order to fit (minimum enforced value
-        is 4, i.e. at least h3 and h4 are always fit). Default is 6, fitting
-        h3, h4, h5, h6.
-
-    Returns
-    -------
-    dict
-        Dictionary with keys:
-
-        - ``vherm``, ``sherm`` : fitted mean velocity and dispersion (km/s).
-        - ``amp`` : fitted overall amplitude/normalization.
-        - ``h3``, ``h4``, ... up to ``h{max_order}`` : fitted higher-order
-          Gauss-Hermite moments (dimensionless, vdM1993 convention — these
-          differ numerically from the fortran-convention h3/h4 returned by
-          :func:`fit_losvd_gauss_hermite`).
-        - ``model`` : the best-fit model evaluated on the full input ``v``
-          grid (NaN where the fit could not be performed).
-        - ``fit_success`` : bool, whether the least-squares solver converged.
-        - ``fit_message`` : str, solver status message (or failure reason).
-        - ``max_order`` : int, the (possibly clamped) max order actually used.
-        - ``convention`` : str, always ``"vdM1993"`` for this function.
-
-        If fewer than 5 finite ``(v, y)`` points are available, all numeric
-        keys are NaN and ``fit_success`` is False.
-    """
-    v, y = np.asarray(v, float), np.asarray(y, float)
-    ok = np.isfinite(v) & np.isfinite(y)
-    vfit, yfit = v[ok], y[ok]
-    max_order = max(max_order, 4)
-    n_hm = max_order - 2  # h3..h_{max_order}
-    ho_keys = [f"h{n}" for n in range(3, max_order + 1)]
-    nan_result: dict = {k: np.nan for k in ["vherm", "sherm", "amp"] + ho_keys}
-    nan_result.update({"model": np.full_like(v, np.nan), "fit_success": False,
-                       "fit_message": "Too few points", "max_order": max_order,
-                       "convention": "vdM1993"})
-    if vfit.size < 5:
-        return nan_result
-
-    f = getfwhm_fortran_like(vfit, yfit)
-    fwhm_sigma = (
-        f["fwhm"] / 2.35 if np.isfinite(f["fwhm"]) and f["fwhm"] > 0
-        else max(float(np.std(vfit)), 1.0)
-    )
-    amp0 = f["ymax"] * np.sqrt(2 * np.pi) * fwhm_sigma
-    if not np.isfinite(amp0) or amp0 <= 0:
-        amp0 = max(float(np.sum(np.maximum(yfit, 0))), 1e-6)
-    vel0 = f["vmax"] if np.isfinite(f["vmax"]) else float(vfit[np.argmax(yfit)])
-    sig0 = max(fwhm_sigma, 1.0)
-    vspan = max(float(np.ptp(vfit)), float(np.std(vfit)), 1.0)
-    sigy = 0.01
-
-    p0 = [amp0, vel0, np.log(sig0)] + [0.0] * n_hm
-    lo = [0.0, vfit.min() - 2 * vspan, np.log(1e-6)] + [-0.5] * n_hm
-    hi = [np.inf, vfit.max() + 2 * vspan, np.log(1e6)] + [0.5] * n_hm
-
-    def _resid(p: np.ndarray) -> np.ndarray:
-        return (
-            gauss_hermite_losvd_model_ho(vfit, p[0], p[1], np.exp(p[2]), *p[3:]) - yfit
-        ) / sigy
-
-    try:
-        res = least_squares(_resid, p0, bounds=(lo, hi), max_nfev=10000)
-    except Exception as exc:
-        nan_result["fit_message"] = str(exc)
-        return nan_result
-
-    amp_fit = float(res.x[0])
-    vel_fit = float(res.x[1])
-    sig_fit = float(np.exp(res.x[2]))
-    hn_fit = res.x[3:]
-
-    result: dict = {
-        "vherm": vel_fit, "sherm": sig_fit, "amp": amp_fit,
-        "convention": "vdM1993",
-        "max_order": max_order,
-        "model": gauss_hermite_losvd_model_ho(v, amp_fit, vel_fit, sig_fit, *hn_fit),
-        "fit_success": bool(res.success), "fit_message": str(res.message),
-    }
-    for i, h in enumerate(hn_fit, start=3):
-        result[f"h{i}"] = float(h)
-    return result
-
-
-def gauss_hermite_losvd_model(
-    v: np.ndarray, amp: float, vel: float, sig: float, h3: float, h4: float,
-) -> np.ndarray:
-    """Four-moment Gauss-Hermite LOSVD model, legacy Fortran normalization.
-
-    Evaluates the classic van der Marel & Franx (1993) LOSVD parametrization
-    truncated at h4:
-    ``amp/sqrt(2*pi)/sig * exp(-w^2/2) * (1 + h3*H3(w) + h4*H4(w))`` with
-    ``w = (v - vel) / sig``, using the legacy "fortran-like" H3/H4 basis
-    polynomials (:func:`fh3_fortran_like`, :func:`fh4_fortran_like`) rather
-    than the vdM1993 polynomial normalization used by
-    :func:`gauss_hermite_losvd_model_ho`. This is the model fit by
-    :func:`fit_losvd_gauss_hermite` and is kept numerically consistent with
-    the original Fortran pipeline (pallmc.f) for backward compatibility;
-    h3/h4 values from this function are **not** directly comparable to
-    h3/h4 from the ``_ho``/vdM1993 functions.
-
-    Parameters
-    ----------
-    v : ndarray
-        Velocities (km/s) at which to evaluate the model.
-    amp : float
-        Overall normalization (total flux/area under the LOSVD).
-    vel : float
-        Mean velocity V (km/s).
-    sig : float
-        Velocity dispersion sigma (km/s). Must be positive and finite; if
-        not, the model returns an array of NaN with the same shape as ``v``.
-    h3 : float
-        Third Gauss-Hermite moment (dimensionless, fortran convention) —
-        skewness-like asymmetry of the LOSVD.
-    h4 : float
-        Fourth Gauss-Hermite moment (dimensionless, fortran convention) —
-        kurtosis-like symmetric deviation from a Gaussian.
-
-    Returns
-    -------
-    ndarray
-        Model LOSVD amplitude evaluated at each ``v``, same shape as ``v``.
-        All-NaN if ``sig`` is non-positive or non-finite.
-    """
-    sig = float(sig)
-    if sig <= 0 or not np.isfinite(sig):
-        return np.full_like(v, np.nan, float)
-    w = (np.asarray(v, float) - vel) / sig
-    return (
-        amp * np.exp(-0.5 * w ** 2) / np.sqrt(2 * np.pi) / sig
-        * (1 + h3 * fh3_fortran_like(w) + h4 * fh4_fortran_like(w))
-    )
-
-
-def getfwhm_fortran_like(x: np.ndarray, y: np.ndarray, frac: float = 0.5) -> dict:
-    """Estimate the full-width-at-fraction-of-max and flux moments of a curve.
-
-    Locates the peak of ``y(x)`` and linearly interpolates the crossing
-    points where ``y`` falls to ``frac`` (default: half) of its peak value
-    on either side, giving a robust width estimate that does not require a
-    parametric fit. Also returns the simple flux-weighted first and second
-    moments (v1, v2) of ``y`` as a model-free estimate of the centroid and
-    width. Used to construct good initial guesses (amplitude, center,
-    sigma) for the Gauss-Hermite least-squares fits
-    (:func:`fit_losvd_gauss_hermite`, :func:`fit_losvd_gauss_hermite_higher`),
-    matching the legacy Fortran pipeline's FWHM-based initialization scheme.
-
-    Parameters
-    ----------
-    x : ndarray
-        Independent variable, typically the LOSVD velocity grid (km/s).
-    y : ndarray
-        Dependent variable (e.g. LOSVD amplitude) sampled at each ``x``.
-        Assumed single-peaked; only the interval on either side of the
-        global maximum is searched for the half-max crossings.
-    frac : float, optional
-        Fraction of the peak value at which to measure the width (0.5 for
-        standard FWHM). Default is 0.5.
-
-    Returns
-    -------
-    dict
-        Dictionary with keys:
-
-        - ``fwhm`` : full width at ``frac`` of maximum (km/s if ``x`` is
-          velocity).
-        - ``vmax`` : location of the peak (same units as ``x``).
-        - ``ymax`` : peak value of ``y``.
-        - ``x_left``, ``x_right`` : interpolated crossing points of the
-          ``frac``-of-max level on the left/right of the peak.
-        - ``v1`` : flux-weighted first moment (centroid) of ``y`` over ``x``.
-        - ``v2`` : flux-weighted second moment (RMS width) of ``y`` about
-          ``v1``.
-
-        All values are NaN if fewer than 3 points are supplied.
-    """
-    x, y = np.asarray(x, float), np.asarray(y, float)
-    if x.size < 3:
-        return {k: np.nan for k in ["fwhm", "vmax", "ymax", "x_left", "x_right", "v1", "v2"]}
-    imax = int(np.argmax(y))
-    ymax = float(y[imax]); vmax = float(x[imax]); yhalf = ymax * frac
-    x1 = float(x[0])
-    for i in range(imax):
-        if yhalf >= y[i] and yhalf < y[i + 1]:
-            x1 = x[i] + (yhalf - y[i]) / (y[i + 1] - y[i]) * (x[i + 1] - x[i])
-    x2 = float(x[-1])
-    for i in range(imax, len(x) - 1):
-        if yhalf >= y[i + 1] and yhalf < y[i]:
-            x2 = x[i + 1] + (yhalf - y[i + 1]) / (y[i] - y[i + 1]) * (x[i] - x[i + 1])
-    sumy = float(np.sum(y))
-    v1 = float(np.sum(x * y) / sumy) if sumy else np.nan
-    v2 = float(np.sqrt(np.sum(y * (x - v1) ** 2) / sumy)) if sumy else np.nan
-    return {
-        "fwhm": float(x2 - x1), "vmax": vmax, "ymax": ymax,
-        "x_left": x1, "x_right": x2, "v1": v1, "v2": v2,
-    }
-
-
-def fit_losvd_gauss_hermite(v: np.ndarray, y: np.ndarray, fit_h3h4: bool = True) -> dict:
-    """Fit the classic 4-moment Gauss-Hermite model to a non-parametric LOSVD.
-
-    This is the standard, publication-facing GH characterization of the
-    recovered non-parametric LOSVD: a bounded least-squares fit of
-    :func:`gauss_hermite_losvd_model` (legacy fortran H3/H4 normalization,
-    matching the original Fortran pipeline pallmc.f) to ``y(v)``, giving the
-    mean velocity V, dispersion sigma, and the skewness/kurtosis-like
-    moments h3 and h4. Initial guesses are derived from
-    :func:`getfwhm_fortran_like`, and sigma is fit in log-space to enforce
-    positivity. This is the fitter used by :func:`kinextract.plotting.plot_losvd`
-    and by :class:`kinextract.errors.LOSVDErrorEstimator` to characterize both
-    the MAP LOSVD and each bootstrap replicate. For higher-order (h5, h6, ...)
-    characterization using the vdM1993 convention instead, see
-    :func:`fit_losvd_gauss_hermite_higher`.
-
-    Parameters
-    ----------
-    v : ndarray
-        Velocity grid (km/s) on which the LOSVD ``y`` is sampled.
-    y : ndarray
-        Non-parametric LOSVD amplitude at each ``v`` (same shape as ``v``).
-    fit_h3h4 : bool, optional
-        If True (default), fit h3 and h4 along with amplitude, V, and sigma.
-        If False, h3 and h4 are fixed to zero and only a pure Gaussian
-        (amp, V, sigma) is fit — useful for comparing against a
-        strictly-Gaussian LOSVD assumption.
-
-    Returns
-    -------
-    dict
-        Dictionary with keys:
-
-        - ``vherm``, ``sherm`` : fitted mean velocity and dispersion (km/s).
-        - ``h3``, ``h4`` : fitted Gauss-Hermite moments (dimensionless,
-          fortran convention — see :func:`fh3_fortran_like`); zero if
-          ``fit_h3h4=False``.
-        - ``amp`` : fitted overall amplitude/normalization.
-        - ``fwhm_sigma`` : sigma estimate derived from the FWHM initial
-          guess (km/s), useful as a sanity check against ``sherm``.
-        - ``v1``, ``v2`` : flux-weighted centroid and RMS width of the raw
-          LOSVD (km/s), model-free moments from :func:`getfwhm_fortran_like`.
-        - ``fwhm``, ``vmax``, ``ymax``, ``x_left``, ``x_right`` : raw
-          half-max diagnostics from :func:`getfwhm_fortran_like`.
-        - ``model`` : the best-fit GH model evaluated on the full input
-          ``v`` grid (NaN where the fit could not be performed).
-        - ``fit_success`` : bool, whether the least-squares solver converged.
-        - ``fit_message`` : str, solver status message (or failure reason).
-
-        If fewer than 5 finite ``(v, y)`` points are available, all numeric
-        keys are NaN and ``fit_success`` is False.
-    """
-    v, y = np.asarray(v, float), np.asarray(y, float)
-    ok = np.isfinite(v) & np.isfinite(y)
-    vfit, yfit = v[ok], y[ok]
-    nan_result = {k: np.nan for k in [
-        "vherm", "sherm", "fwhm_sigma", "h3", "h4",
-        "v1", "v2", "fwhm", "vmax", "ymax", "x_left", "x_right", "amp",
-    ]}
-    if vfit.size < 5:
-        return {**nan_result, "model": np.full_like(v, np.nan), "fit_success": False,
-                "fit_message": "Too few points"}
-
-    f = getfwhm_fortran_like(vfit, yfit)
-    fwhm_sigma = (
-        f["fwhm"] / 2.35 if np.isfinite(f["fwhm"]) and f["fwhm"] > 0
-        else max(float(np.std(vfit)), 1.0)
-    )
-    amp0 = f["ymax"] * np.sqrt(2 * np.pi) * fwhm_sigma
-    if not np.isfinite(amp0) or amp0 <= 0:
-        try:
-            amp0 = np.trapezoid(np.maximum(yfit, 0), vfit)
-        except AttributeError:
-            amp0 = np.trapz(np.maximum(yfit, 0), vfit)
-        if not np.isfinite(amp0) or amp0 <= 0:
-            amp0 = max(float(np.sum(yfit)), 1e-6)
-
-    vel0 = f["vmax"] if np.isfinite(f["vmax"]) else float(vfit[np.argmax(yfit)])
-    sig0 = max(
-        fwhm_sigma if np.isfinite(fwhm_sigma) and fwhm_sigma > 0 else float(np.std(vfit)),
-        1.0,
-    )
-    vspan = max(float(np.ptp(vfit)), float(np.std(vfit)), 1.0)
-    sigy = 0.01
-
-    if fit_h3h4:
-        p0 = [amp0, vel0, np.log(sig0), 0.0, 0.0]
-        lo = [0.0, vfit.min() - 2 * vspan, np.log(1e-6), -1.0, -1.0]
-        hi = [np.inf, vfit.max() + 2 * vspan, np.log(1e6),  1.0,  1.0]
-
-        def resid(p):
-            return (
-                gauss_hermite_losvd_model(vfit, p[0], p[1], np.exp(p[2]), p[3], p[4]) - yfit
-            ) / sigy
-
-        res = least_squares(resid, p0, bounds=(lo, hi), max_nfev=10000)
-        amp, vel, log_sig, h3, h4 = res.x
-        sig = np.exp(log_sig)
-    else:
-        p0 = [amp0, vel0, np.log(sig0)]
-        lo = [0.0, vfit.min() - 2 * vspan, np.log(1e-6)]
-        hi = [np.inf, vfit.max() + 2 * vspan, np.log(1e6)]
-
-        def resid(p):
-            return (
-                gauss_hermite_losvd_model(vfit, p[0], p[1], np.exp(p[2]), 0.0, 0.0) - yfit
-            ) / sigy
-
-        res = least_squares(resid, p0, bounds=(lo, hi), max_nfev=10000)
-        amp, vel, log_sig = res.x
-        sig = np.exp(log_sig)
-        h3 = h4 = 0.0
-
-    return {
-        "vherm": float(vel), "sherm": float(sig), "fwhm_sigma": float(fwhm_sigma),
-        "h3": float(h3), "h4": float(h4),
-        "v1": float(f["v1"]), "v2": float(f["v2"]),
-        "fwhm": float(f["fwhm"]), "vmax": float(f["vmax"]), "ymax": float(f["ymax"]),
-        "x_left": float(f["x_left"]), "x_right": float(f["x_right"]), "amp": float(amp),
-        "model": gauss_hermite_losvd_model(v, amp, vel, sig, h3, h4),
-        "fit_success": bool(res.success), "fit_message": str(res.message),
-    }
+    coeffs = res.x
+    return dict(b=np.exp(basis @ coeffs), coeffs=coeffs, success=bool(res.success),
+                message=str(res.message), runtime_s=runtime_s, n_coef=n_coef,
+                lam=lam, objective=objectives[best_idx], objective_gap=objective_gap)

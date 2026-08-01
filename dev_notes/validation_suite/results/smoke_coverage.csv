@@ -1,0 +1,2 @@
+nominal_sigma,nominal_snr,truth_sigma,truth_h4,truth_kind,gaussian_only,sherm_raw,sherm_std_raw,h4_raw,h4_std_raw,sherm_corrected,sherm_std_corrected,h4_corrected,h4_std_corrected,sigma_covered_raw_1s,h4_covered_raw_1s,sigma_covered_corrected_1s,h4_covered_corrected_1s,lam_used,n_boot
+90.0,60.0,83.74575269015881,-0.03597344722432823,gh,False,94.75000864592496,6.213573960669344,8.979590042290894e-05,0.03463265278024267,94.75000864592496,6.213573960669344,8.979590042290894e-05,0.03463265278024267,False,False,False,False,32768.0,4
