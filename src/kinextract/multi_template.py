@@ -34,13 +34,17 @@ import warnings
 import numpy as np
 from scipy.optimize import nnls
 
-from .config import FitConfig, _WING_LAM_UNSAFE_SIGMA
-from .losvd import (
-    build_bspline_basis, difference_matrix, fit_log_spline_map,
-    default_initial_coeffs, tapered_lam_vector, penalty_row_velocities,
-    core_width_sigma,
-)
+from .config import FitConfig
 from .gh_moments import compute_direct_moments
+from .losvd import (
+    build_bspline_basis,
+    core_width_sigma,
+    default_initial_coeffs,
+    difference_matrix,
+    fit_log_spline_map,
+    penalty_row_velocities,
+    tapered_lam_vector,
+)
 
 
 def _alternate_once(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2: np.ndarray,

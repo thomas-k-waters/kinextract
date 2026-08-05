@@ -132,10 +132,10 @@ import warnings
 
 import numpy as np
 
+from .bias_correction import _get_default_calibration
 from .bias_correction import calibration_has_lam_axis as _calibration_has_lam_axis
 from .bias_correction import correct_moments as _correct_moments
 from .bias_correction import estimate_snr_whitened as _estimate_snr_whitened
-from .bias_correction import _get_default_calibration
 from .bias_correction import get_default_lam_axis_calibration as _get_default_lam_axis_calibration
 from .config import FitConfig
 from .gh_moments import compute_losvd_moments, gauss_hermite_model

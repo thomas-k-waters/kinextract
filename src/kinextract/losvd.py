@@ -262,7 +262,6 @@ def core_width_sigma(v_grid: np.ndarray, b: np.ndarray) -> float:
     if peak <= 0.0:
         return float("nan")
     half = 0.5 * peak
-    idx = int(np.argmax(b))
     above = np.flatnonzero(b >= half)
     if above.size < 2:
         return float("nan")

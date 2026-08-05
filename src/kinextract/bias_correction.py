@@ -508,7 +508,9 @@ def correct_losvd(v_grid: np.ndarray, vherm: float, sherm: float, h3: float, h4:
     Returns a dict with `b_corrected` (the reconstructed curve on
     `v_grid`) plus everything `correct_moments` returns.
     """
-    from .gh_moments import gauss_hermite_model  # local import: gh_moments imports this module at top level
+    from .gh_moments import (
+        gauss_hermite_model,  # local import: gh_moments imports this module at top level
+    )
 
     corr = correct_moments(vherm, sherm, h4, snr, calibration, lam=lam)
     b_corrected = gauss_hermite_model(

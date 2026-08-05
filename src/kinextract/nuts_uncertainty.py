@@ -54,11 +54,11 @@ import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, init_to_value
 
+from .aic_regularization import estimate_m_eff_local, select_lambda_aic_local
 from .config import FitConfig
 from .gh_moments import compute_losvd_moments
-from .losvd import _neg_log_post, build_bspline_basis, difference_matrix
-from .aic_regularization import estimate_m_eff_local, select_lambda_aic_local
 from .laplace_uncertainty import _check_no_continuum
+from .losvd import _neg_log_post, build_bspline_basis, difference_matrix
 
 
 def _model(basis, D, A_eff_w, y_w, lam_vec, n_coef):

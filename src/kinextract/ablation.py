@@ -43,7 +43,10 @@ import numpy as np
 from .config import FitConfig
 from .forward_model import build_template_stack
 from .gh_moments import (
-    gauss_hermite_model, compute_direct_moments, fit_h3_h4, shape_aware_taper_correction,
+    compute_direct_moments,
+    fit_h3_h4,
+    gauss_hermite_model,
+    shape_aware_taper_correction,
 )
 from .multi_template import fit_losvd
 

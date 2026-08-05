@@ -32,15 +32,13 @@ correlated case.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import numpy as np
 from astropy.modeling.functional_models import Sersic2D
 
 from .config import FitConfig
 from .emiles import load_emiles_templates
 from .forward_model import build_template_stack
-from .gh_moments import gauss_hermite_model, compute_losvd_moments
+from .gh_moments import compute_losvd_moments, gauss_hermite_model
 from .losvd import build_spline_truth
 from .muse_cube import MuseCube
 

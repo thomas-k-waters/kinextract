@@ -103,10 +103,10 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from .aic_regularization import estimate_m_eff_local, select_lambda_aic_local
 from .config import FitConfig
 from .gh_moments import compute_losvd_moments
 from .losvd import _neg_log_post, build_bspline_basis, difference_matrix
-from .aic_regularization import estimate_m_eff_local, select_lambda_aic_local
 
 _hessian_fn = jax.jit(jax.hessian(_neg_log_post))
 

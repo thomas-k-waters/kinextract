@@ -70,58 +70,108 @@ if _os.environ.get("KINEXTRACT_NO_X64", "") != "1":
     import jax as _jax
     _jax.config.update("jax_enable_x64", True)
 
-from .losvd import (
-    build_bspline_basis, build_spline_truth, difference_matrix, default_initial_coeffs, fit_log_spline_map,
-    tapered_lam_vector, penalty_row_velocities,
+from .ablation import (
+    AblationConfig,
+    fit_one,
+    load_ablation_table,
+    run_ablation_sweep,
+    save_ablation_table,
 )
-from .forward_model import (
-    build_velocity_grid, shift_template, build_template_stack,
-    mask_wavelength_windows,
+from .aic_regularization import (
+    AICSelectionResult,
+    estimate_m_eff,
+    estimate_m_eff_local,
+    select_lambda_aic,
+    select_lambda_aic_local,
 )
-from .gh_moments import (
-    gauss_hermite_model, fit_gauss_hermite,
-    compute_direct_moments, fit_h3_h4, compute_losvd_moments, shape_aware_taper_correction,
-)
-from .config import FitConfig
-from .multi_template import fit_losvd, fit_losvd_basis, fit_losvd_parallel
-from .uncertainty import bootstrap_losvd, bootstrap_losvd_parallel, calibrate_noise_scale
-from .cleaning import (
-    fit_losvd_clean, fit_losvd_clean_parallel, detect_emission_lines, DEFAULT_CAT_EMISSION_LINES,
-    detect_emission_from_residual, compute_fit_rms,
-)
-from .continuum import fit_continuum_block, fit_losvd_with_continuum
 from .bias_correction import (
-    BiasCalibration, PerLamCalibration, load_calibration_table, load_per_lam_calibration_table,
-    estimate_snr_whitened, correct_moments, correct_losvd, calibration_has_lam_axis,
+    BiasCalibration,
+    PerLamCalibration,
+    calibration_has_lam_axis,
+    correct_losvd,
+    correct_moments,
+    estimate_snr_whitened,
     get_default_lam_axis_calibration,
+    load_calibration_table,
+    load_per_lam_calibration_table,
+)
+from .binning import (
+    DartboardBins,
+    assign_legacy_dartboard_bins,
+    assign_spaxels_to_bins,
+    build_reflected_sin_theta_edges,
+    linear_radial_edges,
+    load_legacy_bin_edges,
+    log_radial_edges,
+    uniform_theta_edges,
 )
 from .calibrate_bias import run_calibration_sweep, save_calibration_table
-from .ablation import (
-    AblationConfig, fit_one, run_ablation_sweep, save_ablation_table, load_ablation_table,
+from .cleaning import (
+    DEFAULT_CAT_EMISSION_LINES,
+    compute_fit_rms,
+    detect_emission_from_residual,
+    detect_emission_lines,
+    fit_losvd_clean,
+    fit_losvd_clean_parallel,
 )
-from .lsf import fwhm_to_sigma, muse_lsf_fwhm, variable_gaussian_convolve, match_gaussian_lsf
-from .aic_regularization import (
-    AICSelectionResult, estimate_m_eff, select_lambda_aic,
-    estimate_m_eff_local, select_lambda_aic_local,
+from .config import FitConfig
+from .continuum import fit_continuum_block, fit_losvd_with_continuum
+from .emiles import load_emiles_templates, pack_emiles_templates, parse_emiles_filename
+from .forward_model import (
+    build_template_stack,
+    build_velocity_grid,
+    mask_wavelength_windows,
+    shift_template,
 )
-from .noise_model import build_ar1_covariance, whiten, estimate_correlation_length, measure_and_whiten
+from .gh_moments import (
+    compute_direct_moments,
+    compute_losvd_moments,
+    fit_gauss_hermite,
+    fit_h3_h4,
+    gauss_hermite_model,
+    shape_aware_taper_correction,
+)
 from .laplace_uncertainty import (
-    laplace_covariance_at_lam, laplace_losvd_uncertainty, quick_laplace_uncertainty,
-    laplace_losvd_uncertainty_parallel, laplace_covariance_at_lam_with_continuum,
     laplace_continuum_uncertainty,
-)
-from .emiles import parse_emiles_filename, pack_emiles_templates, load_emiles_templates
-from .muse_cube import MuseCube, white_light_image, extract_aperture_spectrum, load_muse_cube, save_muse_cube_fits
-from .mock_cube import build_mock_cube
-from .binning import (
-    DartboardBins, log_radial_edges, linear_radial_edges, uniform_theta_edges,
-    build_reflected_sin_theta_edges, assign_spaxels_to_bins,
-    load_legacy_bin_edges, assign_legacy_dartboard_bins,
-)
-from .template_reduction import (
-    TemplateReductionResult, reduce_templates_iteratively, save_template_subset, load_template_subset,
+    laplace_covariance_at_lam,
+    laplace_covariance_at_lam_with_continuum,
+    laplace_losvd_uncertainty,
+    laplace_losvd_uncertainty_parallel,
+    quick_laplace_uncertainty,
 )
 from .legacy_io import write_fit_outputs
+from .losvd import (
+    build_bspline_basis,
+    build_spline_truth,
+    default_initial_coeffs,
+    difference_matrix,
+    fit_log_spline_map,
+    penalty_row_velocities,
+    tapered_lam_vector,
+)
+from .lsf import fwhm_to_sigma, match_gaussian_lsf, muse_lsf_fwhm, variable_gaussian_convolve
+from .mock_cube import build_mock_cube
+from .multi_template import fit_losvd, fit_losvd_basis, fit_losvd_parallel
+from .muse_cube import (
+    MuseCube,
+    extract_aperture_spectrum,
+    load_muse_cube,
+    save_muse_cube_fits,
+    white_light_image,
+)
+from .noise_model import (
+    build_ar1_covariance,
+    estimate_correlation_length,
+    measure_and_whiten,
+    whiten,
+)
+from .template_reduction import (
+    TemplateReductionResult,
+    load_template_subset,
+    reduce_templates_iteratively,
+    save_template_subset,
+)
+from .uncertainty import bootstrap_losvd, bootstrap_losvd_parallel, calibrate_noise_scale
 
 __all__ = [
     "build_bspline_basis", "build_spline_truth", "difference_matrix", "default_initial_coeffs", "fit_log_spline_map",
@@ -133,7 +183,7 @@ __all__ = [
     "FitConfig",
     "fit_losvd", "fit_losvd_basis", "fit_losvd_parallel",
     "bootstrap_losvd", "bootstrap_losvd_parallel", "calibrate_noise_scale",
-    "fit_losvd_clean", "detect_emission_lines", "DEFAULT_CAT_EMISSION_LINES",
+    "fit_losvd_clean", "fit_losvd_clean_parallel", "detect_emission_lines", "DEFAULT_CAT_EMISSION_LINES",
     "detect_emission_from_residual", "compute_fit_rms",
     "fit_continuum_block", "fit_losvd_with_continuum",
     "BiasCalibration", "PerLamCalibration", "load_calibration_table", "load_per_lam_calibration_table",

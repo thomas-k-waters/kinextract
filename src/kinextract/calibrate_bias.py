@@ -63,7 +63,7 @@ import numpy as np
 from .aic_regularization import estimate_m_eff_local
 from .config import FitConfig
 from .forward_model import build_template_stack
-from .gh_moments import gauss_hermite_model, compute_losvd_moments
+from .gh_moments import compute_losvd_moments, gauss_hermite_model
 
 
 def _true_moments(vel: float, sig: float, h4_true: float = 0.0, h3_true: float = 0.0,

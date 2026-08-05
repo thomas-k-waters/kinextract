@@ -220,8 +220,11 @@ def fit_continuum_block(M: np.ndarray, y_w: np.ndarray, basis_c: np.ndarray, D2_
     # losvd.fit_log_spline_map's identical change for the measured 1.45x
     # speedup and the reasoning (computing the gradient already requires
     # the forward pass, so separate calls pay for it twice per iteration).
-    val_fn = lambda c: _val_fn_continuum(c, M_j, y_w_j, basis_j, D2_j, lam_c_j, ridge_c_j)
-    vg_fn = lambda c: _vg_fn_continuum(c, M_j, y_w_j, basis_j, D2_j, lam_c_j, ridge_c_j)
+    def val_fn(c):
+        return _val_fn_continuum(c, M_j, y_w_j, basis_j, D2_j, lam_c_j, ridge_c_j)
+
+    def vg_fn(c):
+        return _vg_fn_continuum(c, M_j, y_w_j, basis_j, D2_j, lam_c_j, ridge_c_j)
 
     def _obj_and_grad(c):
         v, g = vg_fn(jnp.array(c))
