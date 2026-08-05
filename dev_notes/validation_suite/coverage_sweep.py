@@ -42,11 +42,42 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src"))
 from mocks import EMILES_GRID_DEFAULT, RANGE_PRESETS, observed_wavelength_grid, draw_random_params, build_mock
 from kinextract import whiten
 from kinextract.uncertainty import bootstrap_losvd
+from kinextract.laplace_uncertainty import laplace_losvd_uncertainty, quick_laplace_uncertainty
+
+
+def _run_bootstrap(A_w, y_w, cfg, noise_seed, n_boot, apply_bias_correction):
+    boot = bootstrap_losvd(A_w, y_w, cfg, n_boot=n_boot, seed=noise_seed,
+                           apply_bias_correction=apply_bias_correction)
+    out = dict(
+        sherm_raw=boot["point0"]["sherm"], sherm_std_raw=boot["sherm_std"],
+        h4_raw=boot["point0"]["h4"], h4_std_raw=boot["h4_std"],
+        lam_used=boot["result0"]["lam_used"],
+    )
+    out["sherm_corrected"] = boot["point0_corrected"]["sherm"]
+    out["sherm_std_corrected"] = boot["sherm_std_corrected"]
+    out["h4_corrected"] = boot["point0_corrected"]["h4"]
+    out["h4_std_corrected"] = boot["h4_std_corrected"]
+    return out
+
+
+def _run_laplace(A_w, y_w, cfg, noise_seed, n_samples, quick):
+    fn = quick_laplace_uncertainty if quick else laplace_losvd_uncertainty
+    lap = fn(A_w, y_w, cfg, n_samples=n_samples, seed=noise_seed)
+    return dict(
+        sherm_raw=lap["point0"]["sherm"], sherm_std_raw=lap["sherm_std"],
+        h4_raw=lap["point0"]["h4"], h4_std_raw=lap["h4_std"],
+        lam_used=lap["lam_used"],
+        # no bias-correction variant for the Laplace engine yet (calibration
+        # tables were only ever validated against bootstrap) -- mirror the
+        # raw fields so downstream coverage columns are still populated.
+        sherm_corrected=lap["point0"]["sherm"], sherm_std_corrected=lap["sherm_std"],
+        h4_corrected=lap["point0"]["h4"], h4_std_corrected=lap["h4_std"],
+    )
 
 
 def run_one_coverage_case(rng, noise_seed, sigma, snr, preset, n_boot, n_templates,
                           emiles_ages, emiles_metals, emiles_grid_path, wave_fit,
-                          apply_bias_correction):
+                          apply_bias_correction, method="bootstrap", n_samples=200):
     params = draw_random_params(rng, fixed={"sigma": sigma, "snr": snr}, preset=preset,
                                 gaussian_only=False, n_templates=n_templates,
                                 emiles_ages=emiles_ages, emiles_metals=emiles_metals)
@@ -59,29 +90,29 @@ def run_one_coverage_case(rng, noise_seed, sigma, snr, preset, n_boot, n_templat
     errors = np.full(len(mock.wave_fit), noise_level)
     A_w, y_w, _ = whiten(mock.A_stack, galaxy, errors, rho=0.0)
 
-    boot = bootstrap_losvd(A_w, y_w, mock.cfg, n_boot=n_boot, seed=noise_seed,
-                           apply_bias_correction=apply_bias_correction)
-
-    sherm_raw, sherm_std_raw = boot["point0"]["sherm"], boot["sherm_std"]
-    h4_raw, h4_std_raw = boot["point0"]["h4"], boot["h4_std"]
-    sherm_corr, sherm_std_corr = boot["point0_corrected"]["sherm"], boot["sherm_std_corrected"]
-    h4_corr, h4_std_corr = boot["point0_corrected"]["h4"], boot["h4_std_corrected"]
+    if method == "bootstrap":
+        res = _run_bootstrap(A_w, y_w, mock.cfg, noise_seed, n_boot, apply_bias_correction)
+    elif method in ("laplace", "quick_laplace"):
+        res = _run_laplace(A_w, y_w, mock.cfg, noise_seed, n_samples, quick=(method == "quick_laplace"))
+    else:
+        raise ValueError(f"unknown method {method!r}")
 
     def covered(center, half_width, truth):
         return bool(abs(center - truth) <= half_width)
 
     return dict(
+        method=method,
         nominal_sigma=sigma, nominal_snr=snr, truth_sigma=tm["sherm"], truth_h4=tm["h4"],
         truth_kind=params["truth_kind"], gaussian_only=params["gaussian_only"],
-        sherm_raw=sherm_raw, sherm_std_raw=sherm_std_raw,
-        h4_raw=h4_raw, h4_std_raw=h4_std_raw,
-        sherm_corrected=sherm_corr, sherm_std_corrected=sherm_std_corr,
-        h4_corrected=h4_corr, h4_std_corrected=h4_std_corr,
-        sigma_covered_raw_1s=covered(sherm_raw, sherm_std_raw, tm["sherm"]),
-        h4_covered_raw_1s=covered(h4_raw, h4_std_raw, tm["h4"]),
-        sigma_covered_corrected_1s=covered(sherm_corr, sherm_std_corr, tm["sherm"]),
-        h4_covered_corrected_1s=covered(h4_corr, h4_std_corr, tm["h4"]),
-        lam_used=boot["result0"]["lam_used"],
+        sherm_raw=res["sherm_raw"], sherm_std_raw=res["sherm_std_raw"],
+        h4_raw=res["h4_raw"], h4_std_raw=res["h4_std_raw"],
+        sherm_corrected=res["sherm_corrected"], sherm_std_corrected=res["sherm_std_corrected"],
+        h4_corrected=res["h4_corrected"], h4_std_corrected=res["h4_std_corrected"],
+        sigma_covered_raw_1s=covered(res["sherm_raw"], res["sherm_std_raw"], tm["sherm"]),
+        h4_covered_raw_1s=covered(res["h4_raw"], res["h4_std_raw"], tm["h4"]),
+        sigma_covered_corrected_1s=covered(res["sherm_corrected"], res["sherm_std_corrected"], tm["sherm"]),
+        h4_covered_corrected_1s=covered(res["h4_corrected"], res["h4_std_corrected"], tm["h4"]),
+        lam_used=res["lam_used"],
         n_boot=n_boot,
     )
 
@@ -91,7 +122,11 @@ def parse_args():
     p.add_argument("--sigma-values", required=True, help="comma-separated true-sigma grid values")
     p.add_argument("--snr-values", required=True, help="comma-separated S/N grid values")
     p.add_argument("--n-truths", type=int, default=8, help="random truths per (sigma, S/N) cell")
-    p.add_argument("--n-boot", type=int, default=15, help="bootstrap replicates per case")
+    p.add_argument("--n-boot", type=int, default=15, help="bootstrap replicates per case (method=bootstrap)")
+    p.add_argument("--method", default="bootstrap", choices=["bootstrap", "laplace", "quick_laplace"],
+                   help="uncertainty engine under test")
+    p.add_argument("--n-samples", type=int, default=200,
+                   help="posterior-predictive samples per case (method=laplace/quick_laplace)")
     p.add_argument("--preset", default="safe", choices=list(RANGE_PRESETS))
     p.add_argument("--n-templates", type=int, default=4)
     p.add_argument("--apply-bias-correction", action="store_true")
@@ -133,6 +168,7 @@ def main():
                     emiles_ages=emiles_ages, emiles_metals=emiles_metals,
                     emiles_grid_path=emiles_path, wave_fit=wave_fit,
                     apply_bias_correction=args.apply_bias_correction,
+                    method=args.method, n_samples=args.n_samples,
                 )
                 if writer is None:
                     fieldnames = list(row.keys())

@@ -143,3 +143,35 @@ def estimate_correlation_length(residuals: np.ndarray, method: str = "lag1_acf")
         return 0.0
     lag1 = np.sum(x[:-1] * x[1:]) / var
     return float(lag1) if np.isfinite(lag1) and lag1 > 0 else 0.0
+
+
+def measure_and_whiten(A_stack: np.ndarray, y: np.ndarray, errors: np.ndarray,
+                        residuals: np.ndarray, method: str = "lag1_acf"):
+    """`estimate_correlation_length` + `whiten` in one call -- the common
+    real-data pattern (fit once, measure `rho` from that fit's own
+    residuals, refit against the resulting AR(1)-whitened inputs) that
+    callers have so far hand-rolled themselves (e.g.
+    `07_full_galaxy_analysis.ipynb` currently hardcodes a `MEASURED_RHO`
+    value copied over from a separate notebook run, rather than measuring
+    it live from the target's own data).
+
+    Parameters
+    ----------
+    A_stack, y, errors : as in `whiten`.
+    residuals : ndarray
+        Continuum-detrended residuals to measure `rho` from -- typically
+        from a preliminary `rho=0` fit on the same data (see
+        `estimate_correlation_length`'s own docstring for the detrending
+        requirement; an un-detrended residual array's ACF reflects
+        template mismatch/continuum shape, not per-pixel noise
+        correlation).
+    method : passed straight through to `estimate_correlation_length`.
+
+    Returns
+    -------
+    (A_stack_w, y_w, L, rho) -- `whiten`'s own return values, plus the
+    `rho` that was measured and used.
+    """
+    rho = estimate_correlation_length(residuals, method=method)
+    A_stack_w, y_w, L = whiten(A_stack, y, errors, rho=rho)
+    return A_stack_w, y_w, L, rho

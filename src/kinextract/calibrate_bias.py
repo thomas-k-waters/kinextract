@@ -270,6 +270,17 @@ def save_calibration_table(rows: list[dict], path: str, header_comment: str = ""
     a file with only the first 10 columns (written by a version of this
     function older than the `m_eff` axis) as equally valid, so this is
     not a breaking format change for anything already on disk.
+
+    **`h3_mean`/`h3_std` are written as two more trailing columns**, the
+    same backward-compatible pattern as `lam`/`m_eff` -- `run_calibration_
+    sweep` has always returned these (used to characterize non-Gaussian/
+    asymmetric truths, see its own `h3_true` docstring), but this
+    function silently dropped them until now (see `dev_notes/calibration/
+    CALIBRATION_TRUST_STRATEGY.md`'s 2026-08-01 entry for the gap this
+    closes -- the h3-wing table built that session had nowhere to put its
+    own `h3_mean`/`h3_std` numbers in the "production" file format).
+    `load_calibration_table` treats a 13-column file (written before this
+    change) as equally valid, with `h3_bias`/`h3_bias_std` left as `nan`.
     """
     with open(path, "w") as f:
         if header_comment:
@@ -279,12 +290,16 @@ def save_calibration_table(rows: list[dict], path: str, header_comment: str = ""
                 f"{'sig_bias_mean':>14} {'sig_bias_std':>13}   "
                 f"{'sig_bias_pct':>13}   "
                 f"{'h4_mean':>9} {'h4_std':>8}   "
-                f"{'lam':>8} {'m_eff_mean':>10} {'m_eff_std':>9}\n")
+                f"{'lam':>8} {'m_eff_mean':>10} {'m_eff_std':>9}   "
+                f"{'h3_mean':>9} {'h3_std':>8}\n")
         for r in rows:
             pct = 100 * r["sig_bias_mean"] / r["sigma"] if r["sigma"] else float("nan")
+            h3_mean = r.get("h3_mean", float("nan"))
+            h3_std = r.get("h3_std", float("nan"))
             f.write(f"{r['sigma']:6.0f} {r['snr']:6.0f} {r['n']:4d}   "
                     f"{r['v_bias_mean']:+12.2f} {r['v_bias_std']:11.2f}   "
                     f"{r['sig_bias_mean']:+14.2f} {r['sig_bias_std']:13.2f}   "
                     f"{pct:+12.1f}%   "
                     f"{r['h4_mean']:+9.4f} {r['h4_std']:8.4f}   "
-                    f"{r['lam']:8.3f} {r['m_eff_mean']:10.3f} {r['m_eff_std']:9.3f}\n")
+                    f"{r['lam']:8.3f} {r['m_eff_mean']:10.3f} {r['m_eff_std']:9.3f}   "
+                    f"{h3_mean:+9.4f} {h3_std:8.4f}\n")

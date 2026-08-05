@@ -79,9 +79,9 @@ CALIBRATION_DATA_DIR = os.path.join(
 # (40 templates) to the real-star default's 33, spanning young-to-old and
 # metal-poor-to-metal-rich rather than the full 636-template native grid
 # (which would make the *mock's own generative mixture* implausibly
-# diffuse/degenerate for calibration purposes -- see this package's own
-# template-mismatch-diagnostic notebook on how correlated neighboring
-# E-MILES templates are).
+# diffuse/degenerate for calibration purposes -- neighboring E-MILES
+# templates are strongly correlated in the CaII fit window, see
+# 02_realistic_mock_fit.ipynb's own condition-number diagnostic).
 AGES = [0.1, 0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 9.0, 11.0, 14.0]
 METALS = [-1.49, -0.66, 0.06, 0.40]
 WEIGHT_SEED = 30000  # new seed for the EMILES-basis calibration (not reused from the MUSE-star tables)
@@ -93,6 +93,11 @@ N_REPS = 30  # tighter than the MUSE-star default's 20 -- overnight run, cost is
 H4WING_SIGMA_GRID = [30, 50, 80, 140]
 H4WING_SNR_GRID = [25, 40, 60, 100, 150]
 H4_TRUE_WING = 0.15
+
+H3_SIGMA_GRID = [30, 50, 80, 140]
+H3_SNR_GRID = [25, 40, 60, 100, 150]
+H3_TRUE_SKEW = 0.15  # matches H4_TRUE_WING's magnitude, for the same reason: a genuine,
+# moderate, physically-plausible asymmetric-LOSVD truth, not an extreme stress value
 
 LAM_GRID_FOR_MEFF = [1.0, 8.0, 64.0, 512.0, 4096.0, 32768.0]
 # Matches FitConfig()'s current order-3 default lam grid (select_lambda_aic_local's own
@@ -117,22 +122,22 @@ def _load_templates_and_weights():
     return templates, wavelength, weights
 
 
-def _run_one_cell(sigma, snr, lam_grid, h4_true, n_reps):
+def _run_one_cell(sigma, snr, lam_grid, h4_true, n_reps, h3_true=0.0):
     templates, wavelength, weights = _load_templates_and_weights()
     return run_calibration_sweep(
         templates, wavelength, weights, sigma_grid=[sigma], snr_grid=[snr],
-        n_reps=n_reps, lam_grid=lam_grid, h4_true=h4_true, verbose=False,
+        n_reps=n_reps, lam_grid=lam_grid, h4_true=h4_true, h3_true=h3_true, verbose=False,
     )
 
 
 def run_parallel(sigma_grid, snr_grid, lam_grid=None, h4_true=0.0, n_reps=N_REPS,
-                  max_workers=None, verbose=True, label=""):
+                  max_workers=None, verbose=True, label="", h3_true=0.0):
     max_workers = max_workers or os.cpu_count()
     cells = [(s, n) for s in sigma_grid for n in snr_grid]
     all_rows = []
     t0 = time.time()
     with ProcessPoolExecutor(max_workers=max_workers) as ex:
-        futures = {ex.submit(_run_one_cell, s, n, lam_grid, h4_true, n_reps): (s, n) for s, n in cells}
+        futures = {ex.submit(_run_one_cell, s, n, lam_grid, h4_true, n_reps, h3_true): (s, n) for s, n in cells}
         n_done = 0
         for fut in as_completed(futures):
             s, n = futures[fut]

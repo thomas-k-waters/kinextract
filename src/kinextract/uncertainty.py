@@ -346,8 +346,12 @@ def bootstrap_losvd(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         comparing replicates -- compare against a similarly unit-area-
         normalized point-estimate curve, not `result0['b']` directly.
       b_boot_cov -- (n_bins, n_bins) covariance matrix of `b_boot`.
-      b_std, b_p16, b_p84 -- per-bin std and 16th/84th percentile envelope
-        of `b_boot`.
+      b_median, b_std, b_p16, b_p84 -- `np.median(b_boot, axis=0)` and the
+        per-bin std/16th/84th percentile envelope of `b_boot`. Plot this
+        (not `result0['b']`/`point0`'s own curve) as the reported LOSVD --
+        the bootstrap band is centered on `b_median`, not on the point
+        estimate, so presenting the point estimate as "the answer" next to
+        a band that isn't centered on it is misleading.
       w_boot -- (n_boot, n_templates) array of normalized mixture
         fractions per replicate.
       w_std, w_p16, w_p84 -- per-template std and 16th/84th percentile of
@@ -440,6 +444,7 @@ def bootstrap_losvd(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         m = compute_losvd_moments(v_grid, result_i["b"], fit_h3h4=fit_h3h4)
         vherm[i], sherm[i], h3[i], h4[i] = m["vherm"], m["sherm"], m["h3"], m["h4"]
 
+    b_median = np.median(b_boot, axis=0)
     b_p16 = np.percentile(b_boot, 16, axis=0)
     b_p84 = np.percentile(b_boot, 84, axis=0)
     sherm_std = float(sherm.std(ddof=1))
@@ -498,7 +503,7 @@ def bootstrap_losvd(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         corrected_curve = np.maximum(point0_corrected["model"], 0.0)
         corrected_area = np.trapezoid(corrected_curve, v_grid)
         b_median_corrected = corrected_curve / corrected_area if corrected_area > 0 else corrected_curve
-        b_median_raw = np.median(b_boot, axis=0)
+        b_median_raw = b_median
         # Band WIDTH must reflect sherm_std_corrected's own inflation, not just
         # recenter the raw (uninflated) bootstrap band on the corrected median.
         # A previous version did only the recenter step -- b_p16_corrected/
@@ -520,7 +525,7 @@ def bootstrap_losvd(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         point0_corrected = point0
         sherm_std_corrected = sherm_std
         h4_std_corrected = h4_std
-        b_median_corrected = np.median(b_boot, axis=0)
+        b_median_corrected = b_median
         b_p16_corrected = b_p16
         b_p84_corrected = b_p84
 
@@ -531,6 +536,7 @@ def bootstrap_losvd(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         b_boot=b_boot,
         b_boot_cov=np.cov(b_boot, rowvar=False),
         b_std=b_boot.std(axis=0, ddof=1),
+        b_median=b_median,
         b_p16=b_p16,
         b_p84=b_p84,
         w_boot=w_boot,
@@ -616,11 +622,13 @@ def bootstrap_losvd_parallel(A_stack_w_list, y_w_list, cfg_list, n_boot: int = 3
     replicate_single_start, reselect_lam : shared across every bin,
         forwarded directly to each bin's own `bootstrap_losvd` call -- see
         that function's own docstring for what each controls.
-    n_jobs : worker process count. `None` (default) uses `os.cpu_count()`;
-        `1` disables the process pool and runs serially in-process. See
-        `fit_losvd_parallel`'s own docstring for the same heterogeneous-
-        core-hardware caveat (measure your own machine; more workers is
-        not always faster on Apple Silicon's performance/efficiency mix).
+    n_jobs : worker process count. `None` (default) uses `os.cpu_count()`,
+        memory-permitting -- see `multi_template.resolve_n_jobs`'s own
+        docstring. `1` disables the process pool and runs serially
+        in-process. See `fit_losvd_parallel`'s own docstring for the same
+        heterogeneous-core-hardware caveat (measure your own machine;
+        more workers is not always faster on Apple Silicon's performance/
+        efficiency mix).
 
     Returns
     -------
@@ -633,11 +641,10 @@ def bootstrap_losvd_parallel(A_stack_w_list, y_w_list, cfg_list, n_boot: int = 3
     -- see that function's own docstring for why (JAX + multiprocessing
     safety, avoiding BLAS oversubscription across workers).
     """
-    import os
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
 
-    from .multi_template import _limit_worker_threads
+    from .multi_template import _limit_worker_threads, resolve_n_jobs
 
     n_bins = len(A_stack_w_list)
     if len(y_w_list) != n_bins:
@@ -667,7 +674,12 @@ def bootstrap_losvd_parallel(A_stack_w_list, y_w_list, cfg_list, n_boot: int = 3
     if n_jobs == 1:
         return [_bootstrap_losvd_worker(job) for job in jobs]
 
-    n_jobs = n_jobs if n_jobs is not None else os.cpu_count()
+    # 4x the largest single design matrix -- each of the n_boot replicates reuses the
+    # same A_stack_w by reference (bootstrap_losvd's own loop, not a per-replicate copy),
+    # so the base design matrix still dominates a job's own memory footprint (see
+    # resolve_n_jobs's own docstring for why this cap is memory-aware, not just cpu_count()).
+    per_job_bytes = 4 * max((a.nbytes for a in A_stack_w_list), default=0)
+    n_jobs = resolve_n_jobs(n_jobs, per_job_bytes)
     with ProcessPoolExecutor(max_workers=n_jobs, mp_context=get_context("spawn"),
                               initializer=_limit_worker_threads) as pool:
         return list(pool.map(_bootstrap_losvd_worker, jobs))

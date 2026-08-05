@@ -27,7 +27,7 @@ needs answering.
 show measurable lag-1 correlation (see `noise_model.py`) -- modeling that
 here would conflate two separate validation questions. This mock's own
 noise model matches `01_basic_mock_fit.ipynb`/`02_realistic_mock_fit.ipynb`'s
-own simple-noise convention, not `04_real_data_muse.ipynb`'s measured
+own simple-noise convention, not `05_real_data_muse.ipynb`'s measured
 correlated case.
 """
 from __future__ import annotations

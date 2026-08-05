@@ -417,21 +417,20 @@ def fit_losvd(A_stack: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         if cfg.continuum_knots is not None:
             warnings.warn(
                 "fit_losvd: cfg.lam_selection='aic_local' (the default) does not support "
-                "continuum-cofitting yet (cfg.continuum_knots is set) -- falling back to the "
-                "fixed cfg.lam value for this fit"
-                + (", and to penalty_order=2 (the path cfg.lam's fixed default is calibrated "
-                   "for -- a fixed lam=2.0 under the order-3 penalty would be essentially "
-                   "unregularized). NOTE: dev_notes/continuum/FINDINGS.md's multi-seed sweep "
-                   "(2026-07-30) found penalty_order=3 with a fixed lam in the 4096-32768 range "
-                   "beats this order-2/lam=2.0 fallback on both sigma and h4 bias -- consider "
-                   "setting penalty_order=3, lam_selection='fixed', lam=4096.0 (or similar) "
-                   "explicitly instead of relying on this automatic fallback"
-                   if cfg.penalty_order == 3 and cfg.lam == 2.0 else "")
+                "continuum-cofitting yet (cfg.continuum_knots is set) -- falling back to a "
+                "fixed lam for this fit"
+                + (", using penalty_order=3, lam=4096.0 (dev_notes/continuum/FINDINGS.md's "
+                   "2026-07-30 multi-seed sweep: this beats the old penalty_order=2, lam=2.0 "
+                   "combination on both sigma and h4 bias at every S/N tested) rather than "
+                   "cfg.lam's own literal value (2.0, calibrated for penalty_order=2, not this "
+                   "path's now-default penalty_order=3)"
+                   if cfg.penalty_order == 3 and cfg.lam == 2.0 else
+                   f" (cfg.lam={cfg.lam}, penalty_order={cfg.penalty_order}, as explicitly set)")
                 + ". Set lam_selection='fixed' explicitly to silence this warning.",
                 UserWarning, stacklevel=2,
             )
             if cfg.penalty_order == 3 and cfg.lam == 2.0:
-                cfg = dataclasses.replace(cfg, penalty_order=2)
+                cfg = dataclasses.replace(cfg, lam=4096.0)
         else:
             # Local import: aic_regularization.py imports fit_losvd from this module at
             # module level, so a top-level import here would be circular -- same pattern
@@ -528,6 +527,64 @@ def _fit_losvd_worker(args):
     return fit_losvd(A_stack, y_w, cfg, wave_fit=wave_fit)
 
 
+def resolve_n_jobs(n_jobs: int | None, per_job_bytes: float, cap_fraction: float = 0.5) -> int:
+    """Pick a worker-process count for the `*_parallel` functions that
+    won't overcommit *this* machine's memory, while still using
+    everything available on a bigger one -- e.g. this package's own
+    16GB-RAM dev laptop vs. a large-memory HPC node (Great Lakes).
+
+    `n_jobs` given explicitly (not `None`) always wins, unchanged -- the
+    escape hatch for a user who knows their own machine's headroom and
+    wants to force more (or less) parallelism than the automatic
+    estimate below would pick. This is the only case that matters on a
+    large-memory cluster: pass `n_jobs=<your core count>` and this
+    function is a no-op.
+
+    `n_jobs=None` (every `*_parallel` function's own default) starts from
+    `os.cpu_count()`, then caps it so `n_jobs * per_job_bytes` doesn't
+    exceed `cap_fraction` (default half) of *available* system memory --
+    leaving headroom for whatever the caller already holds (e.g. a
+    per-bin design-matrix list built before the parallel call, or a real
+    MUSE cube still in memory). Available memory is estimated via
+    `psutil` if installed (accurate -- accounts for other running
+    processes/apps), falling back to *total* physical memory via
+    `os.sysconf` on POSIX systems (conservative but portable, no new
+    required dependency) if `psutil` isn't present, or, failing both
+    (e.g. Windows without `psutil`), just `os.cpu_count()` unchanged --
+    today's exact behavior, never worse than before this existed.
+
+    This scales in both directions with no code change needed: a laptop
+    with only a few GB free gets a small, safe worker count automatically;
+    an HPC node with hundreds of GB gets the full `os.cpu_count()` (the
+    memory cap essentially never binds there) -- see this package's own
+    `dev_notes/` for the real crash this was built to prevent (a 16GB
+    machine, a multi-GB real cube, and `os.cpu_count()`-many workers each
+    needing their own per-bin working memory, all at once).
+    """
+    import os
+    cpu_default = os.cpu_count() or 1
+    if n_jobs is not None:
+        return n_jobs
+    if per_job_bytes <= 0:
+        return cpu_default
+
+    available_bytes = None
+    try:
+        import psutil
+        available_bytes = psutil.virtual_memory().available
+    except ImportError:
+        try:
+            available_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+        except (ValueError, OSError, AttributeError):
+            available_bytes = None
+
+    if available_bytes is None:
+        return cpu_default
+
+    memory_capped = max(1, int((available_bytes * cap_fraction) // per_job_bytes))
+    return max(1, min(cpu_default, memory_capped))
+
+
 def _limit_worker_threads():
     """`ProcessPoolExecutor` initializer: pin BLAS/OpenMP thread pools to 1
     per worker before `kinextract` (and therefore numpy/JAX) gets
@@ -547,9 +604,22 @@ def _limit_worker_threads():
     kinextract package that doesn't otherwise need one.
     """
     import os
+    import warnings
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         os.environ[var] = "1"
+    # `select_lambda_aic_local` constructs a FitConfig-equivalent check for every
+    # candidate lam in its own scan grid, not just the one finally selected -- so
+    # FitConfig's own "knot spacing much finer than knot_spacing_kms is calibrated
+    # against" warning (config.py) can fire once per candidate per bin per
+    # replicate, easily hundreds of times across a real multi-bin, bootstrapped run
+    # (confirmed directly: `examples/notebooks/07_full_galaxy_analysis.ipynb`,
+    # see `dev_notes/real_data_sigma/FINDINGS.md`'s warning-frequency entry).
+    # "once" (not "ignore"): still visible at least once per worker process if the
+    # underlying condition is real, just deduplicated -- this is a presentation
+    # fix for a genuinely over-eager per-candidate diagnostic, not a claim the
+    # condition never happens.
+    warnings.filterwarnings("once", message=r".*much finer than.*knot_spacing_kms.*")
 
 
 def fit_losvd_parallel(A_stack_list, y_w_list, cfg_list, wave_fit=None, n_jobs=None):
@@ -578,10 +648,14 @@ def fit_losvd_parallel(A_stack_list, y_w_list, cfg_list, wave_fit=None, n_jobs=N
         `cfg.continuum_knots` is set. A single array (shared across every
         bin) or a sequence of one per bin. `None` (default) matches
         `fit_losvd`'s own default (continuum-cofitting off).
-    n_jobs : worker process count. `None` (default) uses `os.cpu_count()`.
-        `1` disables the process pool and runs serially in-process --
-        useful for debugging (real tracebacks, no pickling) or when the
-        bin count is small enough that pool startup would dominate.
+    n_jobs : worker process count. `None` (default) uses `os.cpu_count()`,
+        memory-permitting -- see `resolve_n_jobs`'s own docstring for how
+        the automatic cap scales from a small laptop to a large-memory
+        HPC node with no code change needed. Pass an explicit value to
+        override the automatic estimate either way. `1` disables the
+        process pool and runs serially in-process -- useful for
+        debugging (real tracebacks, no pickling) or when the bin count
+        is small enough that pool startup would dominate.
 
         **On heterogeneous performance/efficiency-core hardware (e.g.
         Apple Silicon), `os.cpu_count()` is not necessarily the fastest
@@ -626,7 +700,6 @@ def fit_losvd_parallel(A_stack_list, y_w_list, cfg_list, wave_fit=None, n_jobs=N
     performance-core count, at larger bin counts (a real multi-hundred-
     bin galaxy analysis) and on homogeneous multi-core hardware.
     """
-    import os
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
 
@@ -648,7 +721,11 @@ def fit_losvd_parallel(A_stack_list, y_w_list, cfg_list, wave_fit=None, n_jobs=N
     if n_jobs == 1:
         return [_fit_losvd_worker(job) for job in jobs]
 
-    n_jobs = n_jobs if n_jobs is not None else os.cpu_count()
+    # 4x the largest single design matrix -- a rough but real budget for the whitened
+    # copy, tensordot products, and other working arrays one job needs at once (see
+    # resolve_n_jobs's own docstring for why this is memory-aware, not just cpu_count()).
+    per_job_bytes = 4 * max((a.nbytes for a in A_stack_list), default=0)
+    n_jobs = resolve_n_jobs(n_jobs, per_job_bytes)
     with ProcessPoolExecutor(max_workers=n_jobs, mp_context=get_context("spawn"),
                               initializer=_limit_worker_threads) as pool:
         return list(pool.map(_fit_losvd_worker, jobs))

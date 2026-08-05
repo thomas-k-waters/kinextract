@@ -36,6 +36,9 @@ dependencies = [
 eso = [
     "astroquery>=0.4.6",
 ]
+nuts = [
+    "numpyro>=0.13",
+]
 docs = [
     "sphinx>=7.0",
     "sphinx-rtd-theme>=2.0",

@@ -544,3 +544,40 @@ class TestFitLosvdCleanParallel:
             fit_losvd_clean_parallel(A_stack_w_list, y_w_list[:-1], cfg_list, n_jobs=1)
         with pytest.raises(ValueError, match="one entry per bin"):
             fit_losvd_clean_parallel(A_stack_w_list, y_w_list, cfg_list[:-1], n_jobs=1)
+
+
+def test_fit_losvd_clean_raises_a_clear_error_when_too_few_pixels_survive():
+    """A spectrum with fewer pixels than free LOSVD coefficients must fail
+    loudly and specifically, not silently 'succeed' on a fit driven
+    entirely by the roughness penalty with no real data behind it."""
+    A_stack_w, y_w, cfg, v_grid, sig = _mock_case(seed=0)
+    n_coef = cfg.resolved_n_interior_knots() + cfg.degree + 1
+    tiny = max(1, n_coef - 5)
+    A_stack_w_tiny = A_stack_w[:, :tiny, :]
+    y_w_tiny = y_w[:tiny]
+    with pytest.raises(RuntimeError, match="pixels survived clipping"):
+        fit_losvd_clean(A_stack_w_tiny, y_w_tiny, cfg)
+
+
+def test_fit_losvd_clean_parallel_returns_a_failed_result_instead_of_crashing_the_batch():
+    """A per-bin failure (here: too few pixels, matching the guard above)
+    must produce a NaN-filled, success=False result for that one bin, not
+    crash the entire parallel batch -- confirms fit_losvd_clean_parallel's
+    own worker-level try/except actually works end to end, not just the
+    exception it's designed to catch."""
+    good = _mock_case(seed=1)
+    A_stack_w_good, y_w_good, cfg, v_grid, sig = good
+    n_coef = cfg.resolved_n_interior_knots() + cfg.degree + 1
+    tiny = max(1, n_coef - 5)
+    A_stack_w_bad = A_stack_w_good[:, :tiny, :]
+    y_w_bad = y_w_good[:tiny]
+
+    with pytest.warns(UserWarning, match="returning a NaN-filled"):
+        results = fit_losvd_clean_parallel(
+            [A_stack_w_good, A_stack_w_bad], [y_w_good, y_w_bad], cfg, n_jobs=1)
+
+    assert results[0]["success"] is True
+    assert np.all(np.isfinite(results[0]["b"]))
+    assert results[1]["success"] is False
+    assert np.all(np.isnan(results[1]["b"]))
+    assert np.all(np.isnan(results[1]["w"]))

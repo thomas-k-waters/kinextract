@@ -131,16 +131,20 @@ class BiasCalibration:
     sigma_range: tuple[float, float]
     snr_range: tuple[float, float]
     lam: float | None = None
+    h3_bias: np.ndarray | None = None
+    h3_bias_std: np.ndarray | None = None
 
 
 def _parse_calibration_rows(path: str) -> np.ndarray:
     """Shared row-parsing step for `load_calibration_table`/
     `load_per_lam_calibration_table`: returns the raw
     `(sigma_true, snr, sig_bias_mean, sig_bias_std, h4_mean, h4_std, lam,
-    m_eff_mean)` array parsed from a calibration sweep file (see
-    `calibrate_bias.save_calibration_table` for the on-disk format).
-    `lam`/`m_eff_mean` are `nan` for the original 10-column format (no
-    `lam_grid` varied when that table was built).
+    m_eff_mean, h3_mean, h3_std)` array parsed from a calibration sweep
+    file (see `calibrate_bias.save_calibration_table` for the on-disk
+    format). `lam`/`m_eff_mean` are `nan` for the original 10-column
+    format (no `lam_grid` varied when that table was built); `h3_mean`/
+    `h3_std` are `nan` for any file written before those became two more
+    trailing columns (13-column format or earlier).
     """
     rows = []
     with open(path) as f:
@@ -162,7 +166,12 @@ def _parse_calibration_rows(path: str) -> np.ndarray:
                 lam, m_eff_mean = float(parts[10]), float(parts[11])
             else:
                 lam, m_eff_mean = np.nan, np.nan
-            rows.append((sigma_true, snr, sig_bias_mean, sig_bias_std, h4_mean, h4_std, lam, m_eff_mean))
+            if len(parts) >= 15:
+                h3_mean, h3_std = float(parts[13]), float(parts[14])
+            else:
+                h3_mean, h3_std = np.nan, np.nan
+            rows.append((sigma_true, snr, sig_bias_mean, sig_bias_std, h4_mean, h4_std, lam, m_eff_mean,
+                         h3_mean, h3_std))
     if not rows:
         raise ValueError(f"{path}: no calibration rows parsed")
     return np.array(rows)
@@ -172,8 +181,11 @@ def _build_calibration_from_rows(arr: np.ndarray, lam: float | None = None) -> B
     """Build a single 2-D `(sigma, S/N)` `BiasCalibration` from a
     `_parse_calibration_rows`-shaped array (already restricted to one
     `lam` value's rows, if this is one slice of a per-lam set)."""
-    sigma_true, snr, sig_bias_mean, sig_bias_std, h4_mean, h4_std, _lam_col, _m_eff_col = arr.T
+    (sigma_true, snr, sig_bias_mean, sig_bias_std, h4_mean, h4_std, _lam_col, _m_eff_col,
+     h3_mean, h3_std) = arr.T
     recovered_sigma = sigma_true + sig_bias_mean
+    h3_bias = h3_mean if np.isfinite(h3_mean).any() else None
+    h3_bias_std = h3_std if np.isfinite(h3_std).any() else None
     return BiasCalibration(
         recovered_sigma=recovered_sigma,
         snr=snr,
@@ -184,6 +196,8 @@ def _build_calibration_from_rows(arr: np.ndarray, lam: float | None = None) -> B
         sigma_range=(float(recovered_sigma.min()), float(recovered_sigma.max())),
         snr_range=(float(snr.min()), float(snr.max())),
         lam=lam,
+        h3_bias=h3_bias,
+        h3_bias_std=h3_bias_std,
     )
 
 

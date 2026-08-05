@@ -19,8 +19,6 @@ is preserved alongside the new project's own (indexed in
   multiplicative continuum, alternated against the LOSVD/template fit in
   the same optimization (`kinextract.continuum`,
   `kinextract.multi_template`'s 3-block alternation).
-- `kinextract.bayesian` (optional NumPyro full-posterior/NUTS path) -- no
-  equivalent yet; noted as a possible future addition, not attempted here.
 - The TOML config loader (`load_config_from_toml`) and the `kinextract`
   CLI entry point -- `FitConfig` is now a plain dataclass, instantiated
   directly.
@@ -45,13 +43,29 @@ topic index):
   tested coverage story, plus an explicitly opt-in (not yet trusted for
   unsupervised use) synthetic-calibrated correction for regularization/
   shrinkage bias.
+- A Laplace/curvature-approximation uncertainty engine
+  (`laplace_uncertainty.py`: `laplace_losvd_uncertainty`,
+  `quick_laplace_uncertainty`), the default uncertainty engine as of a
+  production-scale coverage validation across sigma 90-600 km/s --
+  matches or beats bootstrap's own coverage in every tested regime
+  (dramatically so for h4) at a real speed advantage. Bootstrap remains
+  available as a cross-check for real ensemble properties (skew,
+  multimodality) the Laplace approximation can't give. A NUTS/NumPyro
+  reference mode (`nuts_uncertainty.py`, optional `nuts` extra) exists
+  alongside both, for simulation-based-calibration spot-checks rather
+  than everyday use.
 - AR(1) correlated-noise whitening (`noise_model.py`), closing a
   previously-unaddressed real-MUSE noise-correlation gap.
 - E-MILES SSP template packing/LSF-matching as a first-class template
-  source, IFU-cube spatial binning ("dartboard" binning, PA-aware,
-  reflected `sin(theta)` sectors matching the legacy `sco_framework`
-  pipeline's own convention) and iterative template-subset reduction, for
-  full-galaxy analyses (`examples/notebooks/08_full_galaxy_analysis.ipynb`).
+  source, IFU-cube spatial binning (PA-aware reflected `sin(theta)`
+  sectors, plus a second scheme reading the legacy `sco_framework`
+  pipeline's own `bin_r.out`/`bin_v.out` dartboard geometry directly for
+  bit-identical bins where that matters) and iterative template-subset
+  reduction, for full-galaxy analyses
+  (`examples/notebooks/07_full_galaxy_analysis.ipynb`). `legacy_io.py`
+  writes that same Fortran pipeline's own `.fit`/`.ascii`/`.rms`/`.mcfit`
+  formats directly, for projects handing kinextract's output to that
+  downstream toolchain unmodified.
 - A randomized, multi-seed validation suite
   (`dev_notes/validation_suite/`) scoring recovered moments against a
   mock's own truth-curve moments (not nominal Gauss-Hermite parameters),

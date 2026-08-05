@@ -104,17 +104,24 @@ from .aic_regularization import (
     AICSelectionResult, estimate_m_eff, select_lambda_aic,
     estimate_m_eff_local, select_lambda_aic_local,
 )
-from .noise_model import build_ar1_covariance, whiten, estimate_correlation_length
+from .noise_model import build_ar1_covariance, whiten, estimate_correlation_length, measure_and_whiten
+from .laplace_uncertainty import (
+    laplace_covariance_at_lam, laplace_losvd_uncertainty, quick_laplace_uncertainty,
+    laplace_losvd_uncertainty_parallel, laplace_covariance_at_lam_with_continuum,
+    laplace_continuum_uncertainty,
+)
 from .emiles import parse_emiles_filename, pack_emiles_templates, load_emiles_templates
 from .muse_cube import MuseCube, white_light_image, extract_aperture_spectrum, load_muse_cube, save_muse_cube_fits
 from .mock_cube import build_mock_cube
 from .binning import (
     DartboardBins, log_radial_edges, linear_radial_edges, uniform_theta_edges,
     build_reflected_sin_theta_edges, assign_spaxels_to_bins,
+    load_legacy_bin_edges, assign_legacy_dartboard_bins,
 )
 from .template_reduction import (
     TemplateReductionResult, reduce_templates_iteratively, save_template_subset, load_template_subset,
 )
+from .legacy_io import write_fit_outputs
 
 __all__ = [
     "build_bspline_basis", "build_spline_truth", "difference_matrix", "default_initial_coeffs", "fit_log_spline_map",
@@ -137,13 +144,18 @@ __all__ = [
     "fwhm_to_sigma", "muse_lsf_fwhm", "variable_gaussian_convolve", "match_gaussian_lsf",
     "AICSelectionResult", "estimate_m_eff", "select_lambda_aic",
     "estimate_m_eff_local", "select_lambda_aic_local",
-    "build_ar1_covariance", "whiten", "estimate_correlation_length",
+    "build_ar1_covariance", "whiten", "estimate_correlation_length", "measure_and_whiten",
+    "laplace_covariance_at_lam", "laplace_losvd_uncertainty", "quick_laplace_uncertainty",
+    "laplace_losvd_uncertainty_parallel", "laplace_covariance_at_lam_with_continuum",
+    "laplace_continuum_uncertainty",
     "parse_emiles_filename", "pack_emiles_templates", "load_emiles_templates",
     "MuseCube", "white_light_image", "extract_aperture_spectrum", "load_muse_cube", "save_muse_cube_fits",
     "build_mock_cube",
     "DartboardBins", "log_radial_edges", "linear_radial_edges", "uniform_theta_edges",
     "build_reflected_sin_theta_edges", "assign_spaxels_to_bins",
+    "load_legacy_bin_edges", "assign_legacy_dartboard_bins",
     "TemplateReductionResult", "reduce_templates_iteratively", "save_template_subset", "load_template_subset",
+    "write_fit_outputs",
 ]
 
 __version__ = "1.0.0"

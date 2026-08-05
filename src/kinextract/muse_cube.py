@@ -69,10 +69,28 @@ def extract_aperture_spectrum(cube: MuseCube, spaxel_mask: np.ndarray) -> tuple[
     case, and `binning.assign_spaxels_to_bins`'s `bin_id_map` for the
     usual way `spaxel_mask` is built, e.g. `bin_id_map == some_bin_id`).
 
+    **A spaxel with non-finite flux/error, or non-positive error, at a
+    given wavelength is excluded from that wavelength's sum** (not
+    treated as a zero-flux, zero-error measurement -- silently summing a
+    NaN-as-zero contribution would either drop real signal without
+    adjusting for it, or worse, look like a perfectly-measured
+    non-detection). If *every* spaxel in the aperture is bad at some
+    wavelength, that output pixel is `NaN` (genuinely unmeasured, not
+    zero) -- pass the result through `mask_wavelength_windows` (its own
+    `drop_nonfinite=True` default) before fitting to remove these.
+
     Returns `(wave, flux, error)`, each shape `(n_wave,)`.
     """
-    flux = np.nansum(cube.flux[:, spaxel_mask], axis=1)
-    error = np.sqrt(np.nansum(cube.error[:, spaxel_mask] ** 2, axis=1))
+    flux_pix = cube.flux[:, spaxel_mask]
+    error_pix = cube.error[:, spaxel_mask]
+    valid = np.isfinite(flux_pix) & np.isfinite(error_pix) & (error_pix > 0)
+    n_valid = valid.sum(axis=1)
+    flux = np.where(valid, flux_pix, 0.0).sum(axis=1)
+    variance = np.where(valid, error_pix ** 2, 0.0).sum(axis=1)
+    error = np.sqrt(variance)
+    no_data = n_valid == 0
+    flux = np.where(no_data, np.nan, flux)
+    error = np.where(no_data, np.nan, error)
     return cube.wave, flux, error
 
 
@@ -103,7 +121,20 @@ def load_muse_cube(fits_path: str) -> MuseCube:
 
         if "STAT" in names:
             variance = np.asarray(hdul["STAT"].data, dtype=np.float64)
-            error = np.sqrt(np.maximum(variance, 0.0))
+            # A zero or negative variance (a real occurrence in ESO Phase 3 STAT
+            # extensions -- e.g. saturated/masked pixels) is not "perfectly measured,
+            # zero noise" -- it means this pixel has no usable variance estimate at
+            # all. Treating it as error=0.0 (np.sqrt(max(variance, 0)) alone would) is
+            # actively worse than treating it as unmeasured: a zero-error pixel gets
+            # effectively infinite statistical weight in any chi^2 fit, and dividing
+            # by it directly (A_stack/errors, the whitening convention used
+            # throughout this package) raises a divide-by-zero. NaN out both the
+            # error AND the flux at these pixels, matching a genuinely bad pixel
+            # (excluded downstream by mask_wavelength_windows's drop_nonfinite
+            # default), not a suspiciously perfect one.
+            bad = ~np.isfinite(variance) | (variance <= 0)
+            error = np.sqrt(np.where(bad, np.nan, variance))
+            flux = np.where(bad, np.nan, flux)
         else:
             error = np.full_like(flux, np.nan)
 

@@ -11,6 +11,7 @@ import pytest
 from kinextract.binning import (
     DartboardBins, log_radial_edges, linear_radial_edges, uniform_theta_edges,
     build_reflected_sin_theta_edges, assign_spaxels_to_bins,
+    load_legacy_bin_edges, assign_legacy_dartboard_bins,
 )
 
 
@@ -180,3 +181,107 @@ def test_assign_spaxels_to_bins_pa_deg_rotates_theta_but_not_r():
     south_of_center = (45, 50)  # (y, x): -5 in y, same x -> due "south" (smaller y)
     assert map_90[east_of_center] != -1
     assert map_0[south_of_center] == map_90[east_of_center]
+
+
+# -- assign_legacy_dartboard_bins / load_legacy_bin_edges -------------------------------
+
+_LEGACY_R_OUT = """  irc    rlow      rmid      rup    bin_size
+ ----   ------    ------    ------    ------
+   1       0.500       0.750       1.000       0.500
+   2       1.000       1.500       2.000       1.000
+   3       2.000       2.500       3.000       1.000
+"""
+
+_LEGACY_V_OUT = """  irv    vlow      vmid      vup    bin_size
+ ----   ------    ------    ------    ------
+   1       0.000      10.000      20.000      20.000
+   2      20.000      30.000      40.000      20.000
+   3      40.000      65.000      90.000      50.000
+"""
+
+
+def _write_legacy_edges(tmp_path):
+    r_path = tmp_path / "bin_r.out"
+    v_path = tmp_path / "bin_v.out"
+    r_path.write_text(_LEGACY_R_OUT)
+    v_path.write_text(_LEGACY_V_OUT)
+    return str(r_path), str(v_path)
+
+
+def test_load_legacy_bin_edges_reads_rlow0_and_rup_column(tmp_path):
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    np.testing.assert_allclose(r_edges, [0.5, 1.0, 2.0, 3.0])
+    np.testing.assert_allclose(v_edges_deg, [0.0, 20.0, 40.0, 90.0])
+
+
+def test_assign_legacy_dartboard_bins_on_axis_point_lands_in_irv_1(tmp_path):
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    # (dy=0, dx=+1.5) with pa_deg=0 -> x=1.5, y=0 -> on the major axis (vp=0) -> irv=1,
+    # r=1.5 is in [1,2) -> irc=2, x>=0 -> "bin" side
+    point = (50, 51)  # (y, x): 1 pixel east of center, pixel_scale=1.5 -> r=1.5 exactly
+    bin_id_map, bin_table = assign_legacy_dartboard_bins(
+        (100, 100), center=(50, 50), pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=1.5)
+    entry = next(r for r in bin_table if r["bin_id"] == bin_id_map[point])
+    assert entry["bin_name"] == "bin0201"
+    assert entry["irc"] == 2 and entry["irv"] == 1 and entry["side"] == 1
+
+
+def test_assign_legacy_dartboard_bins_bnn_side_is_negative_x(tmp_path):
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    bin_id_map, bin_table = assign_legacy_dartboard_bins(
+        (100, 100), center=(50, 50), pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=1.5)
+    west_point = (50, 49)  # 1 pixel west of center -> dx=-1.5 -> x=-1.5 -> "bnn" side
+    entry = next(r for r in bin_table if r["bin_id"] == bin_id_map[west_point])
+    assert entry["bin_name"] == "bnn0201"
+    assert entry["side"] == -1
+
+
+def test_assign_legacy_dartboard_bins_folds_north_and_south_of_major_axis(tmp_path):
+    """A point straight north and straight south of center (both on the
+    kinematic minor axis, x=0) must land in the identical bin -- the
+    abs(y) fold this module's docstring describes.
+    """
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    bin_id_map, _ = assign_legacy_dartboard_bins(
+        (100, 100), center=(50, 50), pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=1.5)
+    north_point = (51, 50)  # dy=+1.5 -> y=+1.5 (pa_deg=0: x=dx, y=dy)
+    south_point = (49, 50)  # dy=-1.5 -> y=-1.5
+    assert bin_id_map[north_point] != -1
+    assert bin_id_map[north_point] == bin_id_map[south_point]
+
+
+def test_assign_legacy_dartboard_bins_center_clips_into_innermost_ring(tmp_path):
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    bin_id_map, bin_table = assign_legacy_dartboard_bins(
+        (100, 100), center=(50, 50), pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=1.0)
+    entry = next(r for r in bin_table if r["bin_id"] == bin_id_map[50, 50])
+    assert entry["irc"] == 1
+
+
+def test_assign_legacy_dartboard_bins_outside_outer_edge_is_unassigned(tmp_path):
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    bin_id_map, _ = assign_legacy_dartboard_bins(
+        (100, 100), center=(50, 50), pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=1.0)
+    assert bin_id_map[50, 99] == -1  # 49 pixels away, r_edges tops out at 3.0
+
+
+def test_assign_legacy_dartboard_bins_perpendicular_point_lands_in_last_irv(tmp_path):
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    bin_id_map, bin_table = assign_legacy_dartboard_bins(
+        (100, 100), center=(50, 50), pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=1.5)
+    minor_axis_point = (51, 50)  # x=0, y=+1.5 -> vp≈90deg, clipped to 89.99 -> last irv bin
+    entry = next(r for r in bin_table if r["bin_id"] == bin_id_map[minor_axis_point])
+    assert entry["irv"] == 3

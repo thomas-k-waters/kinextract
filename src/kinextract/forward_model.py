@@ -143,7 +143,8 @@ def build_template_stack(wave_obs: np.ndarray, template_wave: np.ndarray,
 
 
 def mask_wavelength_windows(wave: np.ndarray, *arrays: np.ndarray,
-                             windows: list[tuple[float, float]]) -> tuple[np.ndarray, ...]:
+                             windows: list[tuple[float, float]],
+                             drop_nonfinite: bool = True) -> tuple[np.ndarray, ...]:
     """Drop pixels inside any of `windows` (a list of `(wave_min, wave_max)`
     pairs, inclusive) from `wave` and every array passed alongside it (e.g.
     flux, per-pixel error) -- for excluding known bad-pixel/sky-residual/
@@ -152,12 +153,28 @@ def mask_wavelength_windows(wave: np.ndarray, *arrays: np.ndarray,
     general: callers supply their own `windows` from whatever they've
     identified in their own data.
 
+    **`drop_nonfinite=True` (the default) also drops any pixel where
+    `wave` or any of `*arrays` is non-finite** (`NaN`/`inf`) -- real
+    cube data commonly has NaN flux/error at unobserved or flagged
+    spaxels (`load_muse_cube`/`extract_aperture_spectrum` propagate NaN
+    rather than silently returning 0 for a pixel with no valid
+    contributing data -- see their own docstrings), and every fit
+    function in this package hard-errors on non-finite input
+    (`fit_log_spline_map`'s own `ValueError`) rather than silently
+    producing garbage. This is the one place nearly every notebook/script
+    already calls right before fitting, so dropping bad pixels here means
+    real-data callers get this protection without an extra step -- pass
+    `drop_nonfinite=False` to disable and get the old window-only
+    behavior back.
+
     Parameters
     ----------
     wave : wavelength array to filter and use as the reference for `windows`.
     *arrays : any number of same-length arrays (flux, errors, ...) to filter identically.
     windows : list of `(wave_min, wave_max)` pairs; a pixel is dropped if
         it falls inside *any* window (inclusive on both ends).
+    drop_nonfinite : also drop any pixel where `wave` or any passed array
+        is `NaN`/`inf`. Default `True`.
 
     Returns
     -------
@@ -165,7 +182,12 @@ def mask_wavelength_windows(wave: np.ndarray, *arrays: np.ndarray,
     arrays as passed in, each with the masked pixels removed.
     """
     wave = np.asarray(wave, float)
+    arrays_np = [np.asarray(a) for a in arrays]
     keep = np.ones(len(wave), dtype=bool)
     for wmin, wmax in windows:
         keep &= ~((wave >= wmin) & (wave <= wmax))
-    return (wave[keep],) + tuple(np.asarray(a)[keep] for a in arrays)
+    if drop_nonfinite:
+        keep &= np.isfinite(wave)
+        for a in arrays_np:
+            keep &= np.isfinite(a)
+    return (wave[keep],) + tuple(a[keep] for a in arrays_np)

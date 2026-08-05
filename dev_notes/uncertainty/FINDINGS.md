@@ -541,3 +541,239 @@ coverage fraction rather than this n=18 pooled/aggregate estimate. Also
 not attempted: wiring Laplace in as `bootstrap_losvd`'s (or a new
 function's) actual h4 uncertainty mechanism in the shipped package --
 this remains a prototype-only script in `dev_notes/`, not production code.
+
+---
+
+## 2026-08-01: Laplace promoted to a real package module; production-scale coverage sweep confirms it, per-cell
+
+Both follow-ups flagged above are now done. `laplace_prototype.py`'s
+`laplace_covariance_at_lam`/`laplace_aic_uncertainty` were ported into
+`src/kinextract/laplace_uncertainty.py` as `laplace_covariance_at_lam`
+(dict-returning) / `laplace_losvd_uncertainty` (full AIC-weighted-over-lam
+mode) / `quick_laplace_uncertainty` (single-winning-lam cheap mode), with
+two real gaps the prototype didn't have closed:
+
+- **Curve-level uncertainty** (`b_samples`/`b_median`/`b_p16`/`b_p84`), not
+  just moment propagation via a finite-difference Jacobian -- coefficients
+  are drawn directly from the Laplace covariance, pushed through
+  `exp(basis @ coeffs)`, at each lam in the AIC-weighted grid.
+- **A real bug caught before shipping**: naive Gaussian coefficient
+  sampling at weakly-regularized lam (the low end of the grid) produces
+  draws that land in the curvature penalty's own divergent null-space
+  direction once pushed through `exp()` -- 26% of draws at lam=1 in one
+  smoke test, sigma inflated from ~88 to up to 312 km/s. Fixed with
+  rejection-resampling in `_sample_curves_and_moments`, filtering on the
+  same `max_edge_amplitude_frac` guard Stage 23 already validated for
+  point estimates. Confirmed fixed: post-fix `sherm_std` matched
+  bootstrap's own (3.20 vs 3.23 km/s) on the smoke-test case.
+
+`coverage_sweep.py` (`dev_notes/validation_suite/`) is now pluggable
+(`--method bootstrap|laplace|quick_laplace`). Ran the full 9-cell
+`(sigma, S/N)` grid -- sigma in {50, 90, 150}, S/N in {40, 60, 100} -- at
+n_truths=8 per cell (real per-cell rates, not the earlier n=18 pooled
+estimate), same seeds for both methods so this is a paired comparison, not
+independent draws:
+
+| | sigma coverage (target 68%) | h4 coverage (target 68%) |
+|---|---|---|
+| bootstrap | 60% (per-cell range 38-75%) | **4%** (per-cell range 0-12%) |
+| laplace | 72% (per-cell range 50-100%) | **39%** (per-cell range 12-75%) |
+
+Laplace beat bootstrap in **every one of the 9 cells** on both sigma and
+h4 coverage -- not an artifact of pooling. h4 is the one that mattered:
+bootstrap essentially never captures the truth (0-12%), Laplace is a real,
+substantial fix (up to ~10x better per-cell) though still short of the
+68% target, weakest at low sigma (12-25%) and best at high sigma
+(50-75%) -- plausibly because the low-sigma regime's LOSVD is more
+sharply peaked, pushing more posterior mass toward the low-lam/divergent-
+edge region the rejection-resampling has to filter out, which thins the
+effective sample size feeding that regime's covariance estimate.
+
+Raw sweep data: `dev_notes/validation_suite/results/coverage_sweep_bootstrap_v2.csv`,
+`coverage_sweep_laplace_v1.csv`.
+
+**Decision**: this clears the acceptance gate `dev_notes/V1_HARDENING_ROADMAP.md`
+Phase 1b set out. Laplace (`laplace_losvd_uncertainty`) becomes the
+uncertainty engine the revamped notebooks call by default; `bootstrap_losvd`
+remains available as an alternative/cross-check (real ensemble properties
+Laplace can't give, e.g. empirical skew/multimodality) per the locked-in
+decision, not deprecated.
+
+**Not done**: low-sigma h4 coverage is real progress, not a solved problem
+-- still below the 68% target in that regime. A NumPyro/NUTS reference
+mode (Phase 1c) would be the natural way to check whether the residual gap
+is Laplace's own Gaussian-approximation limit or something structurally
+missing (e.g. template-weight uncertainty, held fixed at MAP in both
+engines) -- not yet built.
+
+---
+
+## 2026-08-01: NUTS reference mode built; the residual low-sigma h4 gap is probably not the Laplace linearization itself
+
+Built `src/kinextract/nuts_uncertainty.py` (`nuts_losvd_uncertainty`,
+Phase 1c) -- NUTS via NumPyro, sampling `losvd._neg_log_post` directly as
+the log-density (`numpyro.factor` against an improper flat prior, the
+standard pattern for reusing an existing potential function rather than
+reformulating the model), at a single fixed `lam` (mirroring
+`quick_laplace_uncertainty`'s single-lam mode, not the full
+AIC-weighted-across-lam method -- jointly sampling `lam` itself is a
+separate, bigger lift, not attempted). `w` held fixed at MAP, same as the
+Laplace engine, same reason. New optional dependency (`pyproject.toml`'s
+`nuts` extra); not imported from `kinextract/__init__.py` so it stays
+genuinely optional.
+
+**Spot-check**: same mock, same noise draw, `quick_laplace_uncertainty`
+vs. `nuts_losvd_uncertainty` at the identical `lam`, at both a low-sigma
+cell (sigma=50, S/N=60 -- one of the coverage sweep's weakest h4-coverage
+regimes, 12-25%) and a high-sigma cell (sigma=150, S/N=60 -- one of its
+strongest, 50-75%):
+
+| regime | Laplace sherm_std | NUTS sherm_std | Laplace h4_std | NUTS h4_std |
+|---|---|---|---|---|
+| sigma=50 | 4.35 | 2.91 (0.67x) | 0.0229 | 0.0209 (0.91x) |
+| sigma=150 | 4.29 | 2.34 (0.55x) | 0.0006 | 0.0006 (1.02x) |
+
+(0 divergences in both NUTS runs.) The single-lam Laplace covariance
+somewhat *overestimates* `sherm_std` relative to the true local posterior
+(NUTS) at both sigma regimes -- not the direction that would explain
+under-coverage -- while `h4_std` tracks NUTS closely (within ~10%) at
+both. This is a targeted spot-check (2 cells, 1 seed each), not a full
+SBC campaign, but it points away from "the Laplace linearization is
+badly wrong at low sigma" as the explanation for the coverage sweep's
+residual low-sigma h4 shortfall.
+
+**More likely explanation, consistent with everything else this project
+has already found about h4** (and now h3 -- see
+`dev_notes/calibration/CALIBRATION_TRUST_STRATEGY.md`'s 2026-08-01 h3-wing
+entry): empirical *coverage* depends on both the posterior's width AND
+its center being right. If the *point estimate* itself is systematically
+shrunk toward zero by the curvature penalty at low sigma/S-N (which the
+h4wing and now h3wing calibration tables directly measure, independent of
+either uncertainty engine), then even a perfectly-width-calibrated
+posterior around that biased center will under-cover the true value some
+fraction of the time -- no posterior-width method (Laplace, NUTS, or full
+HMC) fixes a biased *center* by construction. Distinguishing "the
+remaining gap is bias, not width" definitively would need combining a
+per-cell coverage sweep with the calibration tables' own known bias at
+the same cells -- not done here, flagged as the natural next step if this
+is revisited.
+
+---
+
+## 2026-08-01: standardized-residual breakdown -- both a real bias component and a specific, fixable sampling artifact
+
+Direct follow-up on the "bias, not width" question above, using data
+already on disk (`coverage_sweep_laplace_v1.csv`, no new fits) -- for each
+cell, computed the *standardized* residual `(h4_recovered - h4_true) /
+h4_std_raw` (should average to ~0 with std ~1 for a well-calibrated
+interval) and split it by sigma:
+
+| sigma | n | mean standardized resid | std | mean raw h4 bias | mean h4_std (reported) |
+|---|---|---|---|---|---|
+| 50 | 24 | +1.45 | 4.13 | +0.0101 | 0.0115 |
+| 90 | 24 | +4.84 | 26.32 | +0.0098 | 0.0180 |
+| 150 | 24 | +0.15 | 1.45 | +0.0067 | 0.0366 |
+
+**Two distinct things, not one, are visible here:**
+
+1. **A real, genuine bias at low sigma.** At sigma=50, the mean raw h4
+   bias (+0.0101) is comparable in *magnitude* to the mean reported
+   `h4_std` itself (0.0115) -- h4 is systematically shrunk toward zero by
+   about one reported-sigma on average, which alone depresses coverage
+   for a method that (correctly) reports a *symmetric* interval around a
+   *biased* center. This directly supports the "bias, not (only) width"
+   hypothesis from the entry above -- at sigma=150, both the bias
+   (+0.0067) is smaller and the reported `h4_std` is much larger (0.0366,
+   3x the low-sigma value), so the same absolute bias matters far less
+   relative to the band.
+2. **A separate, specific sampling artifact, not a general bias/width
+   story.** sigma=90's std of the standardized residual (26.32) is wildly
+   larger than sigma=50 or 150's -- not a smoothly-varying trend, a sign
+   that one or two cells have a `h4_std_raw` far too small relative to
+   the actual error, consistent with the divergent-edge rejection filter
+   (`_sample_curves_and_moments`) occasionally exhausting its draw budget
+   at a low-weight lam and returning very few (or, per that function's
+   own warning path, zero) valid samples for that lam's contribution to
+   the pooled ensemble -- a small, unrepresentative sub-sample can land
+   anywhere, including an artificially tight cluster that understates the
+   true spread. This is a candidate root cause for at least part of the
+   remaining coverage gap, and unlike the bias story above, is
+   potentially directly fixable: e.g. excluding a lam's contribution
+   entirely (not just down-weighting it) once its filtered sample count
+   falls below some floor, rather than pooling in whatever small,
+   possibly-unrepresentative sample survived.
+
+**Not done**: a fix for either finding (rejection-sample-floor exclusion
+for #2; nothing attempted yet for #1, since fixing bias at the point-
+estimate level is a much larger question -- the regularization-bias
+correction machinery exists but is calibrated against bootstrap, not
+Laplace, and is not yet extended there). Flagged as the two concrete,
+evidence-backed next steps for closing the low/moderate-sigma h4 coverage
+gap, more specific than "coverage is still below target" alone.
+
+---
+
+## 2026-08-04: high-sigma coverage sweep -- data existed on disk, unanalyzed, until now
+
+Real data for exactly the regime that matters for this project's actual
+science target (NGC 4751, real central sigma ~350-650 km/s -- see
+`dev_notes/broad_sigma_stress_test_log.md`) was sitting on disk from an
+earlier, unattended run (`coverage_sweep.py --sigma-values 90,250,400,500,600
+--snr-values 60 --n-truths 18 --n-boot 15`) but never analyzed or written
+up -- the bootstrap half wasn't even finished (missing sigma=600 entirely,
+sigma=500 only 15/18 truths). Computed directly from
+`coverage_sweep_highsigma_{laplace,bootstrap}_v1.csv` (n=18/cell unless
+noted, real per-cell rates, not pooled):
+
+| sigma | Laplace sigma cov. | Laplace h4 cov. | Bootstrap sigma cov. | Bootstrap h4 cov. |
+|---|---|---|---|---|
+| 90 | 67% | 50% | 72% | 0% |
+| 250 | 67% | 78% | 72% | 11% |
+| 400 | 89% | 83% | 61% | 39% |
+| 500 | 72% | 72% | 73% (n=15) | 53% (n=15) |
+| 600 | 61% | 78% | not run | not run |
+
+**Headline: sigma coverage stays roughly on-target (~68%) for both
+methods across the entire high-sigma range** -- neither collapses at
+N4751's real sigma, which was a real open question (nothing in this
+project's validation history had tested past sigma=150 until this data).
+**Laplace's h4-coverage advantage over bootstrap not only holds at high
+sigma, it's the most decisive difference in the whole table**: 50-83%
+(Laplace) vs. 0-53% (bootstrap), matching or exceeding the advantage
+already documented at sigma<=150. This directly confirms
+`V1_HARDENING_ROADMAP.md`'s Phase 1d decision (Laplace as the default
+uncertainty engine) extends to the regime this project's real target
+actually lives in, not just the synthetic-mock range it was originally
+validated against.
+
+**A rare failure mode found in this data -- and, checked directly, already
+fixed in current code, not a live bug.** 2/90 Laplace rows (one each at
+sigma=400 and sigma=500) have `sherm_std_raw`/`h4_std_raw` = NaN.
+`coverage_sweep.py`'s own coverage check correctly treats a NaN interval
+as non-covering (`sigma_covered_raw_1s=False` in both cases, not
+silently miscounted as a pass), so this never distorted the reported
+coverage rates above. Before writing this up as an open gap, checked
+`laplace_uncertainty.py`'s current `_degenerate_point_fallback` directly
+-- its own docstring states it was "found directly running at real-data
+scale (2026-08-03)" for this *exact* mechanism (every posterior-
+predictive draw hitting the divergent-edge rejection filter), has a
+dedicated passing test
+(`test_zero_valid_samples_falls_back_to_point_estimate_instead_of_crashing`,
+confirmed green in this session's full-suite run), and now returns a
+degenerate zero-spread ensemble (`std` exactly `0.0`, not `NaN`) with a
+clear `UserWarning` instead. Since current code cannot produce a NaN
+here anymore, **this sweep's 2 NaN rows almost certainly predate that
+2026-08-03 fix** -- the sweep itself has no recorded run date to confirm
+against, but the mechanism, the fix, and the test all line up. Not
+independently re-verified by rerunning the exact 2 failing cases against
+current code (would need the original per-case seeds, not recorded in
+the CSV) -- flagged as the concrete way to close this out with full
+certainty if picked back up, but not treated as an open bug in the
+meantime.
+
+**Not done**: complete the missing bootstrap sigma=600 cell and the 3
+missing sigma=500 truths, for a fully symmetric comparison (lower
+priority given Laplace is already the decided default and bootstrap's
+disadvantage is already unambiguous in every cell tested); rerun the 2
+NaN cases specifically against current code for full certainty the fix
+covers them (see above).

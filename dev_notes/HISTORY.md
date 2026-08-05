@@ -102,19 +102,26 @@ kept as a record so it isn't retried.
   (`fit_losvd_clean`, `detect_emission_from_residual`, or ZAP -- see
   below) on real data: check chi2_red first, and don't expect it to
   reach 1.
-- **OPEN** — real-data ZAP (Zurich Atmosphere Purge) sky-residual
-  cleaning. Investigated: ZAP's automatic eigenvector selection (73 components on
-  the NGC 5102 cube) visibly destroys real spectral structure
-  (pixel-to-pixel roughness 4-56x worse than the raw spectrum, worse at
-  higher source brightness) -- and a `nevals` sweep down to 3 components
-  showed the corruption is **not primarily eigenvector-count-driven**.
-  Most likely cause: the same-cube "sky" training region isn't actually
-  free of the galaxy's own (faint, extended) light, so the sky
-  eigenbasis partly learns real spectral shape and subtracts it
-  everywhere. ZAP's own docs recommend a dedicated offset-sky exposure
-  for this case; not yet available for this target. Not currently wired
-  into any default pipeline -- being explored separately, outside this
-  package.
+- **MOSTLY CLOSED, real-data validated** — [zap/FINDINGS.md](zap/FINDINGS.md)
+  (2026-08-04) — real-data ZAP (Zurich Atmosphere Purge) sky-residual
+  cleaning, for both NGC 5102 (WFM) and NGC 4751 (NFM). The original
+  hypothesis here (same-cube "sky" region contaminated by real galaxy
+  light) was only half right: masking the SVD/eigenbasis via ZAP's own
+  `mask` argument is real and does close that pathway (confirmed
+  directly from `zap.py` source), but a **separate** corruption survives
+  masking anyway — a small (~0.03-0.05% of the field), spatially compact
+  cluster of spaxels comes out with implausible pixel-to-pixel flux
+  swings (15-540 sigma vs. real measured noise), not fixed by `nevals`
+  or `cfwidthSP` tuning. Fix: detect and revert those specific spaxels
+  after the fact (`repair_corrupted_spaxels`,
+  `kinextract_test_suite/notebooks/kinextract_scratch_notebooks/
+  zap_cleaning.py`) rather than fight ZAP's internals further. Validated
+  on real full-cube runs of both targets: galaxy-center S/N provably
+  preserved (byte-identical at the true corrupted-and-reverted spaxels),
+  real substantial sky-residual reduction in most (not quite all)
+  flagged windows/apertures — 2-3 window/aperture combinations per
+  target still come out mildly worse, reported honestly, not yet
+  root-caused further. Not yet wired into any real-data notebook.
 - **OPEN** — Every chi2, AIC criterion, and bootstrap variance in this project
   assumes independent per-pixel noise; MUSE spectra are
   resampled/drizzled during reduction, a known source of pixel-to-pixel

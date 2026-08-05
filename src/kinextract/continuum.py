@@ -71,13 +71,30 @@ called `penalty_order=3` untested. The sweep found the opposite: at every
 S/N tested (30/60/100), a fixed order-3 `lam` (4096-32768 range) beat
 order-2/lam=2.0 on both `sigma` bias and, especially, `h4` bias (order-2's
 h4 bias was 3-4x larger, at every S/N -- worse than not cofitting a
-continuum at all). Prefer `penalty_order=3` with a fixed `lam` in that
-range for new continuum-cofitting work; `penalty_order=2, lam=2.0` is no
-longer the recommended default, though it still works and is still the
-`FitConfig` default's own automatic fallback when adaptive selection is
-left on with continuum-cofitting active (see `multi_template.fit_losvd`'s
-own `UserWarning` for that fallback -- it does not yet know about this
-finding and still falls back to order 2).
+continuum at all). `penalty_order=3, lam=4096.0` is now `FitConfig`'s own
+automatic fallback when adaptive lam selection is left on with
+continuum-cofitting active (see `multi_template.fit_losvd`'s own
+`UserWarning` for that fallback); `penalty_order=2, lam=2.0` still works
+if set explicitly but is no longer the default.
+
+**`C`'s recovered absolute mean is not identifiable -- only its shape
+is.** Root-caused 2026-08-01 (`dev_notes/continuum/FINDINGS.md`): a true
+continuum distortion with a nonzero mean (e.g. a half-period sine, most
+realistic broadband corrections) can recover with a large, systematic
+vertical offset in `C` even though its *shape* and the recovered `sherm`/
+`w` mixture fractions stay accurate. This is not a fixable implementation
+bug -- `C`'s mean and the template weights' overall scale (`w.sum()`) are
+the *same* degree of freedom mathematically (both multiply the whole
+model uniformly across wavelength), and nothing in the current
+parametrization anchors which one should carry a given galaxy's
+broadband-flux offset from the templates' own assumed continuum level.
+Tried and confirmed ineffective: pinning `b`'s own amplitude (a *second*,
+independently-discovered escape valve for the same degeneracy) just moved
+the freedom to `w`'s already-unconstrained NNLS scale instead of closing
+it. **Compare recovered `C` to a true continuum's shape (its wavelength
+dependence, normalized however is convenient), not to its absolute
+height** -- the height carries no information this fit can actually
+recover.
 """
 from __future__ import annotations
 

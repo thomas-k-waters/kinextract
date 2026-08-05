@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 from scipy import stats
 
-from kinextract.noise_model import build_ar1_covariance, whiten, estimate_correlation_length
+from kinextract.noise_model import build_ar1_covariance, whiten, estimate_correlation_length, measure_and_whiten
 
 
 def test_ar1_covariance_at_rho_zero_is_diagonal():
@@ -153,6 +153,37 @@ def test_estimate_correlation_length_on_white_noise_is_near_zero():
     white = rng.standard_normal(2000)
     est = estimate_correlation_length(white)
     assert est < 0.1
+
+
+def test_measure_and_whiten_matches_manual_estimate_then_whiten():
+    n_pix = 2000
+    errors = np.full(n_pix, 1.0)
+    true_rho = 0.35
+    Sigma = build_ar1_covariance(errors, true_rho)
+    L_true = np.linalg.cholesky(Sigma)
+    rng = np.random.default_rng(5)
+    noise = L_true @ rng.standard_normal(n_pix)
+
+    A_stack = np.zeros((1, n_pix, 1))
+    y = noise
+    A_w, y_w, L, rho = measure_and_whiten(A_stack, y, errors, residuals=noise)
+
+    expected_rho = estimate_correlation_length(noise)
+    A_w_expected, y_w_expected, L_expected = whiten(A_stack, y, errors, rho=expected_rho)
+    assert rho == expected_rho
+    np.testing.assert_array_equal(A_w, A_w_expected)
+    np.testing.assert_array_equal(y_w, y_w_expected)
+    np.testing.assert_array_equal(L, L_expected)
+
+
+def test_measure_and_whiten_on_white_noise_measures_a_small_rho():
+    rng = np.random.default_rng(11)
+    n_pix = 2000
+    white = rng.standard_normal(n_pix)
+    errors = np.ones(n_pix)
+    A_stack = np.zeros((1, n_pix, 1))
+    A_w, y_w, L, rho = measure_and_whiten(A_stack, white, errors, residuals=white)
+    assert rho < 0.1
 
 
 def test_fitconfig_rho_defaults_to_zero_and_round_trips():

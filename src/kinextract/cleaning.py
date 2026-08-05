@@ -338,7 +338,7 @@ def fit_losvd_clean(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         "3 sigma" cut can end up well under 1 *true* sigma, clipping
         nearly the whole spectrum on the first pass and refitting on an
         unconstrained handful of survivors -- confirmed directly on real
-        MUSE data (`examples/notebooks/08_full_galaxy_analysis.ipynb`
+        MUSE data (`examples/notebooks/07_full_galaxy_analysis.ipynb`
         Section 4/8: clipped >90% of pixels and collapsed to a biased,
         unconstrained baseline at the default `clip_sigma=3.0`).
         `robust_scale=True` matches pPXF's own documented practice of
@@ -374,10 +374,26 @@ def fit_losvd_clean(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
             )
         for lo, hi in excluded_wavelength_windows:
             protected |= (wave_fit >= lo) & (wave_fit <= hi)
+    n_coef_min = cfg.resolved_n_interior_knots() + cfg.degree + 1  # LOSVD spline coefficient count
     result = None
     n_iter_run = 0
     for it in range(max_iter):
         n_iter_run = it + 1
+        if keep.sum() < n_coef_min:
+            # Clipping has removed more pixels than there are free LOSVD coefficients --
+            # the fit below would be silently underdetermined (or, worse, "succeed" on a
+            # meaningless result driven entirely by the roughness penalty, with no visible
+            # red flag) rather than raise. Fail loudly and specifically instead: the
+            # concrete real case this guards against (found 2026-08-03) is a spectrum
+            # where sky-subtraction residuals wash out the real signal badly enough that
+            # iterative clipping keeps removing pixels every iteration without converging.
+            raise RuntimeError(
+                f"fit_losvd_clean: only {keep.sum()} pixels survived clipping (fewer than "
+                f"the {n_coef_min} free LOSVD coefficients) after {it} iteration(s) -- this "
+                "spectrum's real signal is too contaminated/weak for this fit window and "
+                "clip_sigma to recover, not a fit worth trusting. Inspect the input data "
+                "(a common cause: sky-subtraction residuals dominating a low-S/N bin)."
+            )
         wave_fit_kept = wave_fit[keep] if wave_fit is not None else None
         result = fit_losvd(A_stack_w[:, keep, :], y_w[keep], cfg, wave_fit=wave_fit_kept)
         A_eff = np.tensordot(result["w"], A_stack_w[:, keep, :], axes=([0], [0]))
@@ -410,17 +426,50 @@ def fit_losvd_clean(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
     return result
 
 
+def _failed_fit_result(A_stack_w: np.ndarray, message: str) -> dict:
+    """A NaN-filled, `success=False` result dict shaped like
+    `fit_losvd_clean`'s own return value -- for a per-bin failure that
+    should flag that one bin as unusable (moment maps render it grey,
+    e.g. via `plot_bin_map` simply omitting it from `values_by_bin_id`)
+    rather than crashing an entire multi-bin batch. A real spectrum can
+    fail for reasons that have nothing to do with a coding bug --
+    sky-subtraction residuals washing out the real signal at low S/N is
+    the concrete case that motivated this (found 2026-08-03 on real
+    data) -- so this is a genuine, expected outcome to handle gracefully,
+    not a "should never happen" fallback.
+    """
+    n_templates, _n_pix, n_bins = A_stack_w.shape
+    return dict(
+        b=np.full(n_bins, np.nan), w=np.full(n_templates, np.nan), coeffs=None,
+        success=False, message=message, n_iter=0, n_iterations=0,
+        clipped_mask=np.zeros(A_stack_w.shape[1], dtype=bool), n_clipped=0,
+    )
+
+
 def _fit_losvd_clean_worker(args):
     """Top-level (picklable) per-bin worker for `fit_losvd_clean_parallel` --
     process pools need a module-level function, not a closure, since
     workers unpickle it by import path (same reason as `multi_template.
-    _fit_losvd_worker`)."""
+    _fit_losvd_worker`). Catches any exception from this bin's own fit
+    and returns `_failed_fit_result` instead of propagating it -- see
+    that function's own docstring for why a single bad bin must not
+    crash an entire parallel batch."""
     (A_stack_w, y_w, cfg, clip_sigma, max_iter, max_clip_fraction, wave_fit, robust_scale,
      excluded_wavelength_windows) = args
-    return fit_losvd_clean(A_stack_w, y_w, cfg, clip_sigma=clip_sigma, max_iter=max_iter,
-                            max_clip_fraction=max_clip_fraction, wave_fit=wave_fit,
-                            robust_scale=robust_scale,
-                            excluded_wavelength_windows=excluded_wavelength_windows)
+    try:
+        return fit_losvd_clean(A_stack_w, y_w, cfg, clip_sigma=clip_sigma, max_iter=max_iter,
+                                max_clip_fraction=max_clip_fraction, wave_fit=wave_fit,
+                                robust_scale=robust_scale,
+                                excluded_wavelength_windows=excluded_wavelength_windows)
+    except Exception as e:
+        warnings.warn(
+            f"fit_losvd_clean_parallel: a bin's fit raised {type(e).__name__}: {e} -- "
+            "returning a NaN-filled, success=False result for this bin instead of "
+            "crashing the whole batch. Inspect this bin's own input data (a common real "
+            "cause: sky-subtraction residuals washing out the real signal at low S/N).",
+            UserWarning, stacklevel=2,
+        )
+        return _failed_fit_result(A_stack_w, f"{type(e).__name__}: {e}")
 
 
 def fit_losvd_clean_parallel(A_stack_w_list, y_w_list, cfg_list, clip_sigma: float = 3.0,
@@ -450,8 +499,10 @@ def fit_losvd_clean_parallel(A_stack_w_list, y_w_list, cfg_list, clip_sigma: flo
     wave_fit : forwarded per bin, only needed if `cfg.continuum_knots` is
         set or `excluded_wavelength_windows` is given -- a single array
         (shared) or a sequence of one per bin.
-    n_jobs : worker process count. `None` (default) uses `os.cpu_count()`;
-        `1` disables the process pool and runs serially in-process.
+    n_jobs : worker process count. `None` (default) uses `os.cpu_count()`,
+        memory-permitting -- see `multi_template.resolve_n_jobs`'s own
+        docstring. `1` disables the process pool and runs serially
+        in-process.
     excluded_wavelength_windows : forwarded to every bin's own
         `fit_losvd_clean` call unchanged (a shared choice, not per-bin) --
         see its own docstring.
@@ -461,11 +512,10 @@ def fit_losvd_clean_parallel(A_stack_w_list, y_w_list, cfg_list, clip_sigma: flo
     list of `fit_losvd_clean`'s own result dicts, one per bin, in the same
     order as the inputs.
     """
-    import os
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
 
-    from .multi_template import _limit_worker_threads
+    from .multi_template import _limit_worker_threads, resolve_n_jobs
 
     n_bins = len(A_stack_w_list)
     if len(y_w_list) != n_bins:
@@ -486,7 +536,8 @@ def fit_losvd_clean_parallel(A_stack_w_list, y_w_list, cfg_list, clip_sigma: flo
     if n_jobs == 1:
         return [_fit_losvd_clean_worker(job) for job in jobs]
 
-    n_jobs = n_jobs if n_jobs is not None else os.cpu_count()
+    per_job_bytes = 4 * max((a.nbytes for a in A_stack_w_list), default=0)
+    n_jobs = resolve_n_jobs(n_jobs, per_job_bytes)
     with ProcessPoolExecutor(max_workers=n_jobs, mp_context=get_context("spawn"),
                               initializer=_limit_worker_threads) as pool:
         return list(pool.map(_fit_losvd_clean_worker, jobs))

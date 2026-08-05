@@ -87,7 +87,7 @@ per its own docstring) -- the work is compute, not new design.
 
 Real users pick their own templates; the shipped calibration is trained on
 one fixed Dirichlet-mixture recipe over one 40-template E-MILES subset.
-This project's own `06_template_mismatch_diagnostic.ipynb` already computes
+This project's own `02_realistic_mock_fit.ipynb` already computes
 a real, meaningful diagnostic for a *different* purpose -- the per-step NNLS
 design matrix's own **condition number** -- that plausibly matters here too:
 this session found (`02_realistic_mock_fit.ipynb`) that a genuinely
@@ -225,6 +225,41 @@ enough seeds/lam values to be trustworthy -- likely comparable cost to the
 existing h4wing/meff table builds, hours not minutes) and the joint
 `(V, h3)` correction logic in `bias_correction.py` itself (currently only
 shifts `sigma`/`h4`, per `correct_moments`'s own docstring). This entry
+
+## 2026-08-01: h3-wing table built (`dev_notes/calibration/build_h3_table_incremental.py`) -- real shrinkage found, but not yet in a queryable format
+
+Ran the actual sweep the entry above deferred: `H3_SIGMA_GRID=[30,50,80,140]`
+x `H3_SNR_GRID=[25,40,60,100,150]`, `h3_true=0.15` (matching `H4_TRUE_WING`'s
+magnitude), `n_reps=30` -- mirroring `H4WING`'s own grid choice exactly (a
+subset of the main grid, not the full 8x8). Much faster than the h4wing/meff
+builds' "hours" (only 20 cells vs. meff's 384): ~6 minutes total, all 4
+sigma-checkpoints written cleanly, no interruption.
+
+**Real finding, straight from the raw checkpoint data**
+(`dev_notes/calibration/h3_checkpoints/sigma_*.csv`): h3 shrinks toward
+zero under regularization the same way h4 does, and the effect is severe
+at low sigma/S-N -- at sigma=30, recovered h3 is 91-109% *shrunk* from the
+true 0.15 (S/N 25's mean h3 even flips sign, -0.013) across every S/N
+tested; even at sigma=140 (the largest tested), shrinkage is still 8-45%,
+worse at low S/N as expected. Same qualitative shape as this project's
+existing, well-documented h4 shrinkage story -- not a new phenomenon, but
+the first time it's been directly measured for the odd moment.
+
+**Known gap, inherited from the 2026-07-31/08-01 entry above, not fixed
+here**: `save_calibration_table`/`load_calibration_table` still don't
+carry `h3_mean`/`h3_std` columns, so `regularization_bias_emiles_h3wing.txt`
+(the "production"-format file this build wrote) only has the *V/sigma/h4*
+bias columns under the h3-nonzero truth -- it loads fine via
+`load_calibration_table` (confirmed directly), but the h3 shrinkage
+numbers above only exist in the raw checkpoint CSVs, not the shipped
+table format. Extending the fixed-column format
+(`_parse_calibration_rows`'s hardcoded column indices in
+`bias_correction.py`) to carry an optional trailing `h3_mean`/`h3_std`
+pair, the same way `lam`/`m_eff_mean`/`m_eff_std` were added as optional
+trailing columns previously, is real, separate work -- not attempted this
+session given the time budget, and it still doesn't unblock an actual
+`(V, h3)` correction in `correct_moments` (also still unimplemented, per
+the entry above).
 exists so a future session doesn't have to re-derive that the joint V-h3
 coupling is real, exact-to-clipping, and already handled correctly by
 `_true_moments` -- only the production sweep and the correction-application

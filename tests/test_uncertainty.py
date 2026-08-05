@@ -453,6 +453,24 @@ def test_bootstrap_losvd_b_boot_is_unit_area_normalized():
     assert boot["b_p16"].max() < 2.0 * b_fit_n.max()
 
 
+def test_bootstrap_losvd_b_median_is_the_raw_bootstrap_median_regardless_of_bias_correction():
+    """`b_median` (uncorrected) is what every notebook should plot as the
+    reported LOSVD -- the bootstrap band is centered on it, not on the
+    point estimate. It must equal `np.median(b_boot, axis=0)` and must NOT
+    change when `apply_bias_correction=True` (that's what `b_median_corrected`
+    is for) -- a fixed, uncorrected reference point regardless of that flag.
+    """
+    A_stack_w, y_w, cfg, _ = _mock_multi_template_case(seed=6, vel=0.0, sig=140.0)
+    boot_raw = bootstrap_losvd(A_stack_w, y_w, cfg, n_boot=10, seed=7, reselect_lam=False)
+    boot_corrected = bootstrap_losvd(A_stack_w, y_w, cfg, n_boot=10, seed=7, reselect_lam=False,
+                                      apply_bias_correction=True)
+
+    np.testing.assert_allclose(boot_raw["b_median"], np.median(boot_raw["b_boot"], axis=0))
+    np.testing.assert_allclose(boot_raw["b_median"], boot_corrected["b_median"])
+    # apply_bias_correction=False: b_median_corrected is just an alias for b_median.
+    np.testing.assert_allclose(boot_raw["b_median"], boot_raw["b_median_corrected"])
+
+
 def test_bootstrap_losvd_multi_template_result0_matches_a_plain_fit():
     """result0 should be identical to a plain fit_losvd call on the same
     data -- same discipline as

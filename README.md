@@ -15,18 +15,18 @@ fixed at an arbitrarily fine grid.
 ## Status
 
 Beta-quality, actively developed research code. The core fitting,
-uncertainty, multi-template, cleaning, and continuum machinery is
-implemented and validated on synthetic data, and has also been run
-end-to-end on real VLT/MUSE and HST/STIS spectra (see
-`examples/notebooks/05_real_data_muse.ipynb`,
-`06_real_data_stis.ipynb`, and `08_full_galaxy_analysis.ipynb` for a
+uncertainty (Laplace and bootstrap), multi-template, cleaning, and
+continuum machinery is implemented and validated on synthetic data, and
+has also been run end-to-end on real VLT/MUSE and HST/STIS spectra (see
+`examples/notebooks/05_noise_correlation.ipynb`,
+`06_other_instruments.ipynb`, and `07_full_galaxy_analysis.ipynb` for a
 full-galaxy analysis). **Real-data-specific finding worth knowing before
 trusting a real fit**: real chi2_red on real IFU data commonly runs well
 above 1 (systematics-dominated residuals -- template mismatch, unmodeled
 continuum shape, correlated per-pixel noise -- not just photon noise),
 which affects how much regularization gets selected and how well a
 sigma-clipping/outlier-rejection scheme behaves; see
-`07_noise_correlation.ipynb` and `08_full_galaxy_analysis.ipynb`'s own
+`05_noise_correlation.ipynb` and `07_full_galaxy_analysis.ipynb`'s own
 Limitations section for the current, honest picture. Treat every
 synthetic validation result in this package as solid, and every real-data
 number as requiring the same care those notebooks show.
@@ -36,50 +36,52 @@ number as requiring the same care those notebooks show.
 `examples/notebooks/` walks from simple synthetic data to real data, in
 order:
 
-- **`01_basic_mock_fit.ipynb`** -- the core LOSVD + template-mixture
-  recovery machinery on a synthetic mock built from real E-MILES
-  templates *you choose* (edit `TEMPLATE_RECIPE`: any number of
-  templates, any ages/metallicities/weights -- no separate single-
-  template-vs-mixture code path), no external files needed.
-- **`02_realistic_mock_fit.ipynb`** -- composes the newer, more-realistic
-  pieces on top of that same engine and the same configurable-recipe
-  mechanism: correlated (AR(1)) pixel noise, continuum-cofitting, and
-  adaptive regularization. Includes a real diagnostic section that
-  isolates a visibly-biased LOSVD recovery down to its actual cause (a
-  known, sigma-dependent regularization bias -- confirmed *not* a
-  continuum-fitting defect by switching continuum/correlated-noise off
-  one at a time and checking directly), not just an assertion. Also
-  honest about two gaps found while building it: continuum-cofitting and
-  adaptive regularization aren't wired together yet, and the bias-
-  correction calibration table has no `rho` axis and no populated
-  `m_eff` axis in its default form.
-- **`03_emiles_templates.ipynb`** -- the full `kinextract.emiles` API
-  (packing, loading, LSF matching at pack time) for the shipped 636-
-  template E-MILES grid.
+- **`01_basic_mock_fit.ipynb`** -- foundations: the spectral model
+  equation, the LOSVD's B-spline/`exp`-link parameterization, and the
+  core LOSVD + template-mixture recovery machinery on a synthetic mock
+  built from real E-MILES templates *you choose* (edit `TEMPLATE_RECIPE`:
+  any number of templates, any ages/metallicities/weights -- no separate
+  single-template-vs-mixture code path), no external files needed. Stops
+  at the point estimate.
+- **`02_realistic_mock_fit.ipynb`** -- picks up where 01 left off: a
+  genuinely degenerate 4-template mixture, `penalty_order`/`lam_wing`
+  regularization trade-offs, a Cramer-Rao-bound noise-floor analysis for
+  `h4`, this package's two uncertainty engines (Laplace, the default, and
+  bootstrap as a cross-check), and continuum-cofitting -- including why
+  a recovered continuum's *shape* is trustworthy but its absolute *level*
+  is not identifiable (a real, root-caused property of the model, not a
+  bug).
+- **`03_template_mismatch.ipynb`** -- fits the *same* mock spectrum with
+  a template library that actually contains the true stellar population,
+  and with one that systematically doesn't, and compares the recovered
+  LOSVD directly -- motivates `04_template_calibration.ipynb`.
 - **`04_template_calibration.ipynb`** -- run this first for any real MUSE
   target. Gets a MUSE datacube (a real ESO archive download, a synthetic
   Sersic-profile mock with known ground truth, or shipped pre-computed
-  products), bins it with a "dartboard" scheme (log/linear-radial x
-  equal-angle sectors, fully tunable bin edges), fits every bin against
-  the full 636-template E-MILES grid, and iteratively reduces to a
-  representative template subset (converges when the *union* of
-  surviving templates across bins stabilizes) -- saved for reuse in
-  `05_real_data_muse.ipynb`.
-- **`05_real_data_muse.ipynb`** -- fitting real VLT/MUSE NGC 5102 spectra
-  end-to-end, from raw file to bias-corrected LOSVD, using the template
-  subset `04_template_calibration.ipynb` produced.
-- **`06_real_data_stis.ipynb`** -- the same walkthrough on a real HST/STIS
-  NGC 5102 spectrum instead, using real STIS-observed stellar templates
-  (no LSF-matching step needed -- templates and data share the same
-  instrument) -- demonstrates this package's real-data workflow is not
-  MUSE-specific.
-- **`07_noise_correlation.ipynb`** -- measures real MUSE pixel-noise
-  correlation (AR(1) lag-1 correlation length), demonstrates the Bacon et
-  al. (2017) MUSE variance-underestimate factor, and shows correlated-
-  noise whitening (`FitConfig.rho`) applied to a real fit.
-- **`08_full_galaxy_analysis.ipynb`** -- the capstone: a full real-galaxy
+  products), bins it with the same PA-aware radial x angular scheme
+  `07_full_galaxy_analysis.ipynb` uses for its real kinematic maps, fits
+  every bin against the full 636-template E-MILES grid, and iteratively
+  reduces to a representative template subset (converges when the
+  *union* of surviving templates across bins stabilizes) -- saved for
+  reuse in `07_full_galaxy_analysis.ipynb`.
+- **`05_noise_correlation.ipynb`** -- measures real MUSE pixel-noise
+  correlation (AR(1) lag-1 correlation length) on a real spectrum,
+  connects it to the Bacon et al. (2017) MUSE variance-underestimate
+  factor, shows correlated-noise whitening (`FitConfig.rho`,
+  `measure_and_whiten`) applied to a real fit and its uncertainty band,
+  and confirms the whole mechanism on a synthetic mock with known,
+  injected correlated noise.
+- **`06_other_instruments.ipynb`** -- adapting this package to a
+  different instrument (HST/STIS): follows the same 01 -> 02 -> real-fit
+  progression, adapted to STIS -- a basic mock and a continuum-cofitting
+  mock built entirely from real STIS-observed stellar templates (no
+  LSF-matching step needed -- templates and data share the same
+  instrument), then a real HST/STIS NGC 5102 spectrum fit end-to-end --
+  demonstrates this package's workflow is not MUSE-specific and shows how
+  to adapt it to your own instrument.
+- **`07_full_galaxy_analysis.ipynb`** -- the capstone: a full real-galaxy
   analysis start to finish -- PA-aware dartboard binning, per-bin
-  masking/cleaning/fitting/bootstrap uncertainty in parallel, moment maps,
+  masking/cleaning/fitting/Laplace uncertainty in parallel, moment maps,
   and radial kinematic profiles along the major axis.
 
 ## Features
@@ -95,22 +97,46 @@ order:
   a configurable template recipe (any number of templates, one mechanism),
   including a template-conditioning diagnostic. Includes an opt-in wing ramp on the
   roughness penalty (`FitConfig.lam_wing`) -- see Known limitations.
-- **Uncertainty quantification** (`kinextract.uncertainty`):
-  parametric bootstrap over the recovered LOSVD (`bootstrap_losvd`, any
-  `n_templates >= 1`, including mixture-weight uncertainty), giving
-  per-bin uncertainty bands plus std on V/sigma/h3/h4, plus an opt-in
-  `calibrate_noise_scale`/`noise_scale` mechanism for when the assumed
-  per-pixel noise itself is suspected wrong (validated on synthetic
-  uniform noise mis-specification; **not yet safe on real data**, see
-  Known limitations). See `uncertainty.py`'s module docstring for the
-  full, nuanced coverage picture across the sigma range.
+- **Uncertainty quantification** (`kinextract.laplace_uncertainty`,
+  `kinextract.uncertainty`): two engines. `laplace_losvd_uncertainty`
+  (and its per-bin-parallel counterpart, `laplace_losvd_uncertainty_
+  parallel`) is the default -- a Laplace (curvature) approximation to the
+  posterior at each candidate regularization strength, combined via
+  AIC-weighted posterior-predictive sampling; measured directly to give
+  substantially better h4 coverage than bootstrap (39% vs. 4% against a
+  68% target, production-scale coverage sweep) at a fraction of the
+  runtime, though still below the target especially at low sigma -- see
+  `dev_notes/uncertainty/FINDINGS.md`, which also breaks the residual
+  gap down into a genuine point-estimate-bias component and a specific,
+  identified sampling artifact. `bootstrap_losvd`/`bootstrap_losvd_
+  parallel` (parametric bootstrap, any `n_templates >= 1`, including
+  mixture-weight uncertainty) remain available as a cross-check -- real
+  ensemble properties (empirical skew/multimodality, basin-selection
+  risk) Laplace structurally cannot give. An optional NUTS (NumPyro)
+  reference mode (`kinextract.nuts_uncertainty`, the `nuts` extra) is
+  available for spot-checking the Laplace approximation itself.
+  `bootstrap_losvd` also supports an opt-in `calibrate_noise_scale`/
+  `noise_scale` mechanism (not yet available on the Laplace engine) for
+  when the assumed per-pixel noise itself is suspected wrong (validated
+  on synthetic uniform noise mis-specification; **not yet safe on real
+  data**, see Known limitations). See `laplace_uncertainty.py`'s and
+  `uncertainty.py`'s own module docstrings for the full, nuanced coverage
+  picture.
 - **Continuum co-fitting** (`kinextract.continuum`): a shared,
   structurally-positive multiplicative continuum
   (`C(lambda) = exp(spline(lambda))`), jointly recovered with the LOSVD
   and template weights via 3-block alternating minimization. Cleanly
   validated on synthetic data, including the key "does the continuum
   contaminate the weight recovery" adversarial check -- see
-  `continuum.py`'s own docstring. **Tried on real data and found not to
+  `continuum.py`'s own docstring, and `02_realistic_mock_fit.ipynb`/
+  `06_other_instruments.ipynb` for worked demonstrations. The recovered
+  continuum's *shape* is reliable; its absolute *mean* is not
+  identifiable from the model alone (a real, root-caused mathematical
+  property -- `C`'s mean and the template weights' overall scale are the
+  same degree of freedom -- not a bug to fix, see `dev_notes/continuum/
+  FINDINGS.md`'s 2026-08-01 entry). `penalty_order=3` with a fixed `lam`
+  in the 4096-32768 range is the validated default whenever
+  `continuum_knots` is set. **Tried on real data and found not to
   help** (see Status above) -- kept because the mechanism itself is
   solid, not because it's currently recommended for this dataset.
 - **Outlier rejection** (`kinextract.forward_model.
@@ -123,7 +149,7 @@ order:
   on real data, where the input noise vector commonly underestimates the
   true residual scatter (see the chi2_red note above); confirmed to
   behave far better than the raw-threshold version on real MUSE bins that
-  otherwise clip runaway. See `08_full_galaxy_analysis.ipynb` for this
+  otherwise clip runaway. See `07_full_galaxy_analysis.ipynb` for this
   used as the default per-bin cleaning step, and its own Limitations
   section for what it still doesn't handle (continuum-*shape* mismatch,
   in particular).
@@ -132,6 +158,12 @@ order:
   that beats a full Gauss-Hermite refit on this package's own validation
   grid; the joint Gauss-Hermite fit is kept as a general-purpose
   alternative and for comparison against the wider dynamics literature.
+- **Noise-correlation whitening** (`kinextract.noise_model`): AR(1)
+  pixel-covariance whitening (`whiten`, `FitConfig.rho`), a lag-1 ACF
+  correlation-length estimator (`estimate_correlation_length`), and a
+  measure-and-whiten convenience function (`measure_and_whiten`) that
+  does both in one call -- see `05_noise_correlation.ipynb` for the real
+  measurement + consequence walkthrough this exists to support.
 
 Not yet implemented: the template-continuum-trust hierarchy (library-
 keyed presets for how much of a raw template's own continuum to trust --
@@ -149,9 +181,9 @@ and orchestration layer.
   the earlier penalty suffered at low S/N. Real, structural cost in
   exchange: genuine non-Gaussian LOSVDs (nonzero h3/h4) at moderate
   sigma/S-N get their h3/h4 shrunk toward zero (`penalty_order=2` keeps a
-  modest edge there instead -- see `02_realistic_mock_fit.ipynb` Section
-  5). Neither is strictly better; which one you want depends on whether
-  you're measuring moments or full-curve shape.
+  modest edge there instead -- see `02_realistic_mock_fit.ipynb`'s own
+  regularization section). Neither is strictly better; which one you want
+  depends on whether you're measuring moments or full-curve shape.
 - **JAX runs in float64 by default** (opt out with `KINEXTRACT_NO_X64=1`).
   This is a correctness requirement, not a preference: under float32,
   L-BFGS-B can stall far from the optimum in the stiff heavy-penalty
@@ -164,7 +196,7 @@ and orchestration layer.
   threshold in any residual-based scheme (adaptive regularization
   selection, iterative cleaning) is measured against the wrong scale
   unless corrected for -- see the cleaning note below and
-  `07_noise_correlation.ipynb`/`08_full_galaxy_analysis.ipynb` for the
+  `05_noise_correlation.ipynb`/`07_full_galaxy_analysis.ipynb` for the
   current, honest picture on real data.
 - **Adaptive regularization selection (`lam_selection="aic_local"`, the
   default) can select heavy regularization even in the package's own
@@ -185,15 +217,17 @@ and orchestration layer.
   clip threshold against a MAD-based robust estimate of the *current*
   residual's own scale (recomputed each iteration) -- confirmed
   substantially better-behaved on real bins that broke the default, and
-  used as the default cleaning step in `08_full_galaxy_analysis.ipynb`.
+  used as the default cleaning step in `07_full_galaxy_analysis.ipynb`.
   It still needs real per-target tuning (too aggressive a threshold risks
   clipping into genuine absorption features), and has no mechanism for a
   continuum-*shape* mismatch (as opposed to a localized outlier) -- see
-  `cleaning.py`'s own docstring and `08_full_galaxy_analysis.ipynb`'s
+  `cleaning.py`'s own docstring and `07_full_galaxy_analysis.ipynb`'s
   Limitations section.
 - **The regularization-bias correction (`bias_correction.py`,
-  `apply_bias_correction`) is not yet trustworthy enough to default on.**
-  A 4-gate acceptance test (per-cell bias, held-out coverage, worst-cell
+  `apply_bias_correction`) is not yet trustworthy enough to default on,
+  and is not yet available for the Laplace uncertainty engine at all**
+  (calibrated only against `bootstrap_losvd`'s own point estimate). A
+  4-gate acceptance test (per-cell bias, held-out coverage, worst-cell
   regression, regression tests) finds sigma coverage passes but h4
   coverage does not -- h4's point estimate is severely shrunk under
   regularization and the reported uncertainty never widens to reflect
@@ -203,21 +237,30 @@ and orchestration layer.
 - **h3 recovery is severely suppressed at low-to-moderate sigma.** For
   genuinely nonzero true h3, recovered h3 stays close to 0 (essentially
   fully suppressed, not just biased) across a wide low-sigma range, only
-  starting to recover at higher sigma. No fix attempted yet.
+  starting to recover at higher sigma -- a calibration table
+  characterizing this (`regularization_bias_emiles_h3wing.txt`) exists,
+  but the shipped bias-correction machinery does not yet consume it (its
+  file format doesn't carry `h3_mean`/`h3_std` columns yet -- see
+  `dev_notes/calibration/CALIBRATION_TRUST_STRATEGY.md`'s 2026-08-01
+  entry). No correction attempted yet.
 - **Multi-template weight recovery is sensitive to template-library
   conditioning** -- a near-collinear template library (differing mainly
   in overall depth scale, not shape) gives genuinely unstable weight
   recovery across noise realizations, diagnosable via the condition
   number of the per-step NNLS design matrix. See
   `examples/notebooks/01_basic_mock_fit.ipynb` and
-  `02_realistic_mock_fit.ipynb`. Degrades gracefully (sparser/noisier
-  weight recovery, never a crash or NaN); mitigated but not eliminated by
+  `02_realistic_mock_fit.ipynb` (a real, physically-motivated near-
+  collinear example), and `03_template_mismatch.ipynb` for the related
+  question of what happens when the library is wrong, not just
+  degenerate. Degrades gracefully (sparser/noisier weight recovery, never
+  a crash or NaN); mitigated but not eliminated by
   template-conditioning (`04_template_calibration.ipynb`'s iterative
   reduction).
 - **No continuum model by default.** The core fit expects
   continuum-normalized input; continuum-cofitting (`kinextract.continuum`)
   is available but opt-in, and adaptive lambda selection does not yet
-  support it (falls back to a fixed lambda with a warning).
+  support it (falls back to the validated `penalty_order=3`/fixed-`lam`
+  default with a warning).
 - **Double-peaked/multi-component LOSVDs are not specifically handled.**
   The non-parametric spline recovery can represent them (unlike a fixed
   Gauss-Hermite parametrization), but no notebook in this sequence
@@ -229,6 +272,9 @@ and orchestration layer.
 pip install -e ".[dev]"
 ```
 
+Optional extras: `.[eso]` (ESO archive downloads), `.[nuts]` (the NUTS/
+NumPyro reference uncertainty mode), `.[docs]` (building the docs).
+
 ## Testing
 
 ```
@@ -236,18 +282,19 @@ pytest tests/
 ```
 
 200+ tests covering LOSVD recovery, moment estimation, multi-template
-fitting, bootstrap uncertainty (single- and multi-template, serial and
-parallel), noise-scale calibration and AR(1) correlated-noise whitening,
-wavelength masking, iterative cleaning (serial and parallel, including
-the robust-scale option), continuum co-fitting, spatial binning and
-template reduction, regularization-bias calibration, and feature-
-composition/input-validation regressions. These are unit/sanity tests
-(correct shapes, right order of magnitude, no crashes, and several real
-before/after demonstrations against known synthetic ground truth) -- the
-full, wide-grid statistical validation (bias and coverage across the
-entire physically-relevant sigma/S-N/resolution range) is in
-`dev_notes/VALIDATION_CAMPAIGN.md` and `dev_notes/validation_suite/`,
-referenced throughout the source docstrings above.
+fitting, Laplace and bootstrap uncertainty (single- and multi-template,
+serial and parallel), NUTS reference-mode sampling, noise-scale
+calibration and AR(1) correlated-noise whitening, wavelength masking,
+iterative cleaning (serial and parallel, including the robust-scale
+option), continuum co-fitting, spatial binning and template reduction,
+regularization-bias calibration, and feature-composition/input-validation
+regressions. These are unit/sanity tests (correct shapes, right order of
+magnitude, no crashes, and several real before/after demonstrations
+against known synthetic ground truth) -- the full, wide-grid statistical
+validation (bias and coverage across the entire physically-relevant
+sigma/S-N/resolution range) is in `dev_notes/VALIDATION_CAMPAIGN.md` and
+`dev_notes/validation_suite/`, referenced throughout the source
+docstrings above.
 
 `A_w`/`y_w` (and `A_stack_w`) must not contain NaN or inf -- mask bad
 pixels out of the arrays before calling any fit function; a clear

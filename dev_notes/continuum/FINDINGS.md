@@ -174,3 +174,103 @@ one more "maybe it's just a bootstrap bug" possibility. The remaining
 single most important open item for a future session with access to
 better template LSF characterization or a wider real-data sample to
 localize the mismatch further.
+
+---
+
+## 2026-08-01: the notebook 02 vertical-offset bug is real, root-caused, and NOT a simple implementation bug -- it's a genuine unidentifiability in the current (b, w, C) parametrization
+
+`dev_notes/V1_HARDENING_ROADMAP.md` Phase 2a's working hypothesis (`ridge_c`
+softly penalizes `C`'s own DC mode, `w`'s NNLS scale has zero penalty, so a
+nonzero-mean true continuum gets partly absorbed into `w` instead of `C`)
+was tested directly and needed real revision.
+
+**Step 1 -- isolate the continuum block alone.** `fit_continuum_block`
+called directly (known, fixed `M`, no `b`/`w` freedom at all -- the same
+setup as the existing passing `test_fit_continuum_block_recovers_a_known_curve_in_isolation`),
+comparing the existing test's full-period sine (`1+0.15*sin(2*pi*frac)`,
+mean exactly 1.0) against a half-period sine (`1+0.15*sin(pi*frac)`, mean
+~1.095 -- notebook 02's actual injected distortion): **both recover
+accurately** (offset +0.0025 and +0.0059 respectively, RMS 0.003-0.006).
+This refutes the "ridge_c biases the mean" half of the original
+hypothesis in isolation -- `ridge_c`'s shrinkage-toward-flat exists but is
+too weak to explain the notebook's own symptom by itself.
+
+**Step 2 -- same comparison through the full 3-block alternation**
+(`fit_losvd_with_continuum`, `test_3block_recovers_a_known_injected_continuum_distortion`'s
+own setup, changing only `true_C`): full-period recovers essentially
+perfectly (offset +0.0025, RMS 0.003, matching the existing passing
+test); **half-period shows the bug directly**: recovered `C` mean lands
+at 1.0017 (should be ~1.095), offset -0.0935, RMS 0.094 -- **30x worse**,
+and `sherm`/`w_norm` (mixture fractions) both still recover correctly.
+Confirms: the bug is real, specific to the 3-block alternation (not the
+continuum block alone), and specific to a nonzero-mean true continuum
+(the existing test suite's zero-mean sine/linear-trend cases never
+exercise it).
+
+**Step 3 -- find where the missing ~9.5% actually goes.** Not into `w`'s
+raw NNLS scale as guessed (`w.sum()` is ~2.00 in *both* cases, unchanged).
+It's `b`'s own amplitude: `fit_log_spline_map` never normalizes `b` to
+unit area (nothing in the base 2-block path requires it either --
+`compute_losvd_moments` is scale-invariant, so this is invisible there),
+and `trapz(b, v_grid)` measured 0.498 in the full-period (working) case
+vs 0.546 in the half-period (buggy) case -- a +9.7% inflation that,
+multiplied through, exactly reproduces the data's true total flux
+(`w_sum * C_mean * b_area` matches between both cases to 4 significant
+figures). A uniform shift in the LOSVD's own spline coefficients (`b ->
+b/area`) costs only this block's own `ridge_lam` penalty and is exactly
+invisible to chi2 (block 2's very next NNLS re-solve for `w` absorbs any
+rescaling of `b` perfectly, so it's free there too) -- a second, cheaper
+escape valve than moving `C`'s own `ridge_c`-penalized coefficients away
+from 0.
+
+**Step 4 -- tried the direct fix, it didn't work, and that's the real
+finding.** Pinned `b` to unit sum immediately after each iteration's
+block-1 solve (`b -> b/b.sum()`, `coeffs -> coeffs - log(b.sum())` --
+exact, not approximate, since `build_bspline_basis`'s rows are a verified
+exact partition of unity). Confirmed the pin took effect (`b.sum()`
+exactly 1.0 post-fix, `w.sum()` dropped from ~2.0 to ~0.136 to
+compensate) -- but **the recovered `C` mean offset was completely
+unchanged** (-0.0935, bit-for-bit similar to before). The escape valve
+didn't close; it just moved. With `b`'s freedom removed, `w`'s
+*already-zero-cost* NNLS scale absorbed 100% of what `b` used to absorb,
+since nothing was ever regularizing `w`'s absolute magnitude in the first
+place (the original hypothesis wasn't wrong, just incomplete -- both
+`b`'s amplitude *and* `w`'s scale are equally free, and the fit uses
+whichever is available).
+
+**Why this isn't simply "add one more pin."** `w`'s absolute scale and
+`C`'s mean are the *same* degree of freedom mathematically -- both
+multiply the entire model uniformly across wavelength
+(`C(lambda) * sum_k w_k * (T_k conv b)(lambda)`), and nothing in the
+current design says which one *should* carry a given galaxy's overall
+flux-normalization offset from the templates' own assumed continuum
+level. Forcing `C`'s mean to always equal 1 (the plan's original 2b
+proposal) doesn't fix this -- it hides it, by definition displaying a
+mean-1 continuum regardless of the truth and silently pushing a
+scientifically meaningful quantity (the galaxy's real broadband continuum
+level relative to the normalized templates) into `w`'s absolute scale,
+which is reported to users as normalized mixture *fractions*, not a flux
+level. Constraining `w`'s own scale (e.g. a ridge penalty on its
+magnitude, or fixing it from a principled reference point) is the
+alternative, but iteration 0's own `w` solve happens against a
+not-yet-correct `C` (starts flat), so naively anchoring to that reference
+would just bake in the same bias it's supposed to prevent.
+
+**Status: open, and bigger than originally scoped.** This is not a
+one-line implementation bug -- it's a genuine parameter unidentifiability
+in the current `(b_area, w_sum, C_mean)` parametrization (2 real degrees
+of freedom competing for 3 nominal ones, resolved arbitrarily by whichever
+regularization term happens to be weakest). Options for a future session,
+not yet weighed against each other: (a) document as an honest, permanent
+limitation -- report `C`'s *shape* as reliable, its absolute *mean* as
+not identifiable without an external anchor, and teach users accordingly
+in the revamped notebook 02; (b) add explicit regularization on `w`'s
+overall scale (a real new hyperparameter, needs its own validation, and
+changes what `w` means well beyond continuum-cofitting); (c) if templates
+are known to be continuum-normalized to a specific convention, use that
+as the external anchor instead of an internal one. No code was changed
+this session as a result (the ineffective `b`-pin was implemented,
+confirmed not to work, and reverted) -- `penalty_order=3`/fixed
+`lam` in 4096-32768 (2026-07-30's finding, unaffected by this) remains
+the right default regardless of how this identifiability question is
+eventually resolved.

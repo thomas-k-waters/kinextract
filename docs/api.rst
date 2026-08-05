@@ -68,8 +68,39 @@ Multi-template fitting (main entry point)
    kinextract.fit_losvd_basis
    kinextract.fit_losvd_parallel
 
+Uncertainty (Laplace/curvature approximation)
+------------------------------------------------
+
+The default uncertainty engine, as of a production-scale coverage
+validation across sigma 90-600 km/s: matches or beats bootstrap's own
+coverage in every tested regime (dramatically so for h4) at a real speed
+advantage. ``quick_laplace_uncertainty`` is a cheaper single-lam mode;
+the ``_parallel`` variant fits many bins at once, matching
+``bootstrap_losvd_parallel``'s own convention.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.laplace_losvd_uncertainty
+   kinextract.laplace_losvd_uncertainty_parallel
+   kinextract.quick_laplace_uncertainty
+   kinextract.laplace_covariance_at_lam
+   kinextract.laplace_covariance_at_lam_with_continuum
+   kinextract.laplace_continuum_uncertainty
+
+A NUTS/NumPyro reference mode also exists
+(:mod:`kinextract.nuts_uncertainty`, ``nuts_losvd_uncertainty`` -- install
+the optional ``nuts`` extra) for simulation-based-calibration spot-checks
+against the Laplace approximation, not everyday use -- deliberately kept
+out of the top-level ``kinextract`` namespace so the ``numpyro`` dependency
+stays genuinely optional; import it directly from its own submodule.
+
 Uncertainty (parametric bootstrap)
 ------------------------------------
+
+Available as a cross-check for real ensemble properties (empirical skew,
+multimodality) the Laplace approximation can't give.
 
 .. autosummary::
    :toctree: generated
@@ -205,8 +236,12 @@ IFU cube I/O
 Spatial binning
 ----------------
 
-"Dartboard" spatial binning (log/linear-radial x equal-angle or
-equal-sin(theta) sectors), for extracting per-bin spectra from an IFU cube.
+Two schemes for extracting per-bin spectra from an IFU cube: PA-aware
+radial x angular sectors (log/linear-radial x equal-angle or
+equal-sin(theta)), and a second scheme reading a legacy Fortran
+``sco_framework``-pipeline ``bin_r.out``/``bin_v.out`` dartboard geometry
+directly, for projects that need bit-identical bins to that downstream
+toolchain rather than just a resembling scheme.
 
 .. autosummary::
    :toctree: generated
@@ -218,6 +253,8 @@ equal-sin(theta) sectors), for extracting per-bin spectra from an IFU cube.
    kinextract.uniform_theta_edges
    kinextract.build_reflected_sin_theta_edges
    kinextract.assign_spaxels_to_bins
+   kinextract.load_legacy_bin_edges
+   kinextract.assign_legacy_dartboard_bins
 
 Template reduction
 -------------------
@@ -233,3 +270,17 @@ template subset, reusable across a whole cube.
    kinextract.reduce_templates_iteratively
    kinextract.save_template_subset
    kinextract.load_template_subset
+
+Legacy Fortran pipeline I/O
+------------------------------
+
+Writes a fit result in the exact ``.fit``/``.ascii``/``.rms``/``.mcfit``
+formats the legacy ``sco_framework`` Fortran pipeline's own ``fitlovw.f``
+produces, for handing kinextract's output to that downstream toolchain
+(``pspecfit``/``pfitlov``/``pallmc``/``pfitlove``/``rtransvd``) unmodified.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.write_fit_outputs

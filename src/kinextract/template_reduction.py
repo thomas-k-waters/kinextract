@@ -76,7 +76,7 @@ def reduce_templates_iteratively(bin_specs: list[tuple[np.ndarray, np.ndarray, n
         used; every bin is fit at the same `cfg`.
     threshold : normalized-weight floor for "selected" (`w / w.sum() >
         threshold`) -- matches this package's own existing convention
-        (`06_template_mismatch_diagnostic.ipynb`'s `NNLS_THRESHOLD`).
+        (`04_template_calibration.ipynb`'s `NNLS_THRESHOLD`).
     max_iterations : hard cap on refit rounds, independent of whether the
         union has actually stabilized -- this loop can be expensive
         (every iteration refits every participating bin against however

@@ -60,6 +60,57 @@ def test_extract_aperture_spectrum_single_spaxel_matches_that_spaxels_own_values
     np.testing.assert_allclose(error, cube.error[:, 3, 4])
 
 
+def test_extract_aperture_spectrum_excludes_bad_spaxels_from_the_sum_not_zero_fills():
+    """A spaxel with NaN flux/error, or zero/negative error, at a given
+    wavelength must be excluded from that wavelength's combination, not
+    silently summed as a zero-flux/zero-error contribution (which would
+    either lose real signal without renormalizing, or look like a
+    perfect, zero-uncertainty non-detection)."""
+    cube = _tiny_cube()
+    mask = np.zeros((6, 6), dtype=bool)
+    mask[0:2, 0:2] = True  # 4 spaxels
+    bad_i, bad_j = 0, 0
+    cube.flux[5, bad_i, bad_j] = np.nan
+    cube.error[7, bad_i, bad_j] = 0.0
+    cube.error[9, bad_i, bad_j] = np.nan
+
+    wave, flux, error = extract_aperture_spectrum(cube, mask)
+    good_mask = np.ones((2, 2), dtype=bool)
+    good_mask[bad_i, bad_j] = False
+
+    for w in (5, 7, 9):
+        expected_flux = cube.flux[w, 0:2, 0:2][good_mask].sum()
+        expected_var = (cube.error[w, 0:2, 0:2][good_mask] ** 2).sum()
+        np.testing.assert_allclose(flux[w], expected_flux)
+        np.testing.assert_allclose(error[w] ** 2, expected_var)
+    # untouched wavelengths still include all 4 spaxels
+    np.testing.assert_allclose(flux[0], cube.flux[0, 0:2, 0:2].sum())
+
+
+def test_extract_aperture_spectrum_returns_nan_when_every_spaxel_is_bad_at_a_wavelength():
+    cube = _tiny_cube()
+    mask = np.zeros((6, 6), dtype=bool)
+    mask[0:2, 0:2] = True
+    cube.error[3, 0:2, 0:2] = 0.0  # every spaxel in the aperture bad at this one wavelength
+
+    wave, flux, error = extract_aperture_spectrum(cube, mask)
+    assert np.isnan(flux[3])
+    assert np.isnan(error[3])
+    assert np.isfinite(flux[0]) and np.isfinite(error[0])
+
+
+def test_load_muse_cube_nans_out_zero_and_negative_variance_pixels(tmp_path):
+    cube = _tiny_cube()
+    cube.error[2, 1, 1] = 0.0  # zero variance -- a real ESO STAT-extension occurrence
+    path = str(tmp_path / "test_cube.fits")
+    save_muse_cube_fits(cube, path)
+    loaded = load_muse_cube(path)
+    assert not np.isfinite(loaded.error[2, 1, 1])
+    assert not np.isfinite(loaded.flux[2, 1, 1])
+    # every other pixel is untouched
+    assert np.isfinite(loaded.error[0, 0, 0])
+
+
 def test_fits_round_trip_preserves_flux_wave_and_pixel_scale():
     cube = _tiny_cube(seed=1)
     with tempfile.NamedTemporaryFile(suffix=".fits", delete=False) as f:

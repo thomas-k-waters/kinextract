@@ -45,6 +45,36 @@ def test_mask_wavelength_windows_with_no_windows_is_a_no_op():
     np.testing.assert_array_equal(flux_m, flux)
 
 
+def test_mask_wavelength_windows_drops_nonfinite_pixels_by_default():
+    """Real cube data can carry NaN flux/error at unobserved/flagged
+    pixels (extract_aperture_spectrum's own docstring) -- drop_nonfinite
+    (default True) removes these automatically, the same mechanism as an
+    explicit window, so real-data callers don't have to remember a
+    separate step."""
+    wave = np.linspace(8400.0, 8800.0, 20)
+    flux = np.ones(20)
+    errors = np.full(20, 0.1)
+    flux[5] = np.nan
+    errors[10] = np.inf
+    errors[15] = 0.0  # not itself dropped by drop_nonfinite (0.0 IS finite) -- a
+                       # caller-side data-quality check, not this function's job
+
+    wave_m, flux_m, err_m = mask_wavelength_windows(wave, flux, errors, windows=[])
+    assert len(wave_m) == 18
+    assert not np.any(np.isnan(flux_m))
+    assert not np.any(np.isinf(err_m))
+    assert 0.0 in err_m  # confirms the zero-error pixel was NOT dropped by this path
+
+
+def test_mask_wavelength_windows_drop_nonfinite_false_preserves_old_behavior():
+    wave = np.linspace(8400.0, 8800.0, 10)
+    flux = np.ones(10)
+    flux[3] = np.nan
+    wave_m, flux_m = mask_wavelength_windows(wave, flux, windows=[], drop_nonfinite=False)
+    assert len(wave_m) == 10
+    assert np.isnan(flux_m[3])
+
+
 def test_masking_a_localized_contaminant_recovers_the_clean_fit():
     """The actual motivating scenario: a handful of severely deviant
     pixels at a fixed wavelength (mimicking a sky-subtraction residual)
