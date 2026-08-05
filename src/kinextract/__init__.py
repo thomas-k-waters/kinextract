@@ -55,6 +55,8 @@ from __future__ import annotations
 
 import os as _os
 
+from ._version import __version__
+
 # JAX float64 by default (opt out with KINEXTRACT_NO_X64=1). This is a
 # correctness requirement, not a preference: under JAX's default float32,
 # L-BFGS-B demonstrably stalls far from the optimum in the stiff
@@ -206,6 +208,6 @@ __all__ = [
     "load_legacy_bin_edges", "assign_legacy_dartboard_bins",
     "TemplateReductionResult", "reduce_templates_iteratively", "save_template_subset", "load_template_subset",
     "write_fit_outputs",
+    "__version__",
 ]
 
-__version__ = "1.0.0"

@@ -44,14 +44,21 @@ Error estimation
 
 .. code-block:: python
 
-   from kinextract import bootstrap_losvd
+   from kinextract import laplace_losvd_uncertainty
 
-   boot = bootstrap_losvd(A_stack_w, y_w, cfg, n_boot=200, n_jobs=4)
-   print(f"sigma = {boot['point0']['sherm']:.1f} +/- {boot['sherm_std']:.1f}")
+   lap = laplace_losvd_uncertainty(A_stack_w, y_w, cfg)
+   print(f"sigma = {lap['point0']['sherm']:.1f} +/- {lap['sherm_std']:.1f}")
+
+``laplace_losvd_uncertainty`` is the default uncertainty engine -- a
+production-scale coverage sweep across sigma 50-600 km/s found it matches
+or beats parametric-bootstrap coverage in every tested regime, dramatically
+so for h4, at a real speed advantage. ``bootstrap_losvd`` (same call
+pattern, ``n_boot=200, n_jobs=4``) remains available as a cross-check for
+real ensemble properties (empirical skew, multimodality) the Laplace
+approximation can't give.
 
 See ``01_basic_mock_fit.ipynb`` and ``02_realistic_mock_fit.ipynb`` for the
-full worked pattern, including Laplace-approximation and bias-corrected
-variants.
+full worked pattern, including both engines and bias-corrected variants.
 
 Characterizing recovery bias
 -----------------------------

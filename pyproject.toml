@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kinextract"
-version = "1.0.0"
+dynamic = ["version"]
 description = "Non-parametric binned-LOSVD spectral fitter for galaxy kinematics"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -60,6 +60,9 @@ dev = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "kinextract._version.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
