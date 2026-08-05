@@ -301,6 +301,14 @@ pixels out of the arrays before calling any fit function; a clear
 `ValueError` is raised otherwise rather than a fit silently returning a
 NaN-filled LOSVD.
 
+A handful of tests are marked `@pytest.mark.slow` (genuinely
+multi-minute -- e.g. a `lam_wing`-active fit refit inside every bootstrap
+replicate) and are skipped by default, both via `-m "not slow"` (this
+project's own CI path) and by a bundled pytest-astropy-ecosystem plugin
+that requires `--run-slow` to execute any `slow`-marked test at all, even
+under a plain `pytest tests/` with no `-m` filter. Pass `--run-slow` to
+actually run them, e.g. before a release: `pytest tests/ --run-slow`.
+
 ## Quick start
 
 One fitting engine, for any number of templates (a single template is

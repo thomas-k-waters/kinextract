@@ -12,6 +12,7 @@ grid campaign these targeted checks are a regression-safety complement to.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from kinextract import (
     FitConfig, build_template_stack, build_spline_truth,
@@ -60,16 +61,36 @@ def test_lam_wing_and_shape_aware_correction_compose_without_crashing():
     assert m["success"]
 
 
+@pytest.mark.slow
 def test_noise_scale_and_lam_wing_compose_in_bootstrap():
     """Injecting extra bootstrap-replicate noise (noise_scale) while
     lam_wing is also active in the underlying fit -- confirms the
     combination runs cleanly and lam_wing's own point-estimate behavior
     (checked via result0, which noise_scale must never touch) is
     unaffected by noise_scale being set.
+
+    Genuinely expensive (`lam_wing`'s own wing-taper mechanism re-fits
+    per bootstrap replicate, confirmed directly: ~230s for n_boot=6 alone,
+    JIT compilation is not the driver -- `_neg_log_post` compiles only
+    twice across all 6 replicates, not once per replicate) -- marked
+    `slow` rather than trimmed, since the combination this test exists to
+    check is real and worth keeping.
+
+    `noise_scale=1.0` vs `4.0` (not `2.0`) deliberately -- found directly
+    (2026-08-05): at n_boot=6, a 2.0 contrast's true effect on `sherm_std`
+    (real, usually ~2-3x, confirmed across 5 independent seeds) is close
+    enough to the sampling noise of a 6-replicate standard deviation that
+    it reversed outright in 1/5 seeds tested, and reversed for real on a
+    GitHub Actions Python 3.11 run with this test's own fixed seed (while
+    passing locally on macOS/Python 3.13 with the same seed) -- a
+    platform/library-version-sensitive coin flip, not a real regression.
+    A wider contrast doesn't fix the small-n statistics, but makes the
+    true effect large enough to reliably dominate that noise instead of
+    re-seeding until it happens to pass.
     """
     A_stack_w, y_w, cfg, v_grid = _mock_single_template(0.0, 50.0, snr=30.0, seed=2, lam_wing=3e5)
     boot_ns1 = bootstrap_losvd(A_stack_w, y_w, cfg, n_boot=6, seed=5, noise_scale=1.0, reselect_lam=False)
-    boot_ns2 = bootstrap_losvd(A_stack_w, y_w, cfg, n_boot=6, seed=5, noise_scale=2.0, reselect_lam=False)
+    boot_ns2 = bootstrap_losvd(A_stack_w, y_w, cfg, n_boot=6, seed=5, noise_scale=4.0, reselect_lam=False)
     np.testing.assert_array_equal(boot_ns1["result0"]["b"], boot_ns2["result0"]["b"])
     assert np.all(np.isfinite(boot_ns2["b_boot"])) and np.all(boot_ns2["b_boot"] > 0)
     assert boot_ns2["sherm_std"] > boot_ns1["sherm_std"]

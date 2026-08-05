@@ -64,6 +64,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--tb=short"
+markers = [
+    "slow: genuinely expensive tests (multi-minute), excluded from the default CI path (pytest -m 'not slow'). This marker existed in CI config but was never actually populated on any test until 2026-08-05, so that 'fast' path never excluded anything; run the full suite (no -m filter) before a release, not just on every push.",
+]
 
 [tool.ruff]
 line-length = 99
