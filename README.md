@@ -14,11 +14,21 @@ fixed at an arbitrarily fine grid.
 
 ## Status
 
-Beta-quality, actively developed research code. The core fitting,
-uncertainty (Laplace and bootstrap), multi-template, cleaning, and
-continuum machinery is implemented and validated on synthetic data, and
-has also been run end-to-end on real VLT/MUSE and HST/STIS spectra (see
-`examples/notebooks/05_noise_correlation.ipynb`,
+**v1.0.0** -- a complete, from-scratch rebuild of the fitting engine,
+uncertainty quantification, and real-data pipeline, independently
+validated end to end before being merged back in (27-stage validation
+campaign, `dev_notes/VALIDATION_CAMPAIGN.md`). The default uncertainty
+engine (Laplace + AIC-weighted) was validated via a production-scale
+coverage sweep across sigma 50-600 km/s, matching or beating parametric
+bootstrap's own coverage in every regime tested. Marked `Beta` (not
+`Stable`) because it's still actively developed and because several
+specific, real limitations are tracked openly below rather than hidden --
+not because the validated parts are shaky.
+
+The core fitting, uncertainty (Laplace and bootstrap), multi-template,
+cleaning, and continuum machinery is implemented and validated on
+synthetic data, and has also been run end-to-end on real VLT/MUSE and
+HST/STIS spectra (see `examples/notebooks/05_noise_correlation.ipynb`,
 `06_other_instruments.ipynb`, and `07_full_galaxy_analysis.ipynb` for a
 full-galaxy analysis). **Real-data-specific finding worth knowing before
 trusting a real fit**: real chi2_red on real IFU data commonly runs well
@@ -104,11 +114,16 @@ order:
   posterior at each candidate regularization strength, combined via
   AIC-weighted posterior-predictive sampling; measured directly to give
   substantially better h4 coverage than bootstrap (39% vs. 4% against a
-  68% target, production-scale coverage sweep) at a fraction of the
-  runtime, though still below the target especially at low sigma -- see
-  `dev_notes/uncertainty/FINDINGS.md`, which also breaks the residual
-  gap down into a genuine point-estimate-bias component and a specific,
-  identified sampling artifact. `bootstrap_losvd`/`bootstrap_losvd_
+  68% target, production-scale coverage sweep at sigma 50-150 km/s) at a
+  fraction of the runtime, though still below the target especially at
+  low sigma -- see `dev_notes/uncertainty/FINDINGS.md`, which also
+  breaks the residual gap down into a genuine point-estimate-bias
+  component and a specific, identified sampling artifact. A separate
+  sweep extending through sigma 250-600 km/s (real black-hole-mass
+  target regime, e.g. NGC 4751) confirms the same pattern holds well
+  beyond the original validation range: sigma coverage stays on-target
+  for both engines, and Laplace's h4 advantage is if anything more
+  decisive there (50-83% vs. 0-53%). `bootstrap_losvd`/`bootstrap_losvd_
   parallel` (parametric bootstrap, any `n_templates >= 1`, including
   mixture-weight uncertainty) remain available as a cross-check -- real
   ensemble properties (empirical skew/multimodality, basin-selection
