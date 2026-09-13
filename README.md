@@ -155,9 +155,9 @@ order:
   help** (see Status above) -- kept because the mechanism itself is
   solid, not because it's currently recommended for this dataset.
 - **Outlier rejection** (`kinextract.forward_model.
-  mask_wavelength_windows`, `kinextract.cleaning`): fixed-wavelength
+  mask_wavelength_windows`, `kinextract.robust_fit`): fixed-wavelength
   masking for known bad-pixel ranges, and iterative sigma-clipping
-  (`fit_losvd_clean`/`fit_losvd_clean_parallel`) for contamination whose
+  (`fit_losvd_robust(cleaning_method="clip")`) for contamination whose
   location isn't known in advance. The clip threshold can be measured
   against a robust (MAD-based) estimate of the residual's own scale
   (`robust_scale=True`) rather than the raw input noise vector -- matters
@@ -213,16 +213,30 @@ and orchestration layer.
   unless corrected for -- see the cleaning note below and
   `05_noise_correlation.ipynb`/`07_full_galaxy_analysis.ipynb` for the
   current, honest picture on real data.
-- **Adaptive regularization selection (`lam_selection="aic_local"`, the
-  default) can select heavy regularization even in the package's own
-  validated velocity-grid convention, at low-to-moderate sigma.** Found
-  while investigating a related warning in `FitConfig`: at sigma below
-  roughly 30-50 km/s, `aic_local` can pick the top of its own candidate
-  grid, producing real, sometimes severe sigma bias. Not yet root-caused
-  or fixed -- flagged here rather than silently working around it.
+- **Below roughly the instrument's own resolution (MUSE: sigma~36-38
+  km/s in the CaT window most real notebooks here fit), recovered sigma
+  is a lam-selection lottery, not a stable measurement -- for *any*
+  `lam_selection`, and the reported uncertainty badly under-covers it.**
+  Confirmed directly on real NGC 5102 bins (not just the synthetic
+  sigma=20 mock this was first found on): sigma vs. `lam` is
+  non-monotonic and has no plateau across a 64-65536 fixed-lam ladder
+  (sometimes the package's own default `lam` gives that bin's *highest*
+  ladder value, sometimes its lowest), `lam_selection="aic_local"` lands
+  on an equally arbitrary point in the same ladder rather than a
+  systematically better one, and the reported Laplace `sherm_std` (1-2
+  km/s in the checked bins) is 5-10x smaller than the actual lam-to-lam
+  swing (9-16 km/s) -- because the posterior is a curvature-based spread
+  *around whichever lam won*, with no term for uncertainty *over which
+  lam should have won*. See `dev_notes/uncertainty/FINDINGS.md`'s
+  2026-08-11 (late) entry for the specific bins and numbers, and
+  `07_full_galaxy_analysis.ipynb`'s own Section 7 for how this is
+  flagged in-notebook. Not yet root-caused to a fix (switching
+  `lam_selection` does not help -- confirmed, not assumed) -- flagged
+  here rather than silently worked around.
 - **Iterative sigma-clipping needs its threshold measured against the
   residual's own scale on real data, not the raw input noise vector.**
-  `fit_losvd_clean`'s default (`robust_scale=False`) compares the residual
+  `fit_losvd_robust(cleaning_method="clip")`'s default (`robust_scale=False`)
+  compares the residual
   directly to the input per-pixel noise -- correct when that noise vector
   is well-calibrated (chi2_red ~ 1), but on real data where chi2_red
   commonly runs well into the double digits (see above), a nominal
@@ -273,9 +287,13 @@ and orchestration layer.
   reduction).
 - **No continuum model by default.** The core fit expects
   continuum-normalized input; continuum-cofitting (`kinextract.continuum`)
-  is available but opt-in, and adaptive lambda selection does not yet
-  support it (falls back to the validated `penalty_order=3`/fixed-`lam`
-  default with a warning).
+  is available but opt-in. Adaptive lambda selection supports it too
+  (`aic_regularization.estimate_m_eff_local`'s joint LOSVD+continuum
+  linearization), at a real per-candidate cost increase (each scanned
+  `lam` costs a full 3-block alternation, not 2-block) -- its own
+  validation record for the continuum case is newer and smaller than the
+  no-continuum path's, so cross-check against a fixed `penalty_order=3,
+  lam=4096.0` before trusting it in production.
 - **Double-peaked/multi-component LOSVDs are not specifically handled.**
   The non-parametric spline recovery can represent them (unlike a fixed
   Gauss-Hermite parametrization), but no notebook in this sequence
@@ -296,14 +314,16 @@ NumPyro reference uncertainty mode), `.[docs]` (building the docs).
 pytest tests/
 ```
 
-200+ tests covering LOSVD recovery, moment estimation, multi-template
+329 tests covering LOSVD recovery, moment estimation, multi-template
 fitting, Laplace and bootstrap uncertainty (single- and multi-template,
 serial and parallel), NUTS reference-mode sampling, noise-scale
 calibration and AR(1) correlated-noise whitening, wavelength masking,
 iterative cleaning (serial and parallel, including the robust-scale
-option), continuum co-fitting, spatial binning and template reduction,
-regularization-bias calibration, and feature-composition/input-validation
-regressions. These are unit/sanity tests (correct shapes, right order of
+option), continuum co-fitting (including adaptive `lam_selection` under
+continuum), the `edge_amplitude_frac` divergent-edge-pedestal diagnostic
+and its use as an adaptive-selection guard, spatial binning and template
+reduction, regularization-bias calibration, and feature-composition/
+input-validation regressions. These are unit/sanity tests (correct shapes, right order of
 magnitude, no crashes, and several real before/after demonstrations
 against known synthetic ground truth) -- the full, wide-grid statistical
 validation (bias and coverage across the entire physically-relevant

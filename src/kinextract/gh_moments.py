@@ -328,7 +328,7 @@ def compute_losvd_moments(v: np.ndarray, b: np.ndarray, core_threshold: float = 
     bootstrap_losvd` it cannot look this up itself -- pass the fit's own
     `lam` (e.g. `result["lam_used"]`) only if correcting a fit made with
     *adaptive* regularization against a `PerLamCalibration` (`lam_grid`
-    varied in `calibrate_bias.run_calibration_sweep`). Omit it for this
+    varied in a `PerLamCalibration`-building sweep). Omit it for this
     package's fixed `lam=2.0` default -- see `bias_correction.
     correct_moments`'s own docstring for what happens either way.
 
@@ -404,8 +404,7 @@ def compute_losvd_moments(v: np.ndarray, b: np.ndarray, core_threshold: float = 
         # h4=-0.1). Clip rather than leave a "density" that goes negative
         # near the core edges -- matches the convention already used
         # everywhere else in this package a Gauss-Hermite curve is treated
-        # as a final density (`ablation.py`, `calibrate_bias.py`,
-        # `shape_aware_taper_correction`'s own `b_ref`), just not
+        # as a final density (`shape_aware_taper_correction`'s own `b_ref`), just not
         # previously applied to this specific corrected-model reconstruction.
         # Not applied to the *uncorrected* branch above -- that pre-existing
         # behavior is unchanged, out of scope for this fix.

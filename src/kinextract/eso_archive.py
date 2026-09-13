@@ -17,6 +17,9 @@ documentation.
 """
 from __future__ import annotations
 
+import glob
+import os
+
 
 def query_muse_phase3(target: str | None = None, program_id: str | None = None,
                        ra: float | None = None, dec: float | None = None,
@@ -60,7 +63,7 @@ def query_muse_phase3(target: str | None = None, program_id: str | None = None,
 
 
 def download_dataset(dp_id: str, dest_dir: str, confirm: bool = False,
-                      size_estimate_gb: float | None = None) -> list[str]:
+                      size_estimate_gb: float | None = None, force: bool = False) -> list[str]:
     """Download one dataset (by `ARCFILE`/`DP.ID`, from `query_muse_phase3`'s
     own result table) from the ESO archive.
 
@@ -77,11 +80,23 @@ def download_dataset(dp_id: str, dest_dir: str, confirm: bool = False,
     size_estimate_gb : if given, included in the refusal message when
         `confirm=False`, so the caller sees a concrete size before
         deciding.
+    force : re-download even if `{dest_dir}/{dp_id}.fits` already exists.
+        Default `False` -- a MUSE-DEEP cube is commonly several GB, and
+        re-running a notebook cell that calls this (e.g. after a kernel
+        restart) previously re-triggered a full network pull of a file
+        already sitting on disk, every time, unconditionally. The
+        download is idempotent (same `dp_id` always produces the same
+        file), so skipping it when the file's already local costs
+        nothing real.
 
     Returns
     -------
-    List of local file paths downloaded.
+    List of local file paths downloaded (or already present locally).
     """
+    if not force:
+        existing = sorted(glob.glob(os.path.join(dest_dir, f"{dp_id}*.fits")))
+        if existing:
+            return existing
     if not confirm:
         size_note = f" (~{size_estimate_gb:.1f} GB)" if size_estimate_gb is not None else ""
         raise ValueError(

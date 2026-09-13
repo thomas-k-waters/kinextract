@@ -290,11 +290,12 @@ def bootstrap_losvd(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         `cfg.lam_selection == "fixed"` already (a user-supplied fixed
         `lam`), this parameter has no effect either way -- there is
         nothing to reselect, and behavior is identical to `False`.
-        Likewise forced off (regardless of this argument's value) when
-        `cfg.continuum_knots` is set: adaptive selection doesn't support
-        continuum-cofitting yet and would just re-trigger `fit_losvd`'s own
-        fixed-lam fallback (and its `UserWarning`) on every replicate for
-        no behavioral difference. Set `False` to restore the original
+        Also works under `cfg.continuum_knots` -- `fit_losvd`'s adaptive
+        selection supports continuum-cofitting (see `aic_regularization.
+        estimate_m_eff_local`'s own joint LOSVD+continuum linearization),
+        so a replicate under continuum-cofitting genuinely re-runs the
+        (costlier, 3-block-alternation-per-candidate) adaptive scan too,
+        not just the LOSVD-only case. Set `False` to restore the original
         (cheaper, pinned) behavior.
     fit_h3h4 : passed through to `compute_losvd_moments` for every
         replicate.
@@ -410,14 +411,11 @@ def bootstrap_losvd(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
     # estimate's own result0["lam_used"] for every replicate (cheaper, at the cost
     # of not propagating lam-selection uncertainty into the reported band).
     #
-    # Forced off when cfg.continuum_knots is set, regardless of the reselect_lam
-    # argument: fit_losvd's own adaptive selection doesn't support continuum-cofitting
-    # yet and silently falls back to a fixed lam with a UserWarning every time it's
-    # asked to try (see fit_losvd's own docstring) -- reselecting per replicate here
-    # would just re-trigger that fallback (and its warning) n_boot times for no
-    # behavioral difference at all, since every replicate would fall back to the same
-    # fixed lam anyway.
-    if reselect_lam and cfg.continuum_knots is None:
+    # No longer forced off under continuum-cofitting -- fit_losvd's adaptive selection
+    # now supports cfg.continuum_knots (estimate_m_eff_local's own joint LOSVD+continuum
+    # linearization), so reselecting per replicate genuinely re-runs the adaptive scan
+    # under continuum too, at that path's own (higher) per-replicate cost.
+    if reselect_lam:
         cfg_boot = dataclasses.replace(
             cfg, losvd_single_start=(True if replicate_single_start else cfg.losvd_single_start),
         )

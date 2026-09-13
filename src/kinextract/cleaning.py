@@ -33,7 +33,7 @@ candidate line is actually in emission here, adapted from the original
 of a curated line list, it fits once, finds local maxima in the whitened
 *fit residual* above a S/N threshold, and characterizes each one with a
 local Gaussian fit -- closer to pPXF's own fit-then-clean philosophy than
-`detect_emission_lines`, but replacing `fit_losvd_clean`'s simple per-pixel
+`detect_emission_lines`, but replacing `fit_losvd_robust`'s simple per-pixel
 `|residual| > clip_sigma` test with a peak-shape-aware one, so it needs no
 line list (catches serendipitous/unlisted/velocity-shifted emission) and
 masks a window sized to the feature's own fitted width rather than a fixed
@@ -60,6 +60,13 @@ _DEFAULT_MAX_CLIP_FRACTION = 0.1
 # window overlaps the CaT's own 8662.14 Å line).
 CAII_TRIPLET_CENTERS_A = (8498.02, 8542.09, 8662.14)
 CAII_TRIPLET_HALF_WIDTH_A = 8.0
+
+# `(lo, hi)` rest-frame windows around each CaII triplet line, ready to pass
+# as `fit_losvd_robust`'s own `excluded_wavelength_windows` -- its cleanup
+# clip can otherwise mistake a real, narrow (1-2 pixel) CaII line core the
+# model doesn't perfectly reproduce for a cosmic ray/contamination.
+CAII_PROTECTED_WINDOWS = tuple((c - CAII_TRIPLET_HALF_WIDTH_A, c + CAII_TRIPLET_HALF_WIDTH_A)
+                                for c in CAII_TRIPLET_CENTERS_A)
 
 # Emission-line candidates falling inside the CaII-triplet fit window
 # (8400-8800 Å rest-frame) that every real-data notebook in this package
@@ -94,7 +101,7 @@ def detect_emission_lines(wave_rest: np.ndarray, flux: np.ndarray, error: np.nda
 
     This only flags candidates from a known line list; it will not catch
     contamination at an arbitrary, unlisted wavelength (that is what
-    `fit_losvd_clean`'s iterative sigma-clipping is for -- the two are
+    `fit_losvd_robust`'s iterative sigma-clipping is for -- the two are
     complementary, not alternatives).
 
     Parameters
@@ -189,7 +196,7 @@ def detect_emission_from_residual(wave: np.ndarray, residual: np.ndarray,
     velocity offset from the systemic redshift. Only positive
     (emission-like) residual peaks are considered -- a negative dip (e.g.
     an oversubtracted sky line) is a different problem, already handled by
-    a fixed sky-residual window list or `fit_losvd_clean`'s two-sided
+    a fixed sky-residual window list or `fit_losvd_robust`'s two-sided
     per-pixel clipping.
 
     Parameters
@@ -294,17 +301,26 @@ def _robust_sigma(x: np.ndarray) -> float:
     return float(scale) if scale > 0 else 1.0
 
 
-def fit_losvd_clean(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
+def _fit_losvd_clip(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
                      clip_sigma: float = 3.0, max_iter: int = 3,
                      max_clip_fraction: float = _DEFAULT_MAX_CLIP_FRACTION,
                      wave_fit: np.ndarray | None = None,
-                     robust_scale: bool = False,
+                     robust_scale: bool = True,
                      excluded_wavelength_windows: tuple[tuple[float, float], ...] | None = None) -> dict:
     """LOSVD (+ template-mixture-weight) fit with iterative sigma-
     clipping, for any `n_templates >= 1`. Each iteration's residual is
     computed against the effective (weight-collapsed) design matrix,
     `np.tensordot(w, A_stack_w, axes=([0],[0]))` (further multiplied by
     the continuum `C` first, when `cfg.continuum_knots` is set).
+
+    Private -- the hard-clip half of `fit_losvd_robust`'s two cleaning
+    strategies (`robust_fit.py`), which is the public entry point (takes
+    unwhitened inputs and whitens internally; also reachable via
+    `cleaning_method="inflate"`, whose own preliminary/final passes call
+    this same function underneath). Kept here, not there, since it shares
+    `_robust_sigma`/`_failed_fit_result` with this module's emission-
+    detection utilities and is the natural home for the whitened-input,
+    single-bin clip loop itself.
 
     Parameters
     ----------
@@ -326,11 +342,10 @@ def fit_losvd_clean(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         surviving pixel set, not the original full one -- a clipped
         pixel's wavelength must not silently leak into the continuum
         spline's own knot placement/support.
-    robust_scale : if True, `clip_sigma` is measured against a MAD-based
-        robust estimate of the *current* residual's own scale
+    robust_scale : if True (the default), `clip_sigma` is measured against
+        a MAD-based robust estimate of the *current* residual's own scale
         (recomputed every iteration from the surviving pixels), not the
-        raw whitened residual directly. Default False, preserving this
-        function's original behavior exactly -- that behavior silently
+        raw whitened residual directly. `robust_scale=False` silently
         assumes the input noise vector is correctly calibrated (chi2_red
         ~ 1), which real data with a systematic model-data mismatch
         (real chi2_red far from 1 -- unmodeled continuum shape, template
@@ -340,15 +355,20 @@ def fit_losvd_clean(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         unconstrained handful of survivors -- confirmed directly on real
         MUSE data (`examples/notebooks/07_full_galaxy_analysis.ipynb`
         Section 4/8: clipped >90% of pixels and collapsed to a biased,
-        unconstrained baseline at the default `clip_sigma=3.0`).
-        `robust_scale=True` matches pPXF's own documented practice of
-        rescaling the noise before ever clipping (there, by a single
-        `sqrt(chi2/dof)` factor from an unclipped fit) -- the MAD-based
-        version used here is outlier-robust rather than a single chi2-
-        based scalar, and self-corrects each iteration as the surviving
-        pixel set changes. Confirmed to behave far better than the
-        default on the same real bins that broke it (RMS improved
-        substantially, clip fractions realistic, not a runaway).
+        unconstrained baseline at `clip_sigma=3.0` with the scale
+        assumed calibrated). `robust_scale=True` matches pPXF's own
+        documented practice of rescaling the noise before ever clipping
+        (there, by a single `sqrt(chi2/dof)` factor from an unclipped
+        fit) -- the MAD-based version used here is outlier-robust rather
+        than a single chi2-based scalar, and self-corrects each iteration
+        as the surviving pixel set changes. Confirmed to behave far
+        better than `False` on the same real bins that broke it (RMS
+        improved substantially, clip fractions realistic, not a runaway)
+        -- `cleaning_method="inflate"`'s own internal clip passes have
+        always hardcoded `robust_scale=True` for exactly this reason;
+        this default brings the standalone `cleaning_method="clip"` path
+        in line with it. Set `False` only to reproduce this function's
+        pre-2026-08 behavior exactly.
     excluded_wavelength_windows : optional sequence of `(lo, hi)` rest-frame
         wavelength ranges (same units/frame as `wave_fit`, which is
         required if this is set) that are never candidates for clipping,
@@ -369,7 +389,7 @@ def fit_losvd_clean(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
     if excluded_wavelength_windows:
         if wave_fit is None:
             raise ValueError(
-                "fit_losvd_clean: excluded_wavelength_windows was given but wave_fit was not -- "
+                "fit_losvd_robust: excluded_wavelength_windows was given but wave_fit was not -- "
                 "the protected windows are wavelength ranges and need wave_fit to locate them."
             )
         for lo, hi in excluded_wavelength_windows:
@@ -388,7 +408,7 @@ def fit_losvd_clean(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
             # where sky-subtraction residuals wash out the real signal badly enough that
             # iterative clipping keeps removing pixels every iteration without converging.
             raise RuntimeError(
-                f"fit_losvd_clean: only {keep.sum()} pixels survived clipping (fewer than "
+                f"fit_losvd_robust: only {keep.sum()} pixels survived clipping (fewer than "
                 f"the {n_coef_min} free LOSVD coefficients) after {it} iteration(s) -- this "
                 "spectrum's real signal is too contaminated/weak for this fit window and "
                 "clip_sigma to recover, not a fit worth trusting. Inspect the input data "
@@ -411,7 +431,7 @@ def fit_losvd_clean(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
     frac_clipped = n_clipped / len(keep)
     if frac_clipped > max_clip_fraction:
         warnings.warn(
-            f"fit_losvd_clean: clipped {100*frac_clipped:.1f}% of pixels "
+            f"fit_losvd_robust: clipped {100*frac_clipped:.1f}% of pixels "
             f"({n_clipped}/{len(keep)}), above the {100*max_clip_fraction:.0f}% "
             "sanity threshold -- this is more consistent with a large, systematic "
             "mismatch (wrong redshift, missing template coverage, wildly wrong "
@@ -428,7 +448,7 @@ def fit_losvd_clean(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
 
 def _failed_fit_result(A_stack_w: np.ndarray, message: str) -> dict:
     """A NaN-filled, `success=False` result dict shaped like
-    `fit_losvd_clean`'s own return value -- for a per-bin failure that
+    `fit_losvd_robust`'s own return value -- for a per-bin failure that
     should flag that one bin as unusable (moment maps render it grey,
     e.g. via `plot_bin_map` simply omitting it from `values_by_bin_id`)
     rather than crashing an entire multi-bin batch. A real spectrum can
@@ -446,103 +466,6 @@ def _failed_fit_result(A_stack_w: np.ndarray, message: str) -> dict:
     )
 
 
-def _fit_losvd_clean_worker(args):
-    """Top-level (picklable) per-bin worker for `fit_losvd_clean_parallel` --
-    process pools need a module-level function, not a closure, since
-    workers unpickle it by import path (same reason as `multi_template.
-    _fit_losvd_worker`). Catches any exception from this bin's own fit
-    and returns `_failed_fit_result` instead of propagating it -- see
-    that function's own docstring for why a single bad bin must not
-    crash an entire parallel batch."""
-    (A_stack_w, y_w, cfg, clip_sigma, max_iter, max_clip_fraction, wave_fit, robust_scale,
-     excluded_wavelength_windows) = args
-    try:
-        return fit_losvd_clean(A_stack_w, y_w, cfg, clip_sigma=clip_sigma, max_iter=max_iter,
-                                max_clip_fraction=max_clip_fraction, wave_fit=wave_fit,
-                                robust_scale=robust_scale,
-                                excluded_wavelength_windows=excluded_wavelength_windows)
-    except Exception as e:
-        warnings.warn(
-            f"fit_losvd_clean_parallel: a bin's fit raised {type(e).__name__}: {e} -- "
-            "returning a NaN-filled, success=False result for this bin instead of "
-            "crashing the whole batch. Inspect this bin's own input data (a common real "
-            "cause: sky-subtraction residuals washing out the real signal at low S/N).",
-            UserWarning, stacklevel=2,
-        )
-        return _failed_fit_result(A_stack_w, f"{type(e).__name__}: {e}")
-
-
-def fit_losvd_clean_parallel(A_stack_w_list, y_w_list, cfg_list, clip_sigma: float = 3.0,
-                              max_iter: int = 3, max_clip_fraction: float = _DEFAULT_MAX_CLIP_FRACTION,
-                              wave_fit=None, robust_scale: bool = False, n_jobs: int | None = None,
-                              excluded_wavelength_windows: tuple[tuple[float, float], ...] | None = None) -> list:
-    """`fit_losvd_clean`, run across many independent bins in parallel --
-    same idea and implementation (`ProcessPoolExecutor`, `spawn` context,
-    `multi_template._limit_worker_threads`) as `kinextract.multi_template.
-    fit_losvd_parallel`; see that function's own docstring for the
-    threading/worker-startup details, which apply unchanged here.
-
-    Needed once cleaning stops being an occasional add-on for a handful of
-    flagged bins and becomes the default per-bin fitting step: each bin now
-    pays up to `max_iter` refits instead of one, so running all of them in
-    a serial loop would erase most of `fit_losvd_parallel`'s own speedup.
-
-    Parameters
-    ----------
-    A_stack_w_list, y_w_list : sequences of the same length, one entry per
-        bin, each matching `fit_losvd_clean`'s own `A_stack_w`/`y_w`.
-    cfg_list : a single `FitConfig` (reused for every bin) or a sequence
-        of one per bin -- see `fit_losvd_parallel`'s own note on this.
-    clip_sigma, max_iter, max_clip_fraction, robust_scale : forwarded to
-        every bin's own `fit_losvd_clean` call unchanged (not per-bin --
-        pass a shared choice for the whole run).
-    wave_fit : forwarded per bin, only needed if `cfg.continuum_knots` is
-        set or `excluded_wavelength_windows` is given -- a single array
-        (shared) or a sequence of one per bin.
-    n_jobs : worker process count. `None` (default) uses `os.cpu_count()`,
-        memory-permitting -- see `multi_template.resolve_n_jobs`'s own
-        docstring. `1` disables the process pool and runs serially
-        in-process.
-    excluded_wavelength_windows : forwarded to every bin's own
-        `fit_losvd_clean` call unchanged (a shared choice, not per-bin) --
-        see its own docstring.
-
-    Returns
-    -------
-    list of `fit_losvd_clean`'s own result dicts, one per bin, in the same
-    order as the inputs.
-    """
-    from concurrent.futures import ProcessPoolExecutor
-    from multiprocessing import get_context
-
-    from .multi_template import _limit_worker_threads, resolve_n_jobs
-
-    n_bins = len(A_stack_w_list)
-    if len(y_w_list) != n_bins:
-        raise ValueError(f"A_stack_w_list and y_w_list must have the same length "
-                          f"(got {n_bins} and {len(y_w_list)}).")
-    cfgs = cfg_list if isinstance(cfg_list, (list, tuple)) else [cfg_list] * n_bins
-    if len(cfgs) != n_bins:
-        raise ValueError(f"cfg_list, given as a sequence, must have one entry per bin "
-                          f"(got {len(cfgs)} for {n_bins} bins).")
-    waves = wave_fit if isinstance(wave_fit, (list, tuple)) else [wave_fit] * n_bins
-    if len(waves) != n_bins:
-        raise ValueError(f"wave_fit, given as a sequence, must have one entry per bin "
-                          f"(got {len(waves)} for {n_bins} bins).")
-
-    jobs = [(A_stack_w_list[i], y_w_list[i], cfgs[i], clip_sigma, max_iter, max_clip_fraction,
-             waves[i], robust_scale, excluded_wavelength_windows) for i in range(n_bins)]
-
-    if n_jobs == 1:
-        return [_fit_losvd_clean_worker(job) for job in jobs]
-
-    per_job_bytes = 4 * max((a.nbytes for a in A_stack_w_list), default=0)
-    n_jobs = resolve_n_jobs(n_jobs, per_job_bytes)
-    with ProcessPoolExecutor(max_workers=n_jobs, mp_context=get_context("spawn"),
-                              initializer=_limit_worker_threads) as pool:
-        return list(pool.map(_fit_losvd_clean_worker, jobs))
-
-
 def compute_fit_rms(flux: np.ndarray, model: np.ndarray, errors: np.ndarray,
                      mask: np.ndarray | None = None) -> float:
     """Whitened-residual RMS for one fit: `sqrt(mean(((flux-model)/errors)**2))`.
@@ -551,12 +474,12 @@ def compute_fit_rms(flux: np.ndarray, model: np.ndarray, errors: np.ndarray,
     a genuine systematic model-data mismatch, not necessarily a bad LOSVD
     recovery -- a single severely-contaminated pixel can dominate this
     mean-of-squares even when the rest of the fit is fine. Use
-    `fit_losvd_clean` to test whether iterative sigma-clipping recovers a
+    `fit_losvd_robust` to test whether iterative sigma-clipping recovers a
     specific flagged case; a large RMS is a flag to investigate, not a
     verdict on its own.
 
     `mask` : if given, only these pixels (e.g. the surviving, unclipped set
-    from a `fit_losvd_clean` result's own `~clipped_mask`) are included --
+    from a `fit_losvd_robust` result's own `~clipped_mask`) are included --
     the fair comparison against a raw fit's RMS is over the *same* pixel
     set a cleaned fit was actually scored on, not a mix of kept and
     clipped pixels.

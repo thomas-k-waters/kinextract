@@ -55,6 +55,7 @@ geometry.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from astropy.io import ascii
 
 import numpy as np
 
@@ -71,6 +72,44 @@ def log_radial_edges(r_min: float, r_max: float, n_bins: int) -> np.ndarray:
                           "linear_radial_edges, or a nonzero inner radius, for a "
                           "grid that needs to start at r=0.")
     return np.geomspace(r_min, r_max, n_bins + 1)
+
+
+def pixel_aware_radial_edges(pixel_scale: float, r_max: float, n_bins: int) -> np.ndarray:
+    """`n_bins + 1` radial edges for use with `DartboardBins(..., single_center_bin=True)`,
+    built so the collapsed center bin contains *only* the literal center pixel --
+    `r_edges[1] = pixel_scale` exactly, so any spaxel at 1 pixel or farther from
+    center (the nearest ring of real neighbors) falls in a genuine annulus, not
+    swept into the center bin along with it. The remaining `n_bins - 1` edges grow
+    geometrically (`log_radial_edges`) from `pixel_scale` out to `r_max`.
+
+    Exists because reusing a reference dataset's own radial bin edges (e.g. a
+    legacy `bin_r.out`, generated for a specific target's own field of view) and
+    rescaling them by an unrelated cube's own field-of-view fraction does not
+    generally line up with *that* cube's own pixel scale -- concretely, uniformly
+    shrinking a pattern built for a much larger field of view can push several of
+    the innermost bins below one pixel's own width, so no real spaxel can ever
+    populate them (see `dev_notes/legacy_binning/FINDINGS.md`'s 2026-08-07 entry
+    for a real case: NGC 4751's own MUSE NFM data, 0.025"/pixel, left bins 2-7 of
+    a rescaled 20-bin pattern entirely empty). Building `r_edges` directly from
+    the cube's own `pixel_scale` instead makes that structurally impossible: the
+    smallest non-center annulus always starts exactly at 1 pixel.
+
+    `r_edges[0]` (the collapsed center bin's own nominal inner edge) is a
+    formality `DartboardBins` doesn't use as a real boundary when
+    `single_center_bin=True` (see that class's own docstring) -- set to
+    `pixel_scale / 1000` here only so the array stays strictly positive and
+    increasing, never interpreted as a real cutoff.
+    """
+    if pixel_scale <= 0:
+        raise ValueError(f"pixel_aware_radial_edges: pixel_scale must be > 0 (got {pixel_scale})")
+    if r_max <= pixel_scale:
+        raise ValueError(f"pixel_aware_radial_edges: r_max ({r_max}) must be > pixel_scale "
+                          f"({pixel_scale}) -- need at least one real annulus beyond the center bin.")
+    if n_bins < 2:
+        raise ValueError(f"pixel_aware_radial_edges: n_bins must be >= 2 (a center bin plus at "
+                          f"least one real annulus), got {n_bins}")
+    beyond_center = log_radial_edges(pixel_scale, r_max, n_bins - 1)
+    return np.concatenate([[pixel_scale / 1000.0], beyond_center])
 
 
 def linear_radial_edges(r_min: float, r_max: float, n_bins: int) -> np.ndarray:
@@ -302,20 +341,28 @@ def load_legacy_bin_edges(bin_r_path: str, bin_v_path: str) -> tuple[np.ndarray,
     (this is why the same `bin_r.out` numbers show up unchanged across
     different galaxies' working directories -- expected, not a bug).
     """
-    r_rows = np.loadtxt(bin_r_path, skiprows=2)
-    v_rows = np.loadtxt(bin_v_path, skiprows=2)
-    r_edges = np.concatenate([[r_rows[0, 1]], r_rows[:, 3]])
-    v_edges_deg = np.concatenate([[0.0], v_rows[:, 3]])
+    bin_r = ascii.read(bin_r_path, data_start=2, names=["bin_id", "r_low", "r_mid", "r_high", "bin_size"], guess=False)
+    bin_v = ascii.read(bin_v_path, data_start=2, names=["bin_id", "v_low", "v_mid", "v_high", "bin_size"], guess=False)
+
+    r_edges = np.concatenate([[bin_r["r_low"][0]], np.asarray(bin_r["r_high"])])
+    v_edges_deg = np.concatenate([[0.0], np.asarray(bin_v["v_high"])])
     return r_edges, v_edges_deg
 
 
 def assign_legacy_dartboard_bins(shape: tuple[int, int], center: tuple[float, float], pa_deg: float,
                                   r_edges: np.ndarray, v_edges_deg: np.ndarray,
-                                  pixel_scale: float = 1.0) -> tuple[np.ndarray, list[dict]]:
+                                  pixel_scale: float = 1.0,
+                                  fold_major_axis: bool = True) -> tuple[np.ndarray, list[dict]]:
     """Assign every spaxel in a `shape = (ny, nx)` image to a bin using
     the SCO Fortran framework's own dartboard convention (`plotbin3.f`'s
     `writebin`, ported exactly -- see this module's own docstring for why
-    this differs from `assign_spaxels_to_bins`).
+    this differs from `assign_spaxels_to_bins`). Verified line-by-line
+    against `sco_framework/modprogs/plotbin3.f`'s own main loop
+    (2026-08-06): the rotation, side split, fold, radius/angle binning,
+    and `bin####`/`bnn####` naming below all reproduce that source
+    exactly when `fold_major_axis=True` (the legacy behavior, and this
+    function's default -- see that parameter's own docstring for why the
+    default does not change existing callers' behavior).
 
     For a spaxel at `(dx, dy)` = pixel offset from `center`, scaled to
     arcsec by `pixel_scale`:
@@ -332,6 +379,7 @@ def assign_legacy_dartboard_bins(shape: tuple[int, int], center: tuple[float, fl
        merged into the same bin (the real, physical assumption the
        legacy scheme makes; see this module's own docstring for why this
        also means a bin can never straddle a major-axis exclusion mask).
+       Only applied when `fold_major_axis=True` -- see that parameter.
     4. Radius `r = sqrt(x**2 + y**2)` -> radial index `irc` (1-based, 1 =
        innermost) via `r_edges` (from `load_legacy_bin_edges`). `r`
        smaller than `r_edges[0]` (e.g. the literal center spaxel) clips
@@ -340,25 +388,65 @@ def assign_legacy_dartboard_bins(shape: tuple[int, int], center: tuple[float, fl
        `single_center_bin=True` already uses.
     5. Angle `vp = degrees(atan2(y, x))`, clipped to `[0, 89.99]` ->
        angular index `irv` (1-based, 1 = nearest the major axis) via
-       `v_edges_deg`.
+       `v_edges_deg`. `y` here is always `abs(y)` for this lookup
+       regardless of `fold_major_axis` (`v_edges_deg` only covers
+       `[0, 90)` either way) -- what `fold_major_axis` controls is
+       whether the north (`y>=0`) and south (`y<0`) halves sharing the
+       same `(irc, irv, side)` are then merged into one bin or kept apart.
     6. Bin name: `f"{'bin' if sign>0 else 'bnn'}{irc:02d}{irv:02d}"` --
        7 characters, e.g. `"bin0301"` = radial ring 3, angular sector 1,
        positive minor-axis side. This is the literal spectrum-file stem
        the rest of the legacy pipeline (`fitlovw`, `mcfitw`, `pallmc`,
-       ...) expects.
+       ...) expects. Only exact when `fold_major_axis=True`; see that
+       parameter for the non-folded naming.
+
+    Parameters
+    ----------
+    fold_major_axis : if `True` (the default, and the legacy
+        `plotbin3.f` behavior exactly), a bin's north (`y>=0`) and south
+        (`y<0`) spaxels are merged, matching the original Fortran
+        pipeline (whose own downstream tools -- `fitlovw`, `pallmc`,
+        ... -- expect exactly this 7-character `bin####`/`bnn####`
+        naming and cannot consume anything else). Defaults to `True`
+        specifically so every existing caller of this function (the
+        N4751 real-data notebooks, `kinematicextraction`, ...) keeps its
+        current behavior unchanged -- this is new, additive capability,
+        not a behavior change.
+
+        If `False`, north and south are kept as separate bins instead
+        (each still individually folded to `|y|` for the radius/angle
+        *lookup* -- step 5 -- but no longer merged into one bin
+        afterward): a real modernization, not just a config knob, since
+        it recovers kinematic information (e.g. genuine north/south
+        asymmetry from a warp, or from the galaxy's own real velocity
+        field failing point-symmetry -- see `EHT_Project/notebooks/
+        N4751_notebooks/kinematics/10_kinematic_center_pa_development.
+        ipynb` for a real, current example of exactly that failure mode)
+        the folded scheme discards by construction. Bin names in this
+        mode are **not** legacy-pipeline-compatible: the same
+        `bin####`/`bnn####` stem is used for the north (`y>=0`) half,
+        and an `s` is appended (`bin####s`/`bnn####s`, 8 characters) for
+        the south (`y<0`) half, so this mode should only feed a
+        Python/kinextract-native workflow, never the legacy Fortran
+        tools directly.
 
     Returns
     -------
     `(bin_id_map, bin_table)` -- `bin_id_map` is an `(ny, nx)` int array,
     `-1` outside every bin (`r` beyond `r_edges[-1]`). Bin ids are unique
-    integers (`irc`, `irv`, side packed together) so this return shape is
-    a drop-in match for `assign_spaxels_to_bins`'s own (usable by the same
+    integers (`irc`, `irv`, side, and -- when `fold_major_axis=False` --
+    hemisphere, all packed together) so this return shape is a drop-in
+    match for `assign_spaxels_to_bins`'s own (usable by the same
     `plot_bin_map`-style plotting code); `bin_table` is a list of dicts,
     one per populated bin, with keys `bin_id`, `bin_name` (the legacy
-    `bin####`/`bnn####` string), `irc`, `irv`, `side` (`+1`/`-1`), `r_mid`
-    (arcsec), `vp_mid` (degrees from the major axis), `theta_mid` (signed
-    radians from the major axis, `+vp` on the `bin` side / `-vp`... no --
-    see note below), `n_spaxels`.
+    `bin####`/`bnn####` string, or its `s`-suffixed south-half variant
+    when unfolded), `irc`, `irv`, `side` (`+1`/`-1`), `hemisphere`
+    (`+1` = north/`y>=0`, `-1` = south/`y<0` -- always populated, even
+    when `fold_major_axis=True`, in which case every bin's own
+    `hemisphere` is `+1` by convention since north/south were merged into
+    it), `r_mid` (arcsec), `vp_mid` (degrees from the major axis),
+    `theta_mid` (signed radians from the major axis, `+vp` on the `bin`
+    side / `-vp`... no -- see note below), `n_spaxels`.
 
     `theta_mid` here is provided purely for compatibility with plotting
     code written against `assign_spaxels_to_bins`'s own `theta_mid`
@@ -366,6 +454,10 @@ def assign_legacy_dartboard_bins(shape: tuple[int, int], center: tuple[float, fl
     `bin` (`x>=0`) side and `pi - radians(vp_mid)` on the `bnn` (`x<0`)
     side, i.e. the angle this bin's own representative point would have
     in the *unfolded*, unmirrored frame `assign_spaxels_to_bins` uses.
+    When `fold_major_axis=False`, this is further negated for the south
+    (`hemisphere=-1`) half, so a north/south pair's own `theta_mid`
+    values are themselves reflections of each other, matching their real
+    sky positions.
     """
     ny, nx = shape
     r_edges = np.asarray(r_edges, dtype=float)
@@ -380,43 +472,69 @@ def assign_legacy_dartboard_bins(shape: tuple[int, int], center: tuple[float, fl
     y = dx * np.sin(pa) + dy * np.cos(pa)
 
     side = np.where(x >= 0, 1, -1)
+    hemisphere = np.where(y >= 0, 1, -1)
     x_side = np.abs(x)
     y_fold = np.abs(y)
     r = np.clip(np.sqrt(x_side ** 2 + y_fold ** 2), r_edges[0], None)
+    # plotbin3.f's own branch is literally `if(abs(x).ne.0) vp=atan(y/x) else vp=89.99`,
+    # evaluated *after* x/y are already folded positive (x_side/y_fold here) -- for any
+    # x_side>0 this is identical to atan2(y_fold, x_side) (single-quadrant, matches
+    # exactly), but at the exact grid center (x_side=0 *and* y_fold=0 -- the literal
+    # single-spaxel innermost bin) `np.arctan2(0, 0)` silently returns 0.0, not the
+    # Fortran's forced 89.99. That 0 vs. 89.99 difference lands the center spaxel in the
+    # *first* angular sector (irv=1) here vs. the *last* one (irv=n_v) in the legacy
+    # pipeline -- confirmed directly against a real run: this function reports the
+    # center bin as "bin0101", `plotbin3.f` writes "bin0105" for the same target's own
+    # 5-sector bin_v.out. Not caught by the earlier line-by-line fidelity check (this
+    # module's own docstring) because that check exercised the general (non-degenerate)
+    # mechanics, not this specific x==0-exactly edge case.
     with np.errstate(divide="ignore", invalid="ignore"):
-        vp = np.degrees(np.arctan2(y_fold, x_side))
+        vp = np.where(x_side != 0, np.degrees(np.arctan2(y_fold, x_side)), 89.99)
     vp = np.nan_to_num(np.clip(vp, 0.0, 89.99), nan=89.99)
 
     irc = np.searchsorted(r_edges, r, side="right") - 1  # 0-based here, +1 -> legacy 1-based
     irv = np.searchsorted(v_edges_deg, vp, side="right") - 1
     valid = (r <= r_edges[-1]) & (irc >= 0) & (irc < n_r) & (irv >= 0) & (irv < n_v)
 
-    # bin_id packs (side, irc, irv) into one unique int: bin side offset by 1000 keeps
-    # "bin" (offset 0) and "bnn" (offset 1000) ids disjoint for any n_r*n_v < 1000
-    # (the standard 20x5=100 legacy grid included) -- and is stable/deterministic across
-    # calls, unlike an arbitrary enumeration order.
+    # bin_id packs (side, irc, irv) -- and, when not folding, hemisphere -- into one
+    # unique int. side offset by 1000 keeps "bin" (offset 0) and "bnn" (offset 1000)
+    # ids disjoint for any n_r*n_v < 1000 (the standard 20x5=100 legacy grid included);
+    # a further hemisphere offset of 2000 (only added when fold_major_axis=False) keeps
+    # the south half disjoint from both, rather than colliding with the folded (or
+    # north-only) ids -- stable/deterministic across calls, unlike an arbitrary
+    # enumeration order.
     side_offset = np.where(side > 0, 0, 1000)
-    bin_id_raw = side_offset + irc * n_v + irv
+    if fold_major_axis:
+        hemi_offset = np.zeros_like(side_offset)
+    else:
+        hemi_offset = np.where(hemisphere > 0, 0, 2000)
+    bin_id_raw = side_offset + hemi_offset + irc * n_v + irv
 
     bin_id_map = np.full((ny, nx), -1, dtype=int)
     bin_id_map[valid] = bin_id_raw[valid]
 
+    hemispheres = (1,) if fold_major_axis else (1, -1)
     bin_table = []
     for s, prefix in ((1, "bin"), (-1, "bnn")):
-        for ir in range(n_r):
-            r_mid = 0.5 * (r_edges[ir] + r_edges[ir + 1])
-            for iv in range(n_v):
-                bid = (0 if s > 0 else 1000) + ir * n_v + iv
-                n_spaxels = int(np.sum(bin_id_map == bid))
-                if n_spaxels == 0:
-                    continue
-                vp_mid = 0.5 * (v_edges_deg[iv] + v_edges_deg[iv + 1])
-                theta_mid = np.radians(vp_mid) if s > 0 else np.pi - np.radians(vp_mid)
-                bin_table.append(dict(
-                    bin_id=bid, bin_name=f"{prefix}{ir + 1:02d}{iv + 1:02d}",
-                    irc=ir + 1, irv=iv + 1, side=s, r_mid=r_mid, vp_mid=vp_mid,
-                    theta_mid=theta_mid, n_spaxels=n_spaxels,
-                ))
+        for h in hemispheres:
+            hemi_offset_h = 0 if (fold_major_axis or h > 0) else 2000
+            hemi_suffix = "" if (fold_major_axis or h > 0) else "s"
+            for ir in range(n_r):
+                r_mid = 0.5 * (r_edges[ir] + r_edges[ir + 1])
+                for iv in range(n_v):
+                    bid = (0 if s > 0 else 1000) + hemi_offset_h + ir * n_v + iv
+                    n_spaxels = int(np.sum(bin_id_map == bid))
+                    if n_spaxels == 0:
+                        continue
+                    vp_mid = 0.5 * (v_edges_deg[iv] + v_edges_deg[iv + 1])
+                    theta_mid = np.radians(vp_mid) if s > 0 else np.pi - np.radians(vp_mid)
+                    if h < 0:
+                        theta_mid = -theta_mid
+                    bin_table.append(dict(
+                        bin_id=bid, bin_name=f"{prefix}{ir + 1:02d}{iv + 1:02d}{hemi_suffix}",
+                        irc=ir + 1, irv=iv + 1, side=s, hemisphere=h, r_mid=r_mid, vp_mid=vp_mid,
+                        theta_mid=theta_mid, n_spaxels=n_spaxels,
+                    ))
 
     bin_table.sort(key=lambda d: d["bin_id"])
     return bin_id_map, bin_table

@@ -274,3 +274,130 @@ confirmed not to work, and reverted) -- `penalty_order=3`/fixed
 `lam` in 4096-32768 (2026-07-30's finding, unaffected by this) remains
 the right default regardless of how this identifiability question is
 eventually resolved.
+
+---
+
+## 2026-08-11: `lam_selection="aic_local"` now supports continuum-cofitting
+
+**Motivation.** Working through real N4751 full-galaxy outlier bins
+(`dev_notes/real_data_sigma/FINDINGS.md`'s edge-pedestal entries), a
+single population-wide fixed `lam` is a real compromise: strong enough
+to suppress the worst bins' divergent edge pedestals, but too strong for
+well-conditioned bins, which get over-smoothed (h3/h4 pulled toward or
+past zero, sigma biased narrow). Adaptive per-bin `lam` selection is the
+obvious fix for that tension, but was blocked entirely under
+continuum-cofitting -- `fit_losvd` silently fell back to a fixed `lam`
+with a `UserWarning` whenever `cfg.lam_selection="aic_local"` and
+`cfg.continuum_knots` were both set, since `estimate_m_eff_local` (the
+closed-form effective-df estimator the adaptive scan's own AIC criterion
+needs) only ever linearized the LOSVD block, ignoring the continuum's own
+contribution to the model and its own regularization.
+
+**The fix.** `C(lambda) = exp(continuum_basis @ continuum_coeffs)` is the
+same `exp`-link reparametrization as `b(v)` itself (this module's own
+docstring), so it linearizes the same way. `estimate_m_eff_local` now
+builds a *joint* Jacobian, stacking the LOSVD block (`diag(C) @ A_eff @
+diag(b) @ basis`) and the continuum block (`diag(A_eff @ b) @
+continuum_basis`, using the converged model = `C * (A_eff @ b)`), with a
+block-diagonal penalty (`lam*D2'D2` for the LOSVD block, `lam_c*D2_c'D2_c
++ ridge_c*I` for the continuum block -- both terms, matching this
+module's own "regularization has two independent terms" note above).
+`chi2` is now computed against the continuum-multiplied model too,
+matching what the fit itself actually minimizes (previously ignored `C`
+entirely, though this branch was never reachable before since the
+fallback always intercepted it first). The no-continuum path is
+untouched -- same code, same numbers, confirmed by a regression test
+(`test_m_eff_local_continuum_off_matches_pre_continuum_behavior`).
+`select_lambda_aic_local`/`fit_losvd` both thread `wave_fit` through to
+this new path; `bootstrap_losvd`'s own `reselect_lam` (previously forced
+off under continuum for the same reason) now works there too.
+`aic_regularization._edge_amplitude_frac` -- the specific diagnostic
+that actually flags a divergent edge pedestal -- needed no changes at
+all: it operates purely on `b`, never on the continuum.
+
+**Validation: modest mock sweep, N4751's own real sigma regime
+(400/550/700 km/s, S/N=60, `wiggle_scale=0.15`, 5 seeds each, true
+sinusoidal continuum distortion), fixed `penalty_order=3`/`lam=4096.0`
+vs. adaptive (mean absolute bias vs. the truth curve's own moments,
+not the nominal generator parameters):**
+
+| sigma | fixed \|bias_sigma\| | adaptive \|bias_sigma\| | fixed \|bias_h4\| | adaptive \|bias_h4\| | mean wall-time (fixed -> adaptive) |
+|---|---|---|---|---|---|
+| 400 | 13.44 km/s | 4.55 km/s | 0.0052 | 0.0100 | 6.4s -> 23.8s |
+| 550 | 50.03 km/s | 12.77 km/s | 0.0141 | 0.0109 | 11.1s -> 53.1s |
+| 700 | 153.45 km/s | 122.97 km/s | 0.0351 | 0.0341 | 21.6s -> 102.2s |
+
+Adaptive meaningfully reduces mean `|bias_sigma|` at every sigma tested
+(the exact regime N4751's own bins live in) -- 3-4x at 400/550, a more
+modest ~20% at 700 (consistent with 2026-08-XX's earlier finding, see
+`dev_notes/regularization/FINDINGS.md`, that fixed `lam=4096` is already
+close to a local optimum specifically at sigma~700). `h4` bias is a wash,
+not a clean win either way. Cost is real: consistently ~4-5x wall-clock
+per fit (each scanned `lam` candidate now costs a full 3-block
+alternation instead of 2-block).
+
+**Not a clean win, though -- the documented "lam-selection lottery" (this
+module's own module docstring, S/N 60-150) is real here too, and can make
+a fit *worse*, not just fail to help**: one sigma=700 seed picked `lam=8`
+(the adaptive scan's own noise-driven low-lam pick) and nearly doubled
+`bias_sigma` (238 -> 440) with `bias_h4` growing from 0.049 to 0.144.
+Fixed `lam=4096` never does this -- it's a known quantity, not a lottery.
+
+**Recommendation, not yet implemented in this package**: don't blanket-
+switch a whole population to adaptive-plus-continuum. Fit fixed first
+(cheap, predictable), flag bins whose fixed-lam fit shows a real,
+diagnosable problem (`edge_amplitude_frac(result["b"]) > `
+some threshold, e.g. `FitConfig.max_edge_amplitude_frac`'s own 0.01), and
+only pay adaptive's real cost -- and accept its real lottery risk -- on
+that flagged subset. See `EHT_Project/notebooks/N4751_notebooks/
+kinematics/n4751_full_galaxy_analysis.ipynb` for where this gets wired
+into an actual per-target run.
+
+## 2026-08-11 (later): the closed-form continuum m_eff's own designated ground-truth check was itself broken under continuum
+
+**Trigger**: while doing a final "did today's new code introduce bias"
+pass (user asked for the package to survive an expert statistician's
+scrutiny before public release), tried to actually run the validation
+`estimate_m_eff_local`'s own docstring calls for under continuum:
+comparing it against `estimate_m_eff` (the bootstrap reference
+implementation) at a shared `lam`. It could not run at all.
+
+**Two bugs, both silent, both in code that predates today's continuum
+extension** (so not a regression from today's work -- a pre-existing
+gap this session's own more thorough validation habit surfaced):
+
+1. `estimate_m_eff` had no `wave_fit` parameter -- its internal
+   `fit_losvd` calls raised `ValueError` the instant `cfg.continuum_knots`
+   was set, so this function (and `select_lambda_aic`, which calls it)
+   simply could not run under continuum at all, ever.
+2. `_model_prediction` (the model `estimate_m_eff`'s bootstrap resamples
+   around, and what its own `chi2` is computed against) was `sum(w[k] *
+   (A_stack_w[k] @ b))` -- the LOSVD-only model, never multiplied by the
+   fitted continuum `C`. Even with (1) fixed, this would have made
+   `estimate_m_eff`'s own `chi2`/bootstrap noise wrong under continuum,
+   silently (no crash, just a wrong number) -- the two estimators would
+   never have agreed even in a case where they should.
+
+**Fix**: `_model_prediction` now multiplies by `result["C"]` when
+present (`result.get("C") is not None` -- absent, not `None`, for a
+non-continuum fit, matching `fit_losvd`'s own convention);
+`estimate_m_eff`/`select_lambda_aic` both gained `wave_fit=None`,
+threaded to every internal `fit_losvd` call. New regression tests
+(`test_model_prediction_includes_continuum_factor`,
+`test_m_eff_local_chi2_matches_bootstrap_chi2_at_the_same_lam_under_
+continuum` -- the latter mirroring the no-continuum case's own existing
+exact-agreement check) -- both would have failed outright against the
+pre-fix code (the second couldn't even run). Full `test_aic_
+regularization.py`: 22 passed.
+
+**Real-world impact: none.** `estimate_m_eff`/`select_lambda_aic` are
+standalone validation utilities, never reachable through
+`FitConfig.lam_selection` (`"aic_local"`/`"fixed"` only) -- no real fit,
+in any notebook or test, was ever affected. The actual, concerning gap
+this closed was epistemic, not operational: the closed-form continuum
+extension (this file's own 2026-08-11 entry above) shipped without ever
+having been checked against the one reference its own docstring says is
+"its whole reason to exist" for the no-continuum case. Now that the
+check actually runs, it passes exactly, at the level of "the same
+deterministic problem's chi2 must agree bit-for-bit" -- not just "close
+enough."

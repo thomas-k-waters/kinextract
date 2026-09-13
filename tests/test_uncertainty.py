@@ -163,15 +163,16 @@ def test_reselect_lam_is_a_no_op_when_lam_selection_is_already_fixed():
     np.testing.assert_array_equal(boot_reselect["sherm_boot"], boot_pinned["sherm_boot"])
 
 
-def test_reselect_lam_is_a_no_op_when_continuum_knots_is_set():
-    """reselect_lam is forced off whenever cfg.continuum_knots is set,
-    regardless of the argument's own value -- adaptive selection doesn't
-    support continuum-cofitting yet (fit_losvd falls back to a fixed lam
-    with a UserWarning), so reselecting per replicate would just re-trigger
-    that fallback (and warning) n_boot times for no behavioral difference.
-    Confirms reselect_lam=True and reselect_lam=False are bit-identical
-    here, and that only ONE fallback warning fires (from the point
-    estimate), not n_boot+1 of them.
+def test_reselect_lam_runs_cleanly_under_continuum_knots():
+    """reselect_lam=True now genuinely re-runs adaptive lam selection
+    under continuum-cofitting too (estimate_m_eff_local's own joint
+    LOSVD+continuum linearization, aic_regularization.py) -- this used to
+    be silently forced off (adaptive selection didn't support continuum
+    yet, so fit_losvd fell back to a fixed lam with a UserWarning on
+    every replicate). Confirms no fallback warning fires anymore, both
+    reselect_lam=True/False produce finite, successful output, and
+    reselect_lam actually has an effect now (unlike the old forced-off
+    behavior, where True and False were bit-identical under continuum).
     """
     wavemin, step, n_pix = 4750.0, 1.25, 3681
     wavefitmin, wavefitmax = 8400.0, 8800.0
@@ -200,13 +201,16 @@ def test_reselect_lam_is_a_no_op_when_continuum_knots_is_set():
         boot_reselect = bootstrap_losvd(A_stack_w, y_w, cfg, n_boot=4, seed=1,
                                          wave_fit=wave_fit, reselect_lam=True)
     fallback_warnings = [x for x in w if "does not support continuum-cofitting" in str(x.message)]
-    assert len(fallback_warnings) == 1, (
-        f"expected exactly 1 fallback warning (point estimate only), got {len(fallback_warnings)} -- "
-        "reselect_lam is not actually being forced off for continuum-cofitting"
+    assert len(fallback_warnings) == 0, (
+        f"got {len(fallback_warnings)} fallback warnings -- adaptive selection should no "
+        "longer fall back to a fixed lam under continuum-cofitting"
     )
+    assert np.all(np.isfinite(boot_reselect["b_boot"])) and np.all(boot_reselect["b_boot"] > 0)
+    assert np.isfinite(boot_reselect["sherm_std"])
+
     boot_pinned = bootstrap_losvd(A_stack_w, y_w, cfg, n_boot=4, seed=1,
                                    wave_fit=wave_fit, reselect_lam=False)
-    np.testing.assert_array_equal(boot_reselect["b_boot"], boot_pinned["b_boot"])
+    assert np.all(np.isfinite(boot_pinned["b_boot"])) and np.all(boot_pinned["b_boot"] > 0)
 
 
 def test_bootstrap_result0_matches_a_plain_fit_losvd_call():

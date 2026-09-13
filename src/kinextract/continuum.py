@@ -39,11 +39,13 @@ already-normalized template library; not recommended for raw,
 non-normalized templates without independently re-checking agreement
 against a reference. Wavelength-dependent LSF matching is out of scope.
 
-**`fit_losvd_with_continuum` is a thin wrapper over
-`kinextract.multi_template.fit_losvd_basis`'s shared alternation
-driver** (given `continuum_basis`/`D2_c`), not a separately-maintained
-copy of the loop -- the tapered roughness penalty is applied in the
-LOSVD sub-fit like any other fit.
+**No separate continuum-cofitting entry point.**
+`kinextract.multi_template.fit_losvd`/`fit_losvd_basis` (the same shared
+alternation driver every other fit in this package uses) already builds
+this module's continuum basis/penalty internally whenever
+`cfg.continuum_knots` is set -- the tapered roughness penalty is applied
+in the LOSVD sub-fit like any other fit, not a separately-maintained copy
+of the loop.
 
 **Regularization has two independent terms, and both matter.** The
 continuum's curvature penalty (`lam_c * D2_c`) controls smoothness, but a
@@ -62,20 +64,25 @@ regime) -- treat continuum-cofitting as still maturing (one mock regime
 is not full production validation) rather than production-hardened, but
 no longer entirely unvalidated.
 
-**Penalty-order recommendation, updated by that sweep.** Adaptive
-`lam_selection` doesn't support continuum-cofitting yet, so a fixed `lam`
-is required either way. Earlier guidance (this module's docstring and
-`examples/notebooks/02_realistic_mock_fit.ipynb`'s own Section 8) pinned
-`penalty_order=2, lam=2.0` as "the documented-working combination" and
-called `penalty_order=3` untested. The sweep found the opposite: at every
-S/N tested (30/60/100), a fixed order-3 `lam` (4096-32768 range) beat
-order-2/lam=2.0 on both `sigma` bias and, especially, `h4` bias (order-2's
-h4 bias was 3-4x larger, at every S/N -- worse than not cofitting a
-continuum at all). `penalty_order=3, lam=4096.0` is now `FitConfig`'s own
-automatic fallback when adaptive lam selection is left on with
-continuum-cofitting active (see `multi_template.fit_losvd`'s own
-`UserWarning` for that fallback); `penalty_order=2, lam=2.0` still works
-if set explicitly but is no longer the default.
+**Penalty-order recommendation, updated by that sweep.** Earlier guidance
+(this module's docstring and `examples/notebooks/02_realistic_mock_fit.
+ipynb`'s own Section 8) pinned `penalty_order=2, lam=2.0` as "the
+documented-working combination" and called `penalty_order=3` untested.
+The sweep found the opposite: at every S/N tested (30/60/100), a fixed
+order-3 `lam` (4096-32768 range) beat order-2/lam=2.0 on both `sigma`
+bias and, especially, `h4` bias (order-2's h4 bias was 3-4x larger, at
+every S/N -- worse than not cofitting a continuum at all).
+`penalty_order=3, lam=4096.0` (`cfg.lam_selection="fixed"`) is the
+recommended starting point; `penalty_order=2, lam=2.0` still works if set
+explicitly but is no longer the default. `cfg.lam_selection="aic_local"`
+(adaptive, `FitConfig`'s own default) also supports continuum-cofitting
+now -- see `aic_regularization.estimate_m_eff_local`'s own docstring for
+the joint LOSVD+continuum linearization this relies on -- at a real,
+higher per-candidate cost (each scanned `lam` now costs a full 3-block
+alternation, not 2-block); its own validation record for the
+continuum case is newer and smaller than the fixed-`lam=4096` path's,
+so cross-check both before trusting adaptive selection for continuum
+targets in production.
 
 **`C`'s recovered absolute mean is not identifiable -- only its shape
 is.** Root-caused 2026-08-01 (`dev_notes/continuum/FINDINGS.md`): a true
@@ -98,15 +105,10 @@ recover.
 """
 from __future__ import annotations
 
-import time
-
 import jax
 import jax.numpy as jnp
 import numpy as np
 from scipy.optimize import minimize as scipy_minimize
-
-from .losvd import build_bspline_basis, difference_matrix
-from .multi_template import fit_losvd_basis
 
 
 def _neg_log_post_continuum(coeffs, M, y_w, basis, D2, lam_c, ridge_c):
@@ -261,57 +263,9 @@ def _default_continuum_starts(n_coef: int, coeffs0: np.ndarray | None) -> list[n
     return starts
 
 
-def fit_losvd_with_continuum(A_stack: np.ndarray, y_w: np.ndarray, wave_fit: np.ndarray,
-                              basis: np.ndarray, D2: np.ndarray,
-                              n_continuum_knots: int = 4, lam: float = 2.0, lam_c: float = 2.0,
-                              ridge_c: float = 0.1,
-                              ridge_lam: float = 1.0, w0: np.ndarray | None = None,
-                              max_iter: int = 15, tol: float = 1e-4, patience: int = 2) -> dict:
-    """Three-block alternating minimization -- LOSVD, template weights,
-    shared multiplicative continuum. See this module's own docstring for
-    the algorithm. A thin wrapper: builds the continuum's own B-spline
-    basis/penalty from `wave_fit`/`n_continuum_knots`, then calls
-    `kinextract.multi_template.fit_losvd_basis` with them -- the
-    actual three-block alternation lives there now (shared with the
-    plain two-block path), not duplicated here.
-
-    Parameters
-    ----------
-    A_stack, y_w, basis, D2, lam, ridge_lam : as in `fit_losvd_basis`.
-    wave_fit : ndarray, shape (n_pix,), the wavelength (not velocity)
-        grid `y_w`/`A_stack` correspond to -- used to build the
-        continuum's own B-spline basis.
-    n_continuum_knots : interior knots for the continuum spline. Default
-        4 -- deliberately much coarser than the LOSVD's own knot count.
-    lam_c : curvature penalty for the continuum block (see
-        `fit_continuum_block`).
-    ridge_c : direct L2 penalty on the continuum coefficients themselves
-        (see `fit_continuum_block`'s own docstring for why this exists).
-        Default 0.1.
-    w0 : optional starting weight vector (shape `(n_templates,)`).
-        Defaults to equal weights. Note: unlike `fit_losvd_basis`'s own
-        `w0_pool`, this takes a single vector, not a pool -- continuum-
-        cofitting does not multi-start over the weight vector.
-    max_iter, tol, patience : as in `fit_losvd_basis`'s alternation loop.
-
-    Returns
-    -------
-    dict with `b`, `w`, `C`, `coeffs` (LOSVD), `continuum_coeffs`,
-    `success`, `n_iter`, `objective`, `objective_history`, plus
-    `n_coef_continuum`, `lam_c`, and `runtime_s` (wall time for this call).
-    """
-    if max_iter < 1:
-        raise ValueError(f"max_iter must be >= 1 (got {max_iter}).")
-
-    n_templates = A_stack.shape[0]
-    basis_c, n_coef_c = build_bspline_basis(wave_fit, n_interior_knots=n_continuum_knots, degree=3)
-    dw = (wave_fit.max() - wave_fit.min()) / (n_continuum_knots + 1)
-    D2_c = difference_matrix(n_coef_c, order=2, dv=dw, dv_ref=dw)  # no cross-grid rescaling needed here
-    w0 = np.ones(n_templates) if w0 is None else np.asarray(w0, dtype=float)
-
-    t0 = time.perf_counter()
-    result = fit_losvd_basis(A_stack, y_w, basis, D2, lam=lam, ridge_lam=ridge_lam,
-                              w0_pool=[w0], max_iter=max_iter, tol=tol, patience=patience,
-                              continuum_basis=basis_c, D2_c=D2_c, lam_c=lam_c, ridge_c=ridge_c)
-    result["runtime_s"] = time.perf_counter() - t0
-    return result
+# Continuum-cofitting itself has no separate entry point -- call
+# `kinextract.multi_template.fit_losvd` (or `fit_losvd_robust`) with
+# `cfg.continuum_knots` set; both build this module's continuum basis/
+# penalty from `wave_fit`/`cfg.continuum_knots` internally and default to
+# the same single equal-weights start (`w0_pool=[np.ones(n_templates)]`)
+# a dedicated wrapper here would have added nothing over.

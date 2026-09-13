@@ -86,7 +86,7 @@ def test_parsimony_delta_prefers_largest_indistinguishable_lam(monkeypatch):
     # support warm_start_lam_grid's own coeffs-chaining or winner-confirmation logic
     # (unrelated to what this test checks -- pure tiebreak-selection logic) --
     # disable it explicitly rather than let the fake silently misrepresent it.
-    def fake_m_eff_local(A, y, cfg, lam, initial_coeffs=None):
+    def fake_m_eff_local(A, y, cfg, lam, initial_coeffs=None, wave_fit=None):
         m, chi2 = fake[lam]
         return m, chi2, None
 
@@ -126,7 +126,7 @@ def test_min_resolvable_sigma_guard_excludes_spike_candidates(monkeypatch):
     # support warm_start_lam_grid's own coeffs-chaining or winner-confirmation logic
     # (unrelated to what this test checks -- pure candidate-exclusion logic) --
     # disable it explicitly rather than let the fake silently misrepresent it.
-    def fake_m_eff_local(A, y, cfg_, lam, initial_coeffs=None):
+    def fake_m_eff_local(A, y, cfg_, lam, initial_coeffs=None, wave_fit=None):
         m, chi2, b = fake[lam]
         return m, chi2, {"b": b}
 

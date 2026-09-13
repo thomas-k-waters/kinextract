@@ -91,10 +91,18 @@ class AICSelectionResult:
 def _model_prediction(A_stack_w, result):
     w = result["w"]
     b = result["b"]
-    return sum(w[k] * (A_stack_w[k] @ b) for k in range(len(w)))
+    losvd_model = sum(w[k] * (A_stack_w[k] @ b) for k in range(len(w)))
+    # Continuum-cofitting: the fit itself minimizes against C*(A_eff@b), not
+    # A_eff@b alone (kinextract.continuum's own module docstring) -- `result["C"]`
+    # already lives on the same pixel grid as `A_stack_w`/`y_w` here (no clipped-
+    # pixel-subset mismatch to reconcile, unlike `full_pixel_model`'s own harder
+    # case), so a direct multiply is exact, not an approximation.
+    if result.get("C") is not None:
+        return result["C"] * losvd_model
+    return losvd_model
 
 
-def estimate_m_eff(A_stack_w, y_w, cfg, lam, n_boot=20, seed=0, L=None):
+def estimate_m_eff(A_stack_w, y_w, cfg, lam, n_boot=20, seed=0, L=None, wave_fit=None):
     """Bootstrap estimate of effective degrees of freedom at a fixed
     `lam` (Lipka & Thomas 2021 eq. 11).
 
@@ -115,6 +123,11 @@ def estimate_m_eff(A_stack_w, y_w, cfg, lam, n_boot=20, seed=0, L=None):
         that specific diagnostic. Default `None` (no deliberate
         mismatch).
 
+    `wave_fit` : required (raises via `fit_losvd`'s own contract) when
+        `cfg.continuum_knots is not None` -- threaded through to every
+        internal `fit_losvd` call (the original fit and every bootstrap
+        replicate), matching `estimate_m_eff_local`'s own contract.
+
     Returns `(m_eff, chi2, fit_result)`: `chi2` is the *original* fit's
     own whitened residual sum of squares at this `lam`; `fit_result` is
     its full `fit_losvd` output, returned so callers don't need to
@@ -127,7 +140,7 @@ def estimate_m_eff(A_stack_w, y_w, cfg, lam, n_boot=20, seed=0, L=None):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         cfg_lam = replace(cfg, lam=lam, lam_selection="fixed")
-    result = fit_losvd(A_stack_w, y_w, cfg_lam)
+    result = fit_losvd(A_stack_w, y_w, cfg_lam, wave_fit=wave_fit)
     model_fit = _model_prediction(A_stack_w, result)
     resid = y_w - model_fit
     chi2 = float(np.sum(resid ** 2))
@@ -138,14 +151,14 @@ def estimate_m_eff(A_stack_w, y_w, cfg, lam, n_boot=20, seed=0, L=None):
         z = rng.standard_normal(len(y_w))
         noise = L @ z if L is not None else z
         y_boot = model_fit + noise
-        boot_result = fit_losvd(A_stack_w, y_boot, cfg_lam)
+        boot_result = fit_losvd(A_stack_w, y_boot, cfg_lam, wave_fit=wave_fit)
         model_boot = _model_prediction(A_stack_w, boot_result)
         cov_sum += float(np.sum((model_boot - model_fit) * (y_boot - model_fit)))
     m_eff = cov_sum / n_boot
     return m_eff, chi2, result
 
 
-def estimate_m_eff_local(A_stack_w, y_w, cfg, lam, initial_coeffs=None):
+def estimate_m_eff_local(A_stack_w, y_w, cfg, lam, initial_coeffs=None, wave_fit=None):
     """Closed-form *local* approximation to `estimate_m_eff`'s bootstrap
     quantity, via the classical ridge-regression/smoothing-spline
     effective-degrees-of-freedom formula (Hastie & Tibshirani -- the
@@ -163,24 +176,57 @@ def estimate_m_eff_local(A_stack_w, y_w, cfg, lam, initial_coeffs=None):
     computed as a single `n_coef x n_coef` linear solve -- no refitting
     at all, versus `estimate_m_eff`'s `n_boot` extra nonlinear fits.
 
+    **Continuum-cofitting support (`cfg.continuum_knots is not None`).**
+    `C(lambda) = exp(continuum_basis @ continuum_coeffs)` is the *same*
+    exp-link reparametrisation as `b(v)` (see `kinextract.continuum`'s own
+    module docstring), so it linearizes the same way:
+    `d(C)/d(continuum_coeffs) = diag(C) @ continuum_basis`. With the model
+    `y ~ C(lambda) * (A_eff @ b)`, holding the converged `w` fixed (as the
+    no-continuum case already does for the LOSVD block), the *joint*
+    Jacobian stacks both blocks:
+
+        X_b = diag(C) @ A_eff @ diag(b) @ basis            (LOSVD block)
+        X_C = diag(A_eff @ b) @ continuum_basis             (continuum block,
+                                                               using the
+                                                               *converged*
+                                                               model = C * (A_eff@b))
+
+    and the penalty becomes block-diagonal, `lam` on the LOSVD block's
+    `D2'D2` and `(lam_c*D2_c'D2_c + ridge_c*I)` on the continuum block's
+    own two-term penalty (`kinextract.continuum`'s own module docstring
+    explains why both terms are required there -- a pure curvature
+    penalty has an exact null space in the constant/linear directions
+    that only `ridge_c` closes). `df = trace[(X'X + Penalty)^-1 X'X]`
+    exactly as before, just over the stacked `(n_coef_b + n_coef_c)`
+    space. `chi2` is computed against the continuum-multiplied model,
+    not `A_eff @ b` alone, to match what the fit itself actually
+    minimizes. Requires `wave_fit` (raises `ValueError` otherwise, same
+    contract as `fit_losvd`).
+
     **What this does and does not capture, honestly.** This measures the
-    *local* flexibility of the LOSVD spline coefficients alone, holding
-    the converged template weights `w` fixed at their point-estimate
-    value. `estimate_m_eff`'s bootstrap measures the flexibility of the
-    *whole* alternating (LOSVD + weight) fit, since weights are also
+    *local* flexibility of the LOSVD (and, when active, continuum) spline
+    coefficients, holding the converged template weights `w` fixed at
+    their point-estimate value. `estimate_m_eff`'s bootstrap measures the
+    flexibility of the *whole* alternating fit, since weights are also
     re-solved on every bootstrap replicate -- these are not guaranteed to
     be the same quantity, only related ones. Also ignores which
     non-negativity constraints on `w` are active/binding, treating the
     linearization as if `w` were fixed and unconstrained. Validate
     against `estimate_m_eff` before trusting this as a substitute, not
     just a curiosity -- that comparison is this function's whole reason
-    to exist.
+    to exist. The continuum extension has its own validation record --
+    see `dev_notes/continuum/FINDINGS.md`'s adaptive-lam entry -- separate
+    from (and newer than) the no-continuum path's own long-standing one.
 
     `initial_coeffs` : optional single starting guess in LOSVD coefficient
     space, passed straight through to `fit_losvd` -- see its own
     docstring. Used by `select_lambda_aic_local`'s `warm_start_lam_grid`
     option to chain each grid point's fit from its neighbour's converged
     solution instead of cold-starting every point independently.
+
+    `wave_fit` : the observed wavelength grid `A_stack_w`/`y_w` correspond
+    to. Required (and only used) if `cfg.continuum_knots is not None`,
+    exactly as for `kinextract.multi_template.fit_losvd`.
 
     Returns `(m_eff_local, chi2, fit_result)`, same shape as
     `estimate_m_eff`'s return (minus the bootstrap cost).
@@ -200,7 +246,7 @@ def estimate_m_eff_local(A_stack_w, y_w, cfg, lam, initial_coeffs=None):
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         cfg_lam = replace(cfg, lam=lam, lam_selection="fixed")
-    result = fit_losvd(A_stack_w, y_w, cfg_lam, initial_coeffs=initial_coeffs)
+    result = fit_losvd(A_stack_w, y_w, cfg_lam, wave_fit=wave_fit, initial_coeffs=initial_coeffs)
     b = result["b"]
     w = result["w"]
 
@@ -212,9 +258,33 @@ def estimate_m_eff_local(A_stack_w, y_w, cfg, lam, initial_coeffs=None):
 
     A_eff = sum(w[k] * A_stack_w[k] for k in range(len(w)))  # (n_pix, n_bins)
     J_b = b[:, None] * basis  # (n_bins, n_coef): d(b)/d(coeffs) = diag(b) @ basis
-    X = A_eff @ J_b  # (n_pix, n_coef), the local linear design in coeffs-space
+    X_b = A_eff @ J_b  # (n_pix, n_coef), the local linear design in LOSVD-coeffs-space
 
-    XtX = X.T @ X
+    if cfg_lam.continuum_knots is not None:
+        # No wave_fit-is-None check here -- the fit_losvd call above already raised
+        # (with an equivalent message) before this point if continuum_knots is set
+        # and wave_fit wasn't provided.
+        C = result["C"]
+        continuum_basis, n_coef_c = build_bspline_basis(
+            wave_fit, n_interior_knots=cfg_lam.continuum_knots, degree=3)
+        dw = (wave_fit.max() - wave_fit.min()) / (cfg_lam.continuum_knots + 1)
+        D2_c = difference_matrix(n_coef_c, order=2, dv=dw, dv_ref=dw)
+
+        model_fit = C * (A_eff @ b)  # the converged, continuum-multiplied model
+        X_b_c = C[:, None] * X_b  # continuum multiplies the LOSVD block's own design too
+        X_C = model_fit[:, None] * continuum_basis  # d(model)/d(continuum_coeffs)
+        X = np.concatenate([X_b_c, X_C], axis=1)  # (n_pix, n_coef + n_coef_c)
+
+        XtX = X.T @ X
+        Penalty = np.zeros_like(XtX)
+        Penalty[:n_coef, :n_coef] = lam * (D2.T @ D2)
+        Penalty[n_coef:, n_coef:] = cfg_lam.lam_c * (D2_c.T @ D2_c) + cfg_lam.ridge_c * np.eye(n_coef_c)
+        M = XtX + Penalty
+        df_local = float(np.trace(np.linalg.lstsq(M, XtX, rcond=None)[0]))
+        chi2 = float(np.sum((y_w - model_fit) ** 2))
+        return df_local, chi2, result
+
+    XtX = X_b.T @ X_b
     DtD = D2.T @ D2
     M = XtX + lam * DtD
     # `np.linalg.solve` raises LinAlgError if M is exactly singular -- a real,
@@ -231,7 +301,7 @@ def estimate_m_eff_local(A_stack_w, y_w, cfg, lam, initial_coeffs=None):
     return df_local, chi2, result
 
 
-def _edge_amplitude_frac(b, n_edge=5):
+def edge_amplitude_frac(b, n_edge=5):
     """Largest LOSVD amplitude within `n_edge` bins of either end of the
     velocity grid, as a fraction of the LOSVD's own peak.
 
@@ -248,11 +318,16 @@ def _edge_amplitude_frac(b, n_edge=5):
 def select_lambda_aic_local(A_stack_w, y_w, cfg, lam_grid, w_m=2.0, verbose=False,
                             parsimony_delta=0.0, min_resolvable_sigma_frac=0.0,
                             max_edge_amplitude_frac=0.0, warm_start_lam_grid=True,
-                            self_normalize_lam_grid=False):
+                            self_normalize_lam_grid=False, wave_fit=None):
     """Same criterion and interface as `select_lambda_aic`, but using
     `estimate_m_eff_local`'s closed-form df instead of bootstrap -- no
     `n_boot`/`seed` needed since there's no randomness. Cross-check
     against `select_lambda_aic` before trusting this in place of it.
+
+    `wave_fit` : the observed wavelength grid `A_stack_w`/`y_w` correspond
+    to. Required (and only used) if `cfg.continuum_knots is not None` --
+    forwarded to `estimate_m_eff_local` at every grid point, exactly as
+    for `kinextract.multi_template.fit_losvd`.
 
     `warm_start_lam_grid` : if True (the default), each grid point after
         the first is seeded (via `estimate_m_eff_local`'s `initial_coeffs`)
@@ -334,9 +409,11 @@ def select_lambda_aic_local(A_stack_w, y_w, cfg, lam_grid, w_m=2.0, verbose=Fals
 
         Crucially it is *inert* where there is no pedestal. On the NB02
         mock (+-660 km/s grid, sigma 90) every candidate passes, nothing is
-        excluded, and results are unchanged -- unlike the wing-mass and
-        `lam_wing` penalties, which fixed real data only at strengths that
-        destroyed mocks. If every candidate is excluded, the largest lam is
+        excluded, and results are unchanged -- unlike earlier wing-mass and
+        per-row wing-taper penalties tried for the same problem, which
+        fixed real data only at strengths that destroyed mocks (since
+        removed; see `dev_notes/PORT_STATUS.md`). If every candidate is
+        excluded, the largest lam is
         used. Default 0.0 (off); `FitConfig.max_edge_amplitude_frac`
         supplies 0.01 on the mainline path.
 
@@ -372,7 +449,8 @@ def select_lambda_aic_local(A_stack_w, y_w, cfg, lam_grid, w_m=2.0, verbose=Fals
     prev_coeffs = None
     for i, lam in enumerate(lam_grid):
         seed = prev_coeffs if warm_start_lam_grid else None
-        m_eff, chi2, result = estimate_m_eff_local(A_stack_w, y_w, cfg, lam, initial_coeffs=seed)
+        m_eff, chi2, result = estimate_m_eff_local(A_stack_w, y_w, cfg, lam, initial_coeffs=seed,
+                                                    wave_fit=wave_fit)
         chi2_arr[i] = chi2
         m_eff_arr[i] = m_eff
         fits[i] = result
@@ -384,7 +462,7 @@ def select_lambda_aic_local(A_stack_w, y_w, cfg, lam_grid, w_m=2.0, verbose=Fals
                 valid[i] = False
                 reason[i] = "sub-knot-scale sigma"
         if max_edge_amplitude_frac > 0.0 and valid[i]:
-            edge = _edge_amplitude_frac(result["b"])
+            edge = edge_amplitude_frac(result["b"])
             if not (np.isfinite(edge) and edge <= max_edge_amplitude_frac):
                 valid[i] = False
                 reason[i] = f"edge pedestal {edge * 100:.1f}% of peak"
@@ -433,7 +511,7 @@ def select_lambda_aic_local(A_stack_w, y_w, cfg, lam_grid, w_m=2.0, verbose=Fals
     if (warm_start_lam_grid and not cfg.losvd_single_start
             and best_fit is not None and best_fit.get("losvd_objective_gap") is None):
         m_eff_confirm, chi2_confirm, best_fit_confirm = estimate_m_eff_local(
-            A_stack_w, y_w, cfg, float(lam_grid[best_idx]), initial_coeffs=None)
+            A_stack_w, y_w, cfg, float(lam_grid[best_idx]), initial_coeffs=None, wave_fit=wave_fit)
         chi2_arr[best_idx] = chi2_confirm
         m_eff_arr[best_idx] = m_eff_confirm
         criterion[best_idx] = chi2_confirm + w_m * m_eff_confirm
@@ -446,7 +524,8 @@ def select_lambda_aic_local(A_stack_w, y_w, cfg, lam_grid, w_m=2.0, verbose=Fals
     )
 
 
-def select_lambda_aic(A_stack_w, y_w, cfg, lam_grid, w_m=2.0, n_boot=20, seed=0, verbose=False, L=None):
+def select_lambda_aic(A_stack_w, y_w, cfg, lam_grid, w_m=2.0, n_boot=20, seed=0, verbose=False, L=None,
+                       wave_fit=None):
     """Scan `lam_grid`, compute `chi^2 + w_m*m_eff` at each value (Lipka
     & Thomas 2021 eq. 14; `w_m=2.0` is their calibrated final choice --
     eq. 13 / Thomas & Lipka 2022), and return an `AICSelectionResult`
@@ -455,12 +534,17 @@ def select_lambda_aic(A_stack_w, y_w, cfg, lam_grid, w_m=2.0, n_boot=20, seed=0,
     `L` : passed straight through to `estimate_m_eff` -- see its own
     docstring; not needed for the mainline correlated-noise case, only for
     deliberately testing an assumed-vs-true covariance mismatch.
+
+    `wave_fit` : passed straight through to `estimate_m_eff` -- required
+    when `cfg.continuum_knots is not None`, same contract as
+    `select_lambda_aic_local`.
     """
     lam_grid = np.asarray(lam_grid, dtype=float)
     chi2_arr = np.empty(len(lam_grid))
     m_eff_arr = np.empty(len(lam_grid))
     for i, lam in enumerate(lam_grid):
-        m_eff, chi2, _ = estimate_m_eff(A_stack_w, y_w, cfg, lam, n_boot=n_boot, seed=seed + i, L=L)
+        m_eff, chi2, _ = estimate_m_eff(A_stack_w, y_w, cfg, lam, n_boot=n_boot, seed=seed + i, L=L,
+                                         wave_fit=wave_fit)
         chi2_arr[i] = chi2
         m_eff_arr[i] = m_eff
         if verbose:

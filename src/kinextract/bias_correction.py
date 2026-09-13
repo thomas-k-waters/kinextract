@@ -33,7 +33,8 @@ S/N).
 representative multi-template mixture**
 (`calibration_data/regularization_bias_emiles_multitemplate.txt`, built by
 `dev_notes/calibration/build_emiles_calibration.py` via
-`kinextract.calibrate_bias.run_calibration_sweep` against a 40-template
+the package's own (since-removed, orphaned-code cleanup) calibration-sweep
+tool against a 40-template
 E-MILES subset spanning ages 0.1-14 Gyr and [M/H] -1.49 to +0.40, h3=h4=0
 truth, V=0, MUSE pixel sampling, n=30 seeds/cell, sigma in 20-400 km/s x
 S/N in 10-200).
@@ -49,12 +50,12 @@ one replaced, and why).
 **Regularization bias is calibration-specific, not a universal constant --
 if your own template library/mixture/instrument differs meaningfully from
 the shipped E-MILES default, build your own table.** This is not a
-special/advanced path: `calibrate_bias.run_calibration_sweep` was already
+special/advanced path: the sweep tool this table was built from was already
 fully template-library-agnostic before the E-MILES default existed, and
 `dev_notes/calibration/build_emiles_calibration.py` is the literal, adaptable
-recipe used to build the shipped table -- swap its template-loading
-function for your own library (a different E-MILES subset, an HST/STIS
-LSF-matched grid, a different star catalog) and rerun. Pass the result as
+recipe used to build the shipped table -- rebuild your own calibration sweep
+for a different library (a different E-MILES subset, an HST/STIS
+LSF-matched grid, a different star catalog) and pass the result as
 `bias_calibration=...` rather than trusting the shipped table uncritically
 for a materially different setup.
 
@@ -69,7 +70,7 @@ scope, not more:**
 - Calibrated at V=0 truth, MUSE pixel sampling (step=1.25 Angstrom/pix),
   and ONE fixed E-MILES template mixture. Applying it to strongly
   non-zero V, non-MUSE pixel sampling, or a template shape very different
-  from E-MILES SSPs (see `calibrate_bias`'s module docstring) is an
+  from E-MILES SSPs is an
   extrapolation beyond what's actually validated -- treat results there as
   provisional, and prefer building your own calibration when in doubt.
 - Interpolation is 2-D linear over (recovered sigma, S/N) via
@@ -140,8 +141,8 @@ def _parse_calibration_rows(path: str) -> np.ndarray:
     `load_per_lam_calibration_table`: returns the raw
     `(sigma_true, snr, sig_bias_mean, sig_bias_std, h4_mean, h4_std, lam,
     m_eff_mean, h3_mean, h3_std)` array parsed from a calibration sweep
-    file (see `calibrate_bias.save_calibration_table` for the on-disk
-    format). `lam`/`m_eff_mean` are `nan` for the original 10-column
+    file (the format this package's own, since-removed calibration-sweep
+    tool wrote -- see `dev_notes/calibration/build_emiles_calibration.py`). `lam`/`m_eff_mean` are `nan` for the original 10-column
     format (no `lam_grid` varied when that table was built); `h3_mean`/
     `h3_std` are `nan` for any file written before those became two more
     trailing columns (13-column format or earlier).
@@ -205,8 +206,8 @@ def load_calibration_table(path: str | None = None) -> BiasCalibration:
     """Parse a calibration sweep file into a single 2-D `(sigma, S/N)`
     `BiasCalibration`.
 
-    Expected whitespace-delimited columns (see `calibrate_bias.
-    save_calibration_table`): `sigma S/N n V_bias_mean V_bias_std
+    Expected whitespace-delimited columns (the format this package's own,
+    since-removed calibration-sweep tool wrote): `sigma S/N n V_bias_mean V_bias_std
     sig_bias_mean sig_bias_std sig_bias_pct h4_mean h4_std` (the original
     10-column format), optionally followed by 3 more columns `lam
     m_eff_mean m_eff_std` for a table that also recorded `lam`/`m_eff` per
@@ -498,8 +499,7 @@ def correct_losvd(v_grid: np.ndarray, vherm: float, sherm: float, h3: float, h4:
     stayed positive into going negative near the core edges -- observed
     directly on real fits. Clipping matches the convention already used
     everywhere else in this package a Gauss-Hermite curve is treated as a
-    final density (`ablation.py`, `calibrate_bias.py`,
-    `shape_aware_taper_correction`'s own `b_ref`); this was the one
+    final density (`shape_aware_taper_correction`'s own `b_ref`); this was the one
     reconstruction site that hadn't been brought in line with it. Not
     renormalized after clipping (the point is a minimal correction to a
     physically-required constraint, not a change to the reported

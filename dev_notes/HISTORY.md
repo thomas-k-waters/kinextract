@@ -99,9 +99,9 @@ kept as a record so it isn't retried.
   `max_edge_amplitude_frac` exists specifically to keep the LOSVD fit
   robust to this fact rather than requiring chi2_red to be forced to ~1
   first. Relevant before trusting any residual-based cleaning scheme
-  (`fit_losvd_clean`, `detect_emission_from_residual`, or ZAP -- see
-  below) on real data: check chi2_red first, and don't expect it to
-  reach 1.
+  (`fit_losvd_clean`, `fit_losvd_inflate`, `detect_emission_from_residual`,
+  or ZAP -- see below) on real data: check chi2_red first, and don't
+  expect it to reach 1.
 - **MOSTLY CLOSED, real-data validated** — [zap/FINDINGS.md](zap/FINDINGS.md)
   (2026-08-04) — real-data ZAP (Zurich Atmosphere Purge) sky-residual
   cleaning, for both NGC 5102 (WFM) and NGC 4751 (NFM). The original
@@ -122,6 +122,27 @@ kept as a record so it isn't retried.
   flagged windows/apertures — 2-3 window/aperture combinations per
   target still come out mildly worse, reported honestly, not yet
   root-caused further. Not yet wired into any real-data notebook.
+- **CLOSED, promoted to default** —
+  [variance_inflation/FINDINGS.md](variance_inflation/FINDINGS.md)
+  (2026-08-05) — implemented the "rescale variance before clipping"
+  hierarchy `PARAMETER_GUIDE.md` had stated but never actually built:
+  `fit_losvd_inflate`, per-spectrum residual-based error inflation
+  (floored at 1x, capped, refit against the inflated errors), with
+  `fit_losvd_clean` demoted to a loose cleanup layer underneath rather
+  than the primary defense. ZAP was tried first for this same problem on
+  NGC 4751 and ruled out (see above) -- no dedicated sky exposure or
+  blank-sky region for its SVD eigenbasis to train on. Real full-field
+  validation (113 NGC 4751 bins): median whitened RMS 1.41 → 0.96, bins
+  tripping `fit_losvd_clean`'s own 10%-clipped sanity warning 22/113 →
+  0/113, recovered kinematics essentially unchanged from the previous
+  default. **Not yet shown**: a reduction in absolute kinematic bias
+  (small-sample injection test found comparable bias for both methods) --
+  this is a calibration/robustness result, not yet a demonstrated
+  accuracy one. Now the package default (`PARAMETER_GUIDE.md`,
+  `07_full_galaxy_analysis.ipynb`); `04_template_calibration.ipynb`
+  deliberately left on `fit_losvd_clean` (full-grid per-bin fits there
+  are far more expensive to re-validate, for a template-selection step
+  not obviously sensitive to the same issue).
 - **OPEN** — Every chi2, AIC criterion, and bootstrap variance in this project
   assumes independent per-pixel noise; MUSE spectra are
   resampled/drizzled during reduction, a known source of pixel-to-pixel
@@ -196,6 +217,22 @@ kept as a record so it isn't retried.
   Adaptive (`aic_local`) lam selection still does not support continuum-
   cofitting (falls back to fixed lam with a warning) -- not yet fixed,
   tracked as a real gap, not just an unvalidated corner.
+
+## Legacy binning
+
+- **CLOSED (fidelity check), OPEN (adoption)** — [legacy_binning/FINDINGS.md](legacy_binning/FINDINGS.md)
+  — `assign_legacy_dartboard_bins` checked line-by-line against
+  `sco_framework/modprogs/plotbin3.f`'s own source for the first time:
+  confirmed a faithful port, no discrepancy found. Two new features:
+  `fold_major_axis` (default `True`, preserves existing behavior; `False`
+  keeps a bin's north/south halves separate instead of merging them) and
+  `combine_bin_spectrum_robust` (a `MuseCube`-native port of `imcmb.f`'s
+  own formal-plus-empirical-in-quadrature error budget, which self-corrects
+  for MUSE's spatially-correlated noise without needing the correlation
+  length measured in advance -- validated on synthetic correlated noise:
+  4.5x under-estimate from the naive independent-noise formula, ~19% from
+  this one). Not yet wired into any real-data notebook or
+  `kinematicextraction` as the default.
 
 ## pPXF comparison
 

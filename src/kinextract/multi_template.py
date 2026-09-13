@@ -29,21 +29,16 @@ design matrix's condition number, not an optimizer failure.
 from __future__ import annotations
 
 import dataclasses
-import warnings
 
 import numpy as np
 from scipy.optimize import nnls
 
 from .config import FitConfig
-from .gh_moments import compute_direct_moments
 from .losvd import (
     build_bspline_basis,
-    core_width_sigma,
     default_initial_coeffs,
     difference_matrix,
     fit_log_spline_map,
-    penalty_row_velocities,
-    tapered_lam_vector,
 )
 
 
@@ -75,8 +70,7 @@ def _alternate_once(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
     iteration, not just the first, disabled warm-starting entirely and
     made this ablation flag slower than the thing it was meant to be a
     faster alternative to). Exists for isolating the multi-start search's
-    own marginal effect on recovered bias (see
-    `kinextract`'s ablation-testing tooling) -- not recommended for
+    own marginal effect on recovered bias -- not recommended for
     real fits, since `fit_log_spline_map`'s own docstring documents a real,
     otherwise-invisible failure mode (~1-in-150 fits landing in a
     meaningfully-worse local minimum) that multi-start exists to catch.
@@ -86,11 +80,9 @@ def _alternate_once(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
     when `continuum_basis` is given, this becomes the three-block
     `(b, w, C)` alternation from `kinextract.continuum` -- see that
     module's own docstring for the algorithm, and `fit_continuum_block`'s
-    own docstring specifically for why `ridge_c` exists. This is the
-    single shared implementation both `fit_losvd_basis` (continuum off)
-    and `kinextract.continuum.fit_losvd_with_continuum` (continuum
-    on) call, rather than two separately-maintained copies of the same
-    loop structure.
+    own docstring specifically for why `ridge_c` exists. `fit_losvd`
+    reaches this same path automatically whenever `cfg.continuum_knots`
+    is set -- there is no separate continuum-cofitting entry point.
 
     `initial_coeffs` (default `None`): seeds the LOSVD warm-start slot
     before iteration 0, letting a caller who already has a nearby-lam or
@@ -291,9 +283,10 @@ def fit_losvd_basis(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
         `continuum_basis=None`, off -- reproduces the plain two-block
         fit exactly). When given, adds a third alternating block that
         jointly recovers a shared multiplicative continuum -- see
-        `kinextract.continuum` for the algorithm and
-        `fit_losvd_with_continuum` for the convenience wrapper that builds
-        `continuum_basis`/`D2_c` from a wavelength grid automatically.
+        `kinextract.continuum` for the algorithm; prefer calling
+        `fit_losvd` with `cfg.continuum_knots` set, which builds
+        `continuum_basis`/`D2_c` from `wave_fit` automatically, rather
+        than building them by hand for this lower-level function.
         `ridge_c` (default 0.1) is a direct L2 penalty on the
         continuum coefficients -- see `continuum.fit_continuum_block`'s
         own docstring for why it exists.
@@ -395,10 +388,10 @@ def fit_losvd(A_stack: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
     per fit via `aic_regularization.select_lambda_aic_local` before doing
     anything else below, then treated exactly like an explicitly-passed
     fixed `lam` for the rest of this call -- see `FitConfig.lam_selection`'s
-    own help text for why this is the default and what it costs. Falls
-    back to `cfg.lam` (with a `UserWarning`) if `cfg.continuum_knots` is
-    set, since adaptive selection doesn't support continuum-cofitting yet.
-    The `lam` actually used is always reported back as `result['lam_used']`.
+    own help text for why this is the default and what it costs. Supports
+    continuum-cofitting (`cfg.continuum_knots` set) -- `estimate_m_eff_local`'s
+    own docstring has the joint LOSVD+continuum linearization this relies
+    on. The `lam` actually used is always reported back as `result['lam_used']`.
 
     `initial_coeffs` : optional single starting guess in LOSVD coefficient
     space, passed straight through to the fixed-`lam` fit at the end of
@@ -418,48 +411,29 @@ def fit_losvd(A_stack: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
 
     lam_selection_result = None
     if cfg.lam_selection == "aic_local":
-        if cfg.continuum_knots is not None:
-            warnings.warn(
-                "fit_losvd: cfg.lam_selection='aic_local' (the default) does not support "
-                "continuum-cofitting yet (cfg.continuum_knots is set) -- falling back to a "
-                "fixed lam for this fit"
-                + (", using penalty_order=3, lam=4096.0 (dev_notes/continuum/FINDINGS.md's "
-                   "2026-07-30 multi-seed sweep: this beats the old penalty_order=2, lam=2.0 "
-                   "combination on both sigma and h4 bias at every S/N tested) rather than "
-                   "cfg.lam's own literal value (2.0, calibrated for penalty_order=2, not this "
-                   "path's now-default penalty_order=3)"
-                   if cfg.penalty_order == 3 and cfg.lam == 2.0 else
-                   f" (cfg.lam={cfg.lam}, penalty_order={cfg.penalty_order}, as explicitly set)")
-                + ". Set lam_selection='fixed' explicitly to silence this warning.",
-                UserWarning, stacklevel=2,
-            )
-            if cfg.penalty_order == 3 and cfg.lam == 2.0:
-                cfg = dataclasses.replace(cfg, lam=4096.0)
-        else:
-            # Local import: aic_regularization.py imports fit_losvd from this module at
-            # module level, so a top-level import here would be circular -- same pattern
-            # continuum.py/_alternate_once already use for fit_continuum_block.
-            from .aic_regularization import select_lambda_aic_local
-            # parsimony_delta=2.0 and the sub-knot-sigma candidate guard for
-            # the order-3 penalty only -- see select_lambda_aic_local's own
-            # docstring for the evidence and for why both stay OFF for order 2.
-            is_d3 = cfg.penalty_order == 3
-            lam_selection_result = select_lambda_aic_local(
-                A_stack, y_w, cfg, np.asarray(cfg.resolved_lam_grid()),
-                parsimony_delta=2.0 if is_d3 else 0.0,
-                min_resolvable_sigma_frac=0.5 if is_d3 else 0.0,
-                max_edge_amplitude_frac=cfg.max_edge_amplitude_frac,
-                warm_start_lam_grid=True,
-                self_normalize_lam_grid=cfg.self_normalize_lam_grid)
-            cfg = dataclasses.replace(cfg, lam=lam_selection_result.best_lam, lam_selection="fixed")
+        # Local import: aic_regularization.py imports fit_losvd from this module at
+        # module level, so a top-level import here would be circular -- same pattern
+        # continuum.py/_alternate_once already use for fit_continuum_block.
+        from .aic_regularization import select_lambda_aic_local
+        # parsimony_delta=2.0 and the sub-knot-sigma candidate guard for
+        # the order-3 penalty only -- see select_lambda_aic_local's own
+        # docstring for the evidence and for why both stay OFF for order 2.
+        is_d3 = cfg.penalty_order == 3
+        lam_selection_result = select_lambda_aic_local(
+            A_stack, y_w, cfg, np.asarray(cfg.resolved_lam_grid()),
+            parsimony_delta=2.0 if is_d3 else 0.0,
+            min_resolvable_sigma_frac=0.5 if is_d3 else 0.0,
+            max_edge_amplitude_frac=cfg.max_edge_amplitude_frac,
+            warm_start_lam_grid=True,
+            self_normalize_lam_grid=cfg.self_normalize_lam_grid,
+            wave_fit=wave_fit)
+        cfg = dataclasses.replace(cfg, lam=lam_selection_result.best_lam, lam_selection="fixed")
 
-    # The selection scan already fit at every candidate lam (with the same
-    # taper machinery, since it goes through this same function), so the fit
-    # at the winning lam is reusable rather than repeated. Not reusable when
-    # continuum-cofitting, which selection does not support.
+    # The selection scan already fit at every candidate lam, so the fit at the
+    # winning lam is reusable rather than repeated -- including under continuum-
+    # cofitting now that estimate_m_eff_local's own joint linearization supports it.
     reusable_selection_fit = None
-    if (lam_selection_result is not None and lam_selection_result.best_fit is not None
-            and cfg.continuum_knots is None):
+    if lam_selection_result is not None and lam_selection_result.best_fit is not None:
         reusable_selection_fit = lam_selection_result.best_fit
 
     v_grid = cfg.build_velocity_grid()
@@ -467,7 +441,6 @@ def fit_losvd(A_stack: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
     basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_knots, degree=cfg.degree)
     dv = (cfg.vmax - cfg.vmin) / (n_knots + 1)
     D = difference_matrix(n_coef, order=cfg.penalty_order, dv=dv, dv_ref=cfg.knot_spacing_kms)
-    row_v = penalty_row_velocities(v_grid, n_knots, cfg.penalty_order, degree=cfg.degree)
 
     continuum_basis = D2_c = None
     if cfg.continuum_knots is not None:
@@ -475,48 +448,13 @@ def fit_losvd(A_stack: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         dw = (wave_fit.max() - wave_fit.min()) / (cfg.continuum_knots + 1)
         D2_c = difference_matrix(n_coef_c, order=2, dv=dw, dv_ref=dw)
 
-    def _fit_at(lam_vec):
-        return fit_losvd_basis(A_stack, y_w, basis, D, lam=lam_vec, ridge_lam=cfg.ridge_lam,
-                                losvd_single_start=cfg.losvd_single_start,
-                                continuum_basis=continuum_basis, D2_c=D2_c, lam_c=cfg.lam_c,
-                                ridge_c=cfg.ridge_c, initial_coeffs=initial_coeffs)
-
-    # Self-consistent wing taper. Its onset is defined in units of the LOSVD's
-    # own width, which is not known before the fit -- so fit, measure the
-    # width, rebuild the taper around it, refit. Converges in a couple of
-    # rounds because the width estimate is only used to place a taper onset,
-    # not as a fitted parameter. See `losvd.tapered_lam_vector` for why the
-    # taper is essential and why it has to be in units of sigma.
-    if cfg.taper_power > 0.0 and cfg.lam_wing > 0.0 and reusable_selection_fit is None:
-        sigl0, v_center = None, 0.0
-        result = None
-        for _ in range(max(int(cfg.n_sigl0_iter), 1)):
-            lam_vec = (np.full(D.shape[0], cfg.lam) if sigl0 is None
-                       else tapered_lam_vector(row_v, cfg.lam, sigl0, v_center,
-                                               sfac=cfg.taper_sfac, power=cfg.taper_power,
-                                               lam_wing=cfg.lam_wing))
-            result = _fit_at(lam_vec)
-            # Half-maximum width, NOT the second moment: the second moment is
-            # the quantity a pedestal inflates, so using it here makes the
-            # fixed point reinforce the very defect the taper exists to remove
-            # (see core_width_sigma).
-            dm = compute_direct_moments(v_grid, result["b"])
-            new_sig = core_width_sigma(v_grid, result["b"])
-            new_sig = float(new_sig) if np.isfinite(new_sig) else None
-            if new_sig is None or new_sig <= 0:
-                break
-            if sigl0 is not None and abs(new_sig - sigl0) < 0.02 * sigl0:
-                sigl0, v_center = new_sig, float(dm["vherm"])
-                break
-            sigl0, v_center = new_sig, float(dm["vherm"])
-        result["sigl0"] = sigl0
-        result["v_center"] = v_center
-    elif reusable_selection_fit is not None:
+    if reusable_selection_fit is not None:
         result = reusable_selection_fit
     else:
-        result = _fit_at(np.full(D.shape[0], cfg.lam))
-        result["sigl0"] = None
-        result["v_center"] = 0.0
+        result = fit_losvd_basis(A_stack, y_w, basis, D, lam=cfg.lam, ridge_lam=cfg.ridge_lam,
+                                  losvd_single_start=cfg.losvd_single_start,
+                                  continuum_basis=continuum_basis, D2_c=D2_c, lam_c=cfg.lam_c,
+                                  ridge_c=cfg.ridge_c, initial_coeffs=initial_coeffs)
 
     result["lam_used"] = cfg.lam
     result["lam_selection_result"] = lam_selection_result
@@ -529,6 +467,65 @@ def _fit_losvd_worker(args):
     workers unpickle it by import path."""
     A_stack, y_w, cfg, wave_fit = args
     return fit_losvd(A_stack, y_w, cfg, wave_fit=wave_fit)
+
+
+def _available_cpu_count() -> int:
+    """The number of CPUs this *process* can actually use -- not just the
+    number physically present on the machine it happens to be running on.
+
+    `os.cpu_count()` reports the whole node's core count regardless of
+    how many this job was actually allocated. On a shared SLURM node
+    (e.g. Great Lakes), that is a real, well-known multiprocessing
+    pitfall: a job given `--cpus-per-task=8` on a 128-core node sees
+    `os.cpu_count() == 128`, so `resolve_n_jobs`'s old `n_jobs=None`
+    default (before this existed) would spawn up to 128 worker
+    processes -- 16x this job's actual allocation, degrading this job's
+    own throughput (thread/process thrashing across only 8 real cores)
+    and starving every other job sharing that node. This is very likely
+    what "the parallelization needs to be robust... especially when I
+    start running on Greatlakes" was pointing at.
+
+    Cross-checks every signal available and takes the tightest (safest,
+    smallest) one, so a wrong or missing signal on any one platform
+    never causes overcommit -- only ever causes *less* parallelism than
+    the true allocation, which is merely slower, not disruptive to other
+    jobs on a shared node:
+
+    - `os.sched_getaffinity(0)` (Linux only): the actual cpuset/cgroup-
+      restricted core count for this process -- ground truth when
+      available, since it reflects whatever confinement mechanism was
+      used (SLURM's cgroup plugin or otherwise), not SLURM specifically.
+    - `SLURM_CPUS_PER_TASK` / `SLURM_JOB_CPUS_PER_NODE`: SLURM's own
+      account of this job's allocation -- checked even when
+      `sched_getaffinity` is available (a cross-check, since some SLURM
+      configurations don't actually confine via cgroups), and the
+      primary signal on platforms without `sched_getaffinity` (macOS,
+      this package's own dev machine). `SLURM_JOB_CPUS_PER_NODE` can be
+      like `"8"` or `"8(x2)"` for a multi-node job requesting the same
+      per-node count twice -- only the leading integer is used, since
+      that is this *task's* own per-node share regardless of node count.
+    - `os.cpu_count()`: the whole-machine fallback, used only when
+      neither of the above is available (a plain laptop/workstation,
+      where it is already the right answer).
+    """
+    import os
+    candidates = []
+
+    try:
+        candidates.append(len(os.sched_getaffinity(0)))
+    except AttributeError:
+        pass  # not available on macOS/Windows
+
+    for var in ("SLURM_CPUS_PER_TASK", "SLURM_JOB_CPUS_PER_NODE"):
+        val = os.environ.get(var)
+        if val:
+            try:
+                candidates.append(int(val.split("(")[0]))
+            except ValueError:
+                pass
+
+    candidates.append(os.cpu_count() or 1)
+    return max(1, min(candidates))
 
 
 def resolve_n_jobs(n_jobs: int | None, per_job_bytes: float, cap_fraction: float = 0.5) -> int:
@@ -545,28 +542,32 @@ def resolve_n_jobs(n_jobs: int | None, per_job_bytes: float, cap_fraction: float
     function is a no-op.
 
     `n_jobs=None` (every `*_parallel` function's own default) starts from
-    `os.cpu_count()`, then caps it so `n_jobs * per_job_bytes` doesn't
-    exceed `cap_fraction` (default half) of *available* system memory --
-    leaving headroom for whatever the caller already holds (e.g. a
-    per-bin design-matrix list built before the parallel call, or a real
-    MUSE cube still in memory). Available memory is estimated via
-    `psutil` if installed (accurate -- accounts for other running
-    processes/apps), falling back to *total* physical memory via
-    `os.sysconf` on POSIX systems (conservative but portable, no new
-    required dependency) if `psutil` isn't present, or, failing both
-    (e.g. Windows without `psutil`), just `os.cpu_count()` unchanged --
-    today's exact behavior, never worse than before this existed.
+    `_available_cpu_count()` -- this job's own actual CPU allocation, not
+    necessarily the whole machine's (see that function's own docstring
+    for why this matters on a shared SLURM node) -- then caps it so
+    `n_jobs * per_job_bytes` doesn't exceed `cap_fraction` (default half)
+    of *available* system memory -- leaving headroom for whatever the
+    caller already holds (e.g. a per-bin design-matrix list built before
+    the parallel call, or a real MUSE cube still in memory). Available
+    memory is estimated via `psutil` if installed (accurate -- accounts
+    for other running processes/apps), falling back to *total* physical
+    memory via `os.sysconf` on POSIX systems (conservative but portable,
+    no new required dependency) if `psutil` isn't present, or, failing
+    both (e.g. Windows without `psutil`), just `_available_cpu_count()`
+    unchanged -- today's exact behavior, never worse than before this
+    existed.
 
     This scales in both directions with no code change needed: a laptop
     with only a few GB free gets a small, safe worker count automatically;
-    an HPC node with hundreds of GB gets the full `os.cpu_count()` (the
-    memory cap essentially never binds there) -- see this package's own
-    `dev_notes/` for the real crash this was built to prevent (a 16GB
-    machine, a multi-GB real cube, and `os.cpu_count()`-many workers each
-    needing their own per-bin working memory, all at once).
+    an HPC node with hundreds of GB gets this job's own full CPU
+    allocation (the memory cap essentially never binds there) -- see this
+    package's own `dev_notes/` for the real crash this was built to
+    prevent (a 16GB machine, a multi-GB real cube, and
+    `os.cpu_count()`-many workers each needing their own per-bin working
+    memory, all at once).
     """
     import os
-    cpu_default = os.cpu_count() or 1
+    cpu_default = _available_cpu_count()
     if n_jobs is not None:
         return n_jobs
     if per_job_bytes <= 0:
@@ -591,39 +592,57 @@ def resolve_n_jobs(n_jobs: int | None, per_job_bytes: float, cap_fraction: float
 
 def _limit_worker_threads():
     """`ProcessPoolExecutor` initializer: pin BLAS/OpenMP thread pools to 1
-    per worker before `kinextract` (and therefore numpy/JAX) gets
-    imported in this fresh process.
+    per worker, and default JAX to the CPU backend, before `kinextract`
+    (and therefore numpy/JAX) gets imported in this fresh process.
 
-    Without this, each of `n_jobs` worker *processes* independently lets
-    numpy's BLAS backend (and JAX's own CPU/Eigen thread pool) spawn
-    threads across every physical core -- `n_jobs` processes each trying
-    to use all cores oversubscribes them by a factor of `n_jobs`, which
-    measurably erodes the parallel speedup (confirmed directly: forcing
-    single-threaded BLAS via environment variables improved an 8-worker,
-    40-bin case from 1.53x to 1.70x -- still not linear, since this is a
-    heterogeneous-core Apple Silicon machine, but a real, free improvement
-    from eliminating oversubscription). OG `kinextract`'s own parallel
-    bootstrap solves the identical problem via `threadpoolctl`; this uses
-    plain environment variables instead to avoid a new dependency for a
+    Without the BLAS/OpenMP pinning, each of `n_jobs` worker *processes*
+    independently lets numpy's BLAS backend (and JAX's own CPU/Eigen
+    thread pool) spawn threads across every physical core -- `n_jobs`
+    processes each trying to use all cores oversubscribes them by a
+    factor of `n_jobs`, which measurably erodes the parallel speedup
+    (confirmed directly: forcing single-threaded BLAS via environment
+    variables improved an 8-worker, 40-bin case from 1.53x to 1.70x --
+    still not linear, since this is a heterogeneous-core Apple Silicon
+    machine, but a real, free improvement from eliminating
+    oversubscription). OG `kinextract`'s own parallel bootstrap solves
+    the identical problem via `threadpoolctl`; this uses plain
+    environment variables instead to avoid a new dependency for a
     kinextract package that doesn't otherwise need one.
+
+    `JAX_PLATFORMS` defaults to `"cpu"` (via `setdefault`, so an already-set
+    value -- a user deliberately wanting GPU -- is never overridden) for the
+    same reason: `kinextract.__init__` and `laplace_uncertainty` both import
+    jax unconditionally, so every worker process in *every* `*_parallel`
+    function imports it, not just NUTS-based ones. On a GPU-visible SLURM
+    node, `n_jobs` worker processes each independently trying to initialize
+    a CUDA/ROCm backend for what is otherwise plain per-bin CPU linear
+    algebra is wasted device-init time at best and device contention/errors
+    at worst -- this was previously only worked around externally (the
+    `losvderrors` SLURM wrapper script sets this env var by hand before
+    launching), which silently stopped protecting anyone who ran a
+    `*_parallel` function outside that one script. Setting the same default
+    here makes every `*_parallel` function safe on a GPU node "for every
+    user who downloads kinextract", not just this framework's own scripts.
     """
     import os
-    import warnings
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         os.environ[var] = "1"
     # `select_lambda_aic_local` constructs a FitConfig-equivalent check for every
     # candidate lam in its own scan grid, not just the one finally selected -- so
     # FitConfig's own "knot spacing much finer than knot_spacing_kms is calibrated
-    # against" warning (config.py) can fire once per candidate per bin per
-    # replicate, easily hundreds of times across a real multi-bin, bootstrapped run
-    # (confirmed directly: `examples/notebooks/07_full_galaxy_analysis.ipynb`,
-    # see `dev_notes/real_data_sigma/FINDINGS.md`'s warning-frequency entry).
-    # "once" (not "ignore"): still visible at least once per worker process if the
-    # underlying condition is real, just deduplicated -- this is a presentation
-    # fix for a genuinely over-eager per-candidate diagnostic, not a claim the
-    # condition never happens.
-    warnings.filterwarnings("once", message=r".*much finer than.*knot_spacing_kms.*")
+    # against" warning can fire once per candidate per bin per replicate, easily
+    # hundreds of times across a real multi-bin run (confirmed directly:
+    # `examples/notebooks/07_full_galaxy_analysis.ipynb`, see
+    # `dev_notes/real_data_sigma/FINDINGS.md`'s warning-frequency entry). Dedup for
+    # that warning now lives in `config.py` itself (a plain once-per-process flag,
+    # not a `warnings.filterwarnings("once", ...)` registration here) -- the message
+    # embeds per-call values (vmin/vmax/dv/effective_lam), so Python's own "once"
+    # action (keyed on exact message text) barely deduplicated anything in
+    # practice; see `config.py`'s own `_KNOT_SPACING_WARNING_SHOWN` for why, and why
+    # that fix also needs no registration here to cover serial (non-`_parallel`)
+    # callers too.
 
 
 def fit_losvd_parallel(A_stack_list, y_w_list, cfg_list, wave_fit=None, n_jobs=None):

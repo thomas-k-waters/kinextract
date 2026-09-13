@@ -185,12 +185,10 @@ def test_fit_losvd_continuum_knots_requires_wave_fit():
 
 
 def test_fit_losvd_with_continuum_knots_set_runs_and_returns_C():
-    """`FitConfig.continuum_knots` is the new (as of this refactor)
-    standard-path way to turn on continuum-cofitting, replacing the
-    previously separate `fit_losvd_with_continuum` as the only entry
-    point -- both now share the same underlying alternation driver (see
-    `multi_template._alternate_once`).
-    """
+    """`FitConfig.continuum_knots` is the *only* way to turn on continuum-
+    cofitting -- there is no separate `fit_losvd_with_continuum` entry
+    point (folded away; every continuum-cofitting caller, including
+    `laplace_uncertainty.py`'s own, goes through this same path)."""
     wavemin, step, n_pix = 4750.0, 1.25, 3681
     wavefitmin, wavefitmax = 8400.0, 8800.0
     wavelength = wavemin + np.arange(n_pix) * step

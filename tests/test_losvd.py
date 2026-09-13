@@ -224,10 +224,18 @@ def test_narrow_grid_with_floored_knots_warns_about_effective_lam():
     """
     import warnings
 
+    from kinextract.config import _reset_knot_spacing_warning_dedup
+
     narrow = dict(vmin=80 - 2 * 40, vmax=80 + 2 * 40)
     safe = dict(vmin=80 - 7 * 20, vmax=80 + 7 * 20)
 
+    # This warning is deduped to once per process (see config.py's own
+    # _KNOT_SPACING_WARNING_SHOWN docstring for why) -- reset before each
+    # sub-case below so each is independently observable, the same way a
+    # fresh process would see the first occurrence of each.
+
     # order 2: lam=10 is ~5x its own grid top (16) once amplified -> warns
+    _reset_knot_spacing_warning_dedup()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         FitConfig(penalty_order=2, lam=10.0, lam_selection="fixed", **narrow)
@@ -235,12 +243,14 @@ def test_narrow_grid_with_floored_knots_warns_about_effective_lam():
 
     # order 3: the SAME lam is an ordinary, well-regularized value on its
     # own scale, and must not warn...
+    _reset_knot_spacing_warning_dedup()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         FitConfig(penalty_order=3, lam=10.0, lam_selection="fixed", **narrow)
     assert not any("effective lam" in str(w.message) for w in caught)
 
     # ...but the check must still fire for a genuinely extreme order-3 value.
+    _reset_knot_spacing_warning_dedup()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         FitConfig(penalty_order=3, lam=1e6, lam_selection="fixed", **narrow)
@@ -248,6 +258,7 @@ def test_narrow_grid_with_floored_knots_warns_about_effective_lam():
 
     # The validated NSIG=7 convention stays clean at either order.
     for order in (2, 3):
+        _reset_knot_spacing_warning_dedup()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             FitConfig(penalty_order=order, **safe)

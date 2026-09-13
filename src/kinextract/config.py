@@ -38,6 +38,29 @@ def _f(default, group: str, help: str):
     return field(default=default, metadata={"group": group, "help": help})
 
 
+# Genuine once-per-process dedup for the "knot spacing much finer than
+# knot_spacing_kms" warning below, independent of Python's own warnings-module
+# "once" action. That action's dedup key is the *exact* formatted message text
+# (message, category, module, lineno) -- but this warning embeds per-call values
+# (vmin, vmax, dv, effective_lam), so on a real multi-bin run, every bin (often
+# every AIC-candidate lam per bin) produces a distinct message text and "once"
+# barely deduplicates anything, flooding the notebook exactly the way it's meant
+# to prevent. A plain module-level flag, checked before ever calling
+# `warnings.warn`, dedupes correctly regardless of what the message says.
+# Deliberately a plain flag, not registered via `warnings.filterwarnings`, so it
+# also covers serial (non-`_parallel`) usage -- `_limit_worker_threads` (which
+# used to own this dedup) only ever ran inside a `ProcessPoolExecutor` worker.
+_KNOT_SPACING_WARNING_SHOWN = False
+
+
+def _reset_knot_spacing_warning_dedup() -> None:
+    """Test-only: re-arm the once-per-process knot-spacing warning so a test
+    can assert it fires, independent of whichever earlier test may have
+    already triggered it in this same process."""
+    global _KNOT_SPACING_WARNING_SHOWN
+    _KNOT_SPACING_WARNING_SHOWN = False
+
+
 _WING_LAM_UNSAFE_SIGMA = 100.0
 
 
@@ -206,13 +229,14 @@ class FitConfig:
                              "value above -- measurably reduces sigma bias relative to a fixed "
                              "`lam=2.0` across a broad (sigma, h4) validation grid (see "
                              "`dev_notes/VALIDATION_CAMPAIGN.md` Stage 12); h4 bias is a genuine mixed "
-                             "result (better in some regimes, worse in others). Set 'fixed' to "
-                             "get the old, always-`lam` behavior exactly -- required when "
-                             "`continuum_knots` is set (adaptive selection doesn't support "
-                             "continuum-cofitting yet; `fit_losvd` falls back to 'fixed' with a "
-                             "warning if you leave this at 'aic_local' anyway), and useful for "
-                             "reproducing a specific `lam` deliberately (e.g. `ablation.py`-style "
-                             "sweeps, which always force 'fixed' internally regardless of this "
+                             "result (better in some regimes, worse in others). 'aic_local' "
+                             "supports `continuum_knots` too (`aic_regularization.estimate_m_eff_"
+                             "local`'s own joint LOSVD+continuum linearization), at that path's "
+                             "own higher per-candidate cost (each scanned `lam` now costs a full "
+                             "3-block alternation, not 2-block). Set 'fixed' to get the old, "
+                             "always-`lam` behavior exactly, useful for "
+                             "reproducing a specific `lam` deliberately (e.g. a validation sweep that "
+                             "always forces 'fixed' internally regardless of this "
                              "field). `fit_losvd`'s result dict reports whatever `lam` was "
                              "actually used as `lam_used`. `bootstrap_losvd` runs the selection "
                              "once (at the point estimate) and holds that `lam` fixed for every "
@@ -278,50 +302,6 @@ class FitConfig:
                           "(delta-AIC parsimony tiebreak + sub-knot-scale sigma candidate "
                           "guard) -- see `aic_regularization.select_lambda_aic_local`.")
 
-    taper_sfac: float = _f(1.8, "Regularization",
-                            "Where the roughness penalty starts ramping up in the wings, in "
-                            "units of the LOSVD's own recovered width (see "
-                            "`kinextract.losvd.tapered_lam_vector`). Default 1.8, the "
-                            "value the original `kinextract` pipeline uses. Beyond this "
-                            "distance the penalty grows as `taper_power`, which is what "
-                            "suppresses a broad low-amplitude pedestal -- a shape a uniform "
-                            "penalty cannot distinguish from a compact LOSVD, and which "
-                            "inflates every reported moment. Measuring the onset in units of "
-                            "the recovered width (not the velocity grid) is what makes one "
-                            "setting work across sigma~20-400 without retuning. Raising it "
-                            "leaves more of the wings lightly smoothed (keeps genuine "
-                            "high-velocity structure, risks the pedestal returning); lowering "
-                            "it clamps the wings harder and closer in, at the cost of real "
-                            "tail signal.")
-    lam_wing: float = _f(0.0, "Regularization",
-                          "Absolute strength of the wing ramp, independent of `lam` (see "
-                          "`kinextract.losvd.tapered_lam_vector`). Default 0.0 (off). The core "
-                          "keeps whatever strength `lam`/`lam_selection` chooses; this controls "
-                          "only how hard the wings beyond `taper_sfac` are clamped. It is a "
-                          "separate number because `lam` is legitimately O(1) for a "
-                          "well-constrained core, and a wing ramp scaled by that is far too "
-                          "weak to suppress a pedestal -- measured: with the two coupled, the "
-                          "real NGC 5102 nucleus stayed at 80.6 km/s against an independent ~54 "
-                          "km/s reference measurement. **Default 0.0 (off), deliberately: this mechanism is "
-                          "ported and mechanically verified but NOT yet validated to fix the "
-                          "real-data sigma inflation it was ported for.** With the taper "
-                          "engaged and its onset seeded from the LOSVD core width, the real "
-                          "NGC 5102 nucleus still returned 79 km/s against an independent ~54 km/s "
-                          "reference measurement -- the wing ramp demonstrably fires (verified per-row) but "
-                          "the excess width is not, in that configuration, coming from where "
-                          "the ramp reaches. Leaving it off keeps the default path exactly the "
-                          "behaviour the 480-case validation grid covers. Turn it on only for "
-                          "deliberate experiments, and check the recovered curve, not just the "
-                          "moments. See dev_notes/PORT_STATUS.md.")
-    taper_power: float = _f(4.0, "Regularization",
-                             "Exponent of the wing ramp beyond `taper_sfac` (see "
-                             "`taper_sfac`). Default 4.0, matching the original `kinextract` "
-                             "pipeline: the penalty is 59x its core strength at 5 sigma and "
-                             "229x at 7 sigma. Lower values ramp more gently and leave more "
-                             "wing freedom; 0.0 disables the taper entirely, recovering a "
-                             "uniform penalty (not recommended -- that is the configuration "
-                             "under which a divergent wing pedestal was measured to inflate "
-                             "recovered sigma by ~60% on real MUSE data).")
     max_edge_amplitude_frac: float = _f(0.01, "Regularization",
                             "A candidate `lam` is rejected during adaptive selection if its "
                             "fitted LOSVD still exceeds this fraction of its own peak at "
@@ -338,8 +318,10 @@ class FitConfig:
                             "detect it -- the pedestal solutions are smooth and single-peaked, "
                             "and on systematics-dominated residuals the extra flexibility "
                             "genuinely does lower chi2. The constraint is inert on data with "
-                            "no pedestal (it excludes nothing on the mock grids), which is why "
-                            "it does not repeat the non-portability that killed `lam_wing`. "
+                            "no pedestal (it excludes nothing on the mock grids), unlike an "
+                            "earlier wing-taper approach to the same pedestal that needed "
+                            "per-target retuning and was removed once this constraint "
+                            "superseded it (see dev_notes/PORT_STATUS.md). "
                             "0.0 disables it. See dev_notes/real_data_sigma/FINDINGS.md.")
     self_normalize_lam_grid: bool = _f(False, "Regularization",
                             "If True, `lam_selection='aic_local'` rescales its candidate "
@@ -363,14 +345,6 @@ class FitConfig:
                             "characterization of the oversmoothing bug itself, or once the "
                             "calibration tables have been rebuilt to match -- see "
                             "dev_notes/regularization/FINDINGS.md.")
-    n_sigl0_iter: int = _f(3, "Regularization",
-                            "Fixed-point iterations used to make the wing taper "
-                            "self-consistent: fit, measure the recovered width, rebuild the "
-                            "taper around it, refit. Default 3. The taper's onset is defined "
-                            "in units of the LOSVD's own width, which is not known before the "
-                            "fit -- this is how that circularity is resolved without needing "
-                            "a prior sigma estimate from the user. 1 disables the iteration "
-                            "(taper built from the first-pass width only).")
     losvd_single_start: bool = _f(False, "Regularization",
                                    "If True, the FIRST alternating iteration's LOSVD sub-fit uses "
                                    "a single, deterministic starting point instead of "
@@ -493,22 +467,26 @@ class FitConfig:
         # order 3.
         effective_lam_limit = 3.0 * max(self._default_lam_grid())
         if effective_lam > effective_lam_limit:
-            warnings.warn(
-                f"FitConfig with vmin={self.vmin}, vmax={self.vmax} resolves to a knot "
-                f"spacing of {dv:.1f} km/s -- much finer than the {self.knot_spacing_kms:.0f} "
-                "km/s `knot_spacing_kms` is calibrated against (this happens when the grid is "
-                "narrow enough that `min_interior_knots` sets the knot count, not "
-                "`knot_spacing_kms`). Because the curvature penalty is scaled by real velocity "
-                "spacing (see `kinextract.losvd.difference_matrix`), this makes lam="
-                f"{self.lam} behave like an effective lam of {effective_lam:.0f} -- confirmed to "
-                "cause severe oversmoothing (>100% sigma bias) at this kind of extreme scale "
-                "factor in validation testing. This does not happen at the validated NSIG=7 "
-                "velocity-grid convention (`vmin/vmax = V -+ 7*sigma`) even down to sigma~20 "
-                "km/s -- it means this grid is unusually narrow for its `min_interior_knots`. "
-                "Consider a wider grid, a smaller `min_interior_knots`, or an explicit "
-                "`n_interior_knots` override.",
-                UserWarning, stacklevel=2,
-            )
+            global _KNOT_SPACING_WARNING_SHOWN
+            if not _KNOT_SPACING_WARNING_SHOWN:
+                _KNOT_SPACING_WARNING_SHOWN = True
+                warnings.warn(
+                    f"FitConfig with vmin={self.vmin}, vmax={self.vmax} resolves to a knot "
+                    f"spacing of {dv:.1f} km/s -- much finer than the {self.knot_spacing_kms:.0f} "
+                    "km/s `knot_spacing_kms` is calibrated against (this happens when the grid is "
+                    "narrow enough that `min_interior_knots` sets the knot count, not "
+                    "`knot_spacing_kms`). Because the curvature penalty is scaled by real velocity "
+                    "spacing (see `kinextract.losvd.difference_matrix`), this makes lam="
+                    f"{self.lam} behave like an effective lam of {effective_lam:.0f} -- confirmed to "
+                    "cause severe oversmoothing (>100% sigma bias) at this kind of extreme scale "
+                    "factor in validation testing. This does not happen at the validated NSIG=7 "
+                    "velocity-grid convention (`vmin/vmax = V -+ 7*sigma`) even down to sigma~20 "
+                    "km/s -- it means this grid is unusually narrow for its `min_interior_knots`. "
+                    "Consider a wider grid, a smaller `min_interior_knots`, or an explicit "
+                    "`n_interior_knots` override. (This warning prints at most once per process -- "
+                    "the underlying condition may still be affecting other bins/candidates.)",
+                    UserWarning, stacklevel=2,
+                )
 
     def build_velocity_grid(self) -> np.ndarray:
         """The LOSVD velocity grid implied by `vmin`/`vmax` and the point

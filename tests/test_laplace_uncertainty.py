@@ -229,6 +229,30 @@ def test_laplace_losvd_uncertainty_parallel_dispatches_continuum_bins_correctly(
     assert results[1]["C_median"].shape == wave_fit.shape
 
 
+def test_laplace_losvd_uncertainty_parallel_dispatches_fixed_lam_bins_to_quick_laplace():
+    """A third routing case, alongside the continuum one above: a non-
+    continuum bin with lam_selection='fixed' must go to
+    quick_laplace_uncertainty (single Laplace pass at cfg.lam), not
+    laplace_losvd_uncertainty's own AIC-weighted scan across
+    cfg.resolved_lam_grid() -- that scan evaluates candidates nothing
+    will ever select and, at low S/N, can hand most of the pooled
+    posterior's weight to an under-regularized, divergent-edge-dominated
+    candidate (see _laplace_losvd_uncertainty_worker's own docstring for
+    the real case this reproduces). An aic_local bin in the same batch
+    must still go to the full laplace_losvd_uncertainty path."""
+    from dataclasses import replace
+    A_stack_w_adaptive, y_w_adaptive, cfg_adaptive, _ = _mock_case(seed=6)
+    A_stack_w_fixed, y_w_fixed, cfg_base, _ = _mock_case(seed=7)
+    cfg_fixed = replace(cfg_base, lam_selection="fixed", lam=2.0, penalty_order=2)
+
+    results = laplace_losvd_uncertainty_parallel(
+        [A_stack_w_adaptive, A_stack_w_fixed], [y_w_adaptive, y_w_fixed],
+        [cfg_adaptive, cfg_fixed], n_samples=80, seed=0, n_jobs=1)
+    assert results[0]["method"] == "laplace"
+    assert results[1]["method"] == "quick_laplace"
+    assert results[1]["lam_used"] == 2.0
+
+
 def test_quick_laplace_uncertainty_with_fixed_lam_skips_selection():
     """lam_selection='fixed' should use cfg.lam directly, no AIC scan."""
     A_stack_w, y_w, cfg, v_grid = _mock_case()

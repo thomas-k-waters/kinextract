@@ -97,6 +97,7 @@ Two entry points:
 """
 from __future__ import annotations
 
+import dataclasses
 import warnings
 
 import jax
@@ -152,7 +153,7 @@ def laplace_covariance_at_lam(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitCo
     basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_knots, degree=cfg.degree)
     dv = (cfg.vmax - cfg.vmin) / (n_knots + 1)
     D = difference_matrix(n_coef, order=cfg.penalty_order, dv=dv, dv_ref=cfg.knot_spacing_kms)
-    lam_vec = np.full(D.shape[0], lam)  # cfg.lam_wing == 0.0 (default): no taper, uniform lam
+    lam_vec = np.full(D.shape[0], lam)  # uniform lam across every penalty row
 
     A_eff_w = np.tensordot(result["w"], A_stack_w, axes=([0], [0]))
     coeffs = np.asarray(result["coeffs"])
@@ -172,34 +173,39 @@ def laplace_covariance_at_lam_with_continuum(A_stack_w: np.ndarray, y_w: np.ndar
                                               cfg: FitConfig, lam: float, n_continuum_knots: int = 4,
                                               lam_c: float = 2.0, ridge_c: float = 0.1) -> dict:
     """`laplace_covariance_at_lam`'s continuum-cofitting counterpart --
-    fits `fit_losvd_with_continuum` at a fixed `lam` (continuum-cofitting
-    only ever supports a fixed `lam`, adaptive selection is not extended
-    to it -- see this module's own "Honest scope" section), then returns
-    the Laplace covariance of the *joint* `(LOSVD coeffs, continuum
-    coeffs)` vector, `w` held fixed at its converged value -- the same
-    simplification `laplace_covariance_at_lam` already makes for `w`
-    alone.
+    fits at a fixed `lam` (continuum-cofitting only ever supports a fixed
+    `lam`, adaptive selection is not extended to it -- see this module's
+    own "Honest scope" section) via plain `fit_losvd` with
+    `cfg.continuum_knots` set (the same continuum-cofitting entry point
+    every other caller in the package uses -- there is no longer a
+    separate `fit_losvd_with_continuum` wrapper; `fit_losvd`'s own
+    default starting weights/coefficients already match what that
+    wrapper used), then returns the Laplace covariance of the *joint*
+    `(LOSVD coeffs, continuum coeffs)` vector, `w` held fixed at its
+    converged value -- the same simplification `laplace_covariance_at_lam`
+    already makes for `w` alone.
 
-    Returns a dict with `result` (the `fit_losvd_with_continuum`-shaped
-    fit result), `coeffs`/`continuum_coeffs` (the converged coefficients,
-    split back out for convenience), `cov_joint` (the full joint
-    covariance -- `cov_joint[:n_coef, :n_coef]` is the LOSVD block,
+    Returns a dict with `result` (the `fit_losvd`-shaped fit result),
+    `coeffs`/`continuum_coeffs` (the converged coefficients, split back
+    out for convenience), `cov_joint` (the full joint covariance --
+    `cov_joint[:n_coef, :n_coef]` is the LOSVD block,
     `cov_joint[n_coef:, n_coef:]` the continuum block, off-diagonal blocks
     the cross-covariance), `n_coef` (LOSVD coefficient count, for
     splitting `cov_joint`), `basis`/`basis_c` (LOSVD/continuum design
     matrices), `v_grid`.
     """
-    from .continuum import fit_losvd_with_continuum
+    from .multi_template import fit_losvd
 
-    v_grid = cfg.build_velocity_grid()
-    n_knots = cfg.resolved_n_interior_knots()
-    basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_knots, degree=cfg.degree)
-    dv = (cfg.vmax - cfg.vmin) / (n_knots + 1)
-    D = difference_matrix(n_coef, order=cfg.penalty_order, dv=dv, dv_ref=cfg.knot_spacing_kms)
+    fit_cfg = dataclasses.replace(cfg, continuum_knots=n_continuum_knots, lam_c=lam_c, ridge_c=ridge_c,
+                                   lam_selection="fixed", lam=lam)
+    v_grid = fit_cfg.build_velocity_grid()
+    n_knots = fit_cfg.resolved_n_interior_knots()
+    basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_knots, degree=fit_cfg.degree)
+    dv = (fit_cfg.vmax - fit_cfg.vmin) / (n_knots + 1)
+    D = difference_matrix(n_coef, order=fit_cfg.penalty_order, dv=dv, dv_ref=fit_cfg.knot_spacing_kms)
     lam_vec = np.full(D.shape[0], lam)
 
-    result = fit_losvd_with_continuum(A_stack_w, y_w, wave_fit, basis, D, lam=lam,
-                                       n_continuum_knots=n_continuum_knots, lam_c=lam_c, ridge_c=ridge_c)
+    result = fit_losvd(A_stack_w, y_w, fit_cfg, wave_fit=wave_fit)
 
     basis_c, n_coef_c = build_bspline_basis(wave_fit, n_interior_knots=n_continuum_knots, degree=3)
     dw = (wave_fit.max() - wave_fit.min()) / (n_continuum_knots + 1)
@@ -516,9 +522,8 @@ def laplace_continuum_uncertainty(A_stack_w: np.ndarray, y_w: np.ndarray, wave_f
     module.
 
     `lam` : if `None` (default), uses `cfg.lam` directly (continuum-
-        cofitting's own convention -- see `fit_losvd_with_continuum`'s
-        own docstring; `cfg.lam_selection` is not consulted, since
-        adaptive selection doesn't apply here).
+        cofitting's own convention -- `cfg.lam_selection` is not
+        consulted, since adaptive selection doesn't apply here).
 
     Returns a dict shaped like `quick_laplace_uncertainty`'s own (same
     `result0`, `point0`, `lam_used`, `b_samples`/`b_median`/`b_std`/
@@ -539,7 +544,7 @@ def laplace_continuum_uncertainty(A_stack_w: np.ndarray, y_w: np.ndarray, wave_f
     exact same per-draw factor to keep each draw's own likelihood
     unchanged (`_sample_joint_curves_and_moments`'s own docstring has the
     full derivation) -- but `result0['b']` itself is *not* unit-area
-    (`fit_losvd_with_continuum` never canonicalizes it), so `result0['C']`
+    (`fit_losvd` never canonicalizes it), so `result0['C']`
     and `C_median` live on two different, equally arbitrary points along
     the same non-identifiable gauge direction. Comparing `C_median` to a
     known true continuum (e.g. a validation mock) should always be done
@@ -715,11 +720,27 @@ def _laplace_losvd_uncertainty_worker(args):
     `laplace_losvd_uncertainty_parallel` -- process pools need a
     module-level function, not a closure, since workers unpickle it by
     import path (same requirement as `uncertainty._bootstrap_losvd_worker`).
-    Dispatches to the continuum-aware path when this bin's own `cfg` has
-    `continuum_knots` set, and to the plain (AIC-weighted-across-lam)
-    path otherwise -- see `laplace_losvd_uncertainty_parallel`'s own
-    docstring for why these are genuinely different methods, not one
-    function with a flag.
+
+    Three-way dispatch, not two: continuum-cofitting bins always go to
+    `laplace_continuum_uncertainty` (only ever supports a fixed `lam`, see
+    that function's own docstring); of the remaining, non-continuum bins,
+    `cfg.lam_selection == "fixed"` goes to `quick_laplace_uncertainty`
+    (single Laplace pass at `cfg.lam`) rather than `laplace_losvd_
+    uncertainty` (AIC-weighted sampling *across* `cfg.resolved_lam_grid()`).
+    That grid-scan is only meaningful when `lam_selection == "aic_local"`
+    (an actually-adaptive choice the grid's own candidates represent real
+    uncertainty over); for a genuinely fixed `lam`, scanning the grid
+    anyway evaluates candidates nothing will ever select, and can hand
+    most of the pooled posterior's weight to a candidate under-regularized
+    enough, at low S/N, to be dominated by divergent-edge solutions --
+    confirmed directly, 2026-08-07 (NGC 5102's own real bins, this
+    project's capstone low-sigma example): `h3_std`/`h4_std` inflated
+    2-40x over the single-lam value on the 10 worst-affected bins, with
+    the sampler's own divergent-edge rejection filter warning on nearly
+    every draw. `quick_laplace_uncertainty`'s own docstring already
+    describes it as the correct choice once `lam` is already decided
+    (kept in sync as of that same fix -- see this module's own dev_notes/
+    uncertainty/FINDINGS.md entry for the full before/after).
     """
     (A_stack_w, y_w, cfg, seed, w_m, n_samples, fit_h3h4, min_weight_to_sample,
      wave_fit, lam, n_continuum_knots, lam_c, ridge_c) = args
@@ -727,6 +748,10 @@ def _laplace_losvd_uncertainty_worker(args):
         return laplace_continuum_uncertainty(
             A_stack_w, y_w, wave_fit, cfg, lam=lam, n_continuum_knots=n_continuum_knots,
             lam_c=lam_c, ridge_c=ridge_c, n_samples=n_samples, seed=seed, fit_h3h4=fit_h3h4,
+        )
+    if cfg.lam_selection == "fixed":
+        return quick_laplace_uncertainty(
+            A_stack_w, y_w, cfg, n_samples=n_samples, seed=seed, fit_h3h4=fit_h3h4,
         )
     return laplace_losvd_uncertainty(
         A_stack_w, y_w, cfg, w_m=w_m, n_samples=n_samples, seed=seed,
@@ -757,16 +782,19 @@ def laplace_losvd_uncertainty_parallel(A_stack_w_list, y_w_list, cfg_list, w_m: 
     speedup with zero accuracy cost relative to a serial per-bin loop
     with the same per-bin seed.
 
-    **Per-bin continuum dispatch, not a single uniform method.** A bin
+    **Per-bin three-way dispatch, not a single uniform method.** A bin
     whose own `cfg.continuum_knots` is set is routed to
     `laplace_continuum_uncertainty` (fixed-`lam` joint LOSVD+continuum
-    Laplace covariance) instead of `laplace_losvd_uncertainty` (AIC-
-    weighted across `cfg.resolved_lam_grid()`) -- these are genuinely
-    different methods (continuum-cofitting only ever supports a fixed
-    `lam`; see `laplace_continuum_uncertainty`'s own docstring), not one
-    function with a continuum flag. Mixing continuum and non-continuum
-    bins in the same call is supported (each bin's own `cfg` decides),
-    matching how `cfg_list` already lets every other per-bin setting vary.
+    Laplace covariance). Of the remaining bins, `cfg.lam_selection ==
+    "fixed"` routes to `quick_laplace_uncertainty` (single Laplace pass
+    at `cfg.lam`); only `cfg.lam_selection == "aic_local"` gets the full
+    `laplace_losvd_uncertainty` (AIC-weighted across `cfg.resolved_
+    lam_grid()`) -- see `_laplace_losvd_uncertainty_worker`'s own
+    docstring for why scanning that grid for an already-fixed `lam` is
+    not just wasted cost but a real accuracy risk at low S/N. Mixing any
+    combination of these across bins in the same call is supported (each
+    bin's own `cfg` decides), matching how `cfg_list` already lets every
+    other per-bin setting vary.
 
     Parameters
     ----------
@@ -797,10 +825,11 @@ def laplace_losvd_uncertainty_parallel(A_stack_w_list, y_w_list, cfg_list, w_m: 
     Returns
     -------
     list of result dicts, one per bin, in the same order as the inputs
-    (each either `laplace_losvd_uncertainty`'s or `laplace_continuum_
-    uncertainty`'s own shape, depending on that bin's `cfg`) -- not a
-    generator, so a failure partway through surfaces before any results
-    are used.
+    (each `laplace_losvd_uncertainty`'s, `quick_laplace_uncertainty`'s, or
+    `laplace_continuum_uncertainty`'s own shape, depending on that bin's
+    `cfg` -- all three share the same key set, see each one's own
+    docstring) -- not a generator, so a failure partway through surfaces
+    before any results are used.
     """
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context

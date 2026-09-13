@@ -79,10 +79,15 @@ the *core* correct. Mechanism (2) is the dominant one on real data --
 measured on real MUSE spectra at 81 km/s recovered against an independent
 ~54 km/s reference measurement -- and is essentially invisible in this package's own
 synthetic validation, because mocks built from the same design matrix the
-fit inverts give the pedestal nothing to absorb. `tapered_lam_vector`
-(opt-in via `FitConfig.lam_wing`) exists to attack mechanism (2); see
-`dev_notes/real_data_sigma/FINDINGS.md` for the full diagnosis and
-`dev_notes/PORT_STATUS.md` for its current, honest status.
+fit inverts give the pedestal nothing to absorb.
+`FitConfig.max_edge_amplitude_frac` attacks mechanism (2) directly, by
+rejecting any candidate `lam` whose fit is still diverging at the
+velocity-grid edge, rather than trying to suppress the pedestal via a
+wing-specific penalty (an earlier per-row wing-taper approach was tried,
+needed per-target retuning to actually work, and was removed once this
+constraint superseded it); see `dev_notes/real_data_sigma/FINDINGS.md`
+for the full diagnosis and `dev_notes/PORT_STATUS.md` for the wing
+taper's own retired history.
 
 - **Strongly negative h4 (platykurtic, flat-topped LOSVDs) recovers less
   well than other shapes.** At h4=-0.1 (S/N~100), worst-case shape
@@ -147,9 +152,11 @@ from .config import FitConfig
 def _neg_log_post(coeffs, basis, D, A_w, y_w, lam_vec):
     """chi2 + a *per-row* roughness penalty.
 
-    `lam_vec` carries one regularization strength per row of `D`, which is
-    what makes the wing taper (see `tapered_lam_vector`) possible: a single
-    scalar cannot express "smooth the core lightly and the wings hard".
+    `lam_vec` carries one regularization strength per row of `D` -- a
+    single scalar broadcasts to every row identically (`fit_log_spline_
+    map`'s usual case), but a caller wanting a non-uniform penalty
+    (varying regularization strength by velocity) can pass a full
+    per-row array instead.
     """
     b = jnp.exp(basis @ coeffs)
     resid = A_w @ b - y_w
@@ -160,122 +167,6 @@ def _neg_log_post(coeffs, basis, D, A_w, y_w, lam_vec):
 
 _val_fn = jax.jit(_neg_log_post)
 _vg_fn = jax.jit(jax.value_and_grad(_neg_log_post))
-
-
-def greville_abscissae(v_grid: np.ndarray, n_interior_knots: int, degree: int = 3) -> np.ndarray:
-    """Velocity each B-spline coefficient is centred on -- the Greville
-    abscissa (mean of the `degree` knots spanning it).
-
-    Needed because the wing taper is defined in velocity, while the
-    penalty acts on coefficient differences: each penalty row has to be
-    told where on the velocity axis it lives.
-    """
-    vmin, vmax = float(v_grid.min()), float(v_grid.max())
-    interior = np.linspace(vmin, vmax, n_interior_knots + 2)[1:-1]
-    knots = np.concatenate([[vmin] * (degree + 1), interior, [vmax] * (degree + 1)])
-    n_coef = len(knots) - degree - 1
-    return np.array([knots[i + 1:i + 1 + degree].mean() for i in range(n_coef)])
-
-
-def tapered_lam_vector(row_v: np.ndarray, lam: float, sigl0: float, v_center: float,
-                        sfac: float = 1.8, power: float = 4.0,
-                        lam_wing: float | None = None) -> np.ndarray:
-    """Per-row roughness strength: `lam` in the core, ramped up in the wings.
-
-        ramp_j = 1                                     |dv| <= sfac*sigl0
-        ramp_j = (|dv|/sigl0 / sfac)**power            beyond
-        lam_j  = lam + lam_wing * (ramp_j - 1)
-
-    with `dv = row_v - v_center`. The ramp law and its defaults
-    (`sfac=1.8`, 4th power) are ported from the original `kinextract`
-    pipeline (`numerics._wing_taper_lam_vec`).
-
-    **Why the ramp is measured in units of `sigl0`, the *recovered*
-    width.** A wing penalty defined against the velocity grid changes
-    meaning whenever the grid changes, which is what made a plain
-    amplitude penalty need per-target retuning. In units of the LOSVD's
-    own width, "1.8 sigma out" means the same thing at sigma=20 and
-    sigma=400, so one setting covers the range. `sigl0` is obtained
-    self-consistently by fixed-point iteration (fit, measure width,
-    rebuild, refit), so no prior sigma estimate is needed.
-
-    **Why `lam_wing` is a separate strength and not just `lam`.** The
-    original pipeline multiplies the ramp straight into its own `xlam`,
-    which is safe there because its `xlam` is O(1e5-1e7). Here `lam` is
-    chosen per fit and can legitimately be O(1) for a well-constrained
-    core -- and then `lam * ramp` is far too weak to suppress anything,
-    which was measured directly: with the ramp tied to `lam`, the real
-    NGC 5102 nucleus stayed at 80.6 km/s (against an independent ~54 km/s
-    reference measurement) because selection had driven `lam` to 1. Splitting the two
-    lets the core strength stay a free, per-fit quantity while the wing
-    strength stays absolute, so the wings are suppressed regardless of
-    what the core needs. `lam_wing=None` reproduces the original
-    pipeline's coupled behaviour (`lam_wing = lam`).
-
-    **What this is for.** A roughness penalty alone cannot distinguish a
-    compact LOSVD from one carrying a broad, low pedestal across the
-    grid -- the two can cost the same. That pedestal is not cosmetic: it
-    is integrated by any moment estimator and inflates the reported
-    sigma, with the *core* left correct (measured on real MUSE data:
-    81 km/s recovered vs. an independent ~54 km/s reference measurement, all of the error
-    in the pedestal). Ramping as the 4th power of distance makes the
-    pedestal expensive exactly where the data has no power to justify it
-    -- 59x at 5 sigma, 229x at 7 -- while leaving the core alone.
-    """
-    d = np.abs(np.asarray(row_v, dtype=float) - v_center)
-    sigl0 = max(float(sigl0), 1e-6)
-    ramp = np.where(d > sfac * sigl0, (np.maximum(d / sigl0, sfac) / sfac) ** power, 1.0)
-    lw = float(lam) if lam_wing is None else float(lam_wing)
-    return float(lam) + lw * (ramp - 1.0)
-
-
-def penalty_row_velocities(v_grid: np.ndarray, n_interior_knots: int, order: int,
-                            degree: int = 3) -> np.ndarray:
-    """Velocity of each row of `difference_matrix(order=...)` -- the mean
-    Greville abscissa of the coefficients that row differences.
-    """
-    g = greville_abscissae(v_grid, n_interior_knots, degree)
-    return np.array([g[j:j + order + 1].mean() for j in range(len(g) - order)])
-
-
-def core_width_sigma(v_grid: np.ndarray, b: np.ndarray) -> float:
-    """Gaussian-equivalent sigma from the LOSVD's **half-maximum width**,
-    `FWHM / 2.3548`.
-
-    Used to place the wing taper's onset (`tapered_lam_vector`), where an
-    ordinary second-moment sigma cannot be used: the second moment is
-    exactly what a wing pedestal inflates, so seeding the taper with it
-    creates a self-reinforcing fixed point -- an inflated width pushes the
-    taper onset outward, which leaves the pedestal untapered, which keeps
-    the width inflated. Measured directly on the real NGC 5102 nucleus:
-    the moment-seeded fixed point sat at 81 km/s (against an independent
-    ~54 km/s reference measurement) and the wing ramp never engaged.
-
-    A half-maximum width depends only on the curve near its peak, so a
-    low-amplitude pedestal spanning the grid does not move it, and the
-    taper gets placed against the *core*'s scale -- which is what the
-    "1.8 sigma out" convention means.
-    """
-    b = np.maximum(np.asarray(b, dtype=float), 0.0)
-    v = np.asarray(v_grid, dtype=float)
-    peak = float(b.max()) if b.size else 0.0
-    if peak <= 0.0:
-        return float("nan")
-    half = 0.5 * peak
-    above = np.flatnonzero(b >= half)
-    if above.size < 2:
-        return float("nan")
-    lo, hi = above[0], above[-1]
-    # linear interpolation onto the exact half-maximum crossings
-    def _cross(i_in, i_out):
-        if i_in == i_out:
-            return v[i_in]
-        f = (half - b[i_out]) / (b[i_in] - b[i_out])
-        return v[i_out] + f * (v[i_in] - v[i_out])
-    v_lo = _cross(lo, lo - 1) if lo > 0 else v[lo]
-    v_hi = _cross(hi, hi + 1) if hi < len(v) - 1 else v[hi]
-    fwhm = abs(v_hi - v_lo)
-    return float(fwhm / 2.354820045)
 
 
 def build_bspline_basis(v_grid: np.ndarray, n_interior_knots: int = 16, degree: int = 3) -> tuple[np.ndarray, int]:
@@ -419,12 +310,10 @@ def fit_log_spline_map(A_w: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D: n
     `0.5*||A_w @ b - y_w||^2 + 0.5*sum(lam_j * (D @ coeffs)_j^2)` via
     L-BFGS-B, with JAX autodiff for exact gradients through the `exp` link.
 
-    `lam` may be a scalar (uniform smoothing) or a vector with one entry
-    per row of `D` (see `tapered_lam_vector`, which builds the wing-ramped
-    vector this package uses by default). Passing the strength per row is
-    what lets the wings be smoothed far harder than the core, which is how
-    a broad low-amplitude pedestal -- indistinguishable from a compact
-    LOSVD under any single scalar strength -- is suppressed.
+    `lam` may be a scalar (uniform smoothing, what every caller in this
+    package currently passes) or a vector with one entry per row of `D`,
+    for a caller wanting a non-uniform penalty strength across the
+    velocity grid.
 
     **Multi-start by default.** The optimization landscape is not convex
     (see module docstring), and no single starting point is safe on its

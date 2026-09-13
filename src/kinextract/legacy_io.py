@@ -31,11 +31,13 @@ from __future__ import annotations
 import os
 
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
 
 def write_fit_outputs(bin_name: str, result: dict, v_grid: np.ndarray,
                        wave_fit: np.ndarray, flux_fit: np.ndarray, model: np.ndarray,
-                       outdir: str, n_templates: int = 0) -> dict[str, str]:
+                       outdir: str, n_templates: int = 0,
+                       continuum: np.ndarray | None = None) -> dict[str, str]:
     """Write the legacy `.fit`/`.ascii`/`.rms`/`.mcfit` quartet for one
     fitted bin, from a `kinextract` point-estimate result -- everything
     the legacy pipeline's own downstream tools (`pfitlov`, `pspecfit`,
@@ -49,8 +51,8 @@ def write_fit_outputs(bin_name: str, result: dict, v_grid: np.ndarray,
         `bin_table` entries) -- files are written as
         `f"{outdir}/{bin_name}sp.fit"` etc, matching the legacy
         `<bin>sp.<ext>` naming convention exactly.
-    result : a `fit_losvd`/`fit_losvd_clean` result dict (`b`, `w`,
-        `clipped_mask` if from the `_clean` variant).
+    result : a `fit_losvd`/`fit_losvd_robust` result dict (`b`, `w`,
+        `clipped_mask` if `cleaning_method` was `"clip"`/`"inflate"`).
     v_grid : the velocity grid `result["b"]` is defined on
         (`cfg.build_velocity_grid()`).
     wave_fit, flux_fit : the observed wavelength/flux this bin's fit
@@ -64,6 +66,12 @@ def write_fit_outputs(bin_name: str, result: dict, v_grid: np.ndarray,
         (cosmetic only -- no downstream reader depends on its value,
         confirmed from `pallmc.f` source, which only reads `.mcfit`'s
         velocity column).
+    continuum : this bin's own fitted continuum component (same shape as
+        `wave_fit`), if continuum-cofitting was used -- de-whitened, same
+        units as `flux_fit`/`model`. `None` (default) when it wasn't
+        (kinextract's fit has no continuum concept to report in that
+        case -- written as `0.0`, not fabricated). See `.ascii`'s own
+        comment below for why this is needed at all.
 
     Returns
     -------
@@ -93,14 +101,24 @@ def write_fit_outputs(bin_name: str, result: dict, v_grid: np.ndarray,
         for i, (v, amp) in enumerate(zip(v_grid, b), start=1):
             f.write(f"{i:d} {v:.6f} {amp:.6e}\n")
 
-    # .ascii -- format 1301, 5 columns: wavelength, data, model, template-only, bad-pixel
-    # flag. clipped_mask (fit_losvd_clean only) marks a pixel bad (1) instead of good (0);
-    # a plain fit_losvd result has no clipping, so every pixel is flagged good.
+    # .ascii -- 6 columns: wavelength, data, model, continuum, continuum (a second,
+    # diagnostic copy), bad-pixel flag. Confirmed directly from the currently-live
+    # `sco_framework_updated/modprogs/pspecfit.f` source (`read(2,*) x1,x2,x3,x4,x5,i6`,
+    # "column 4 is the best-fit continuum for plotting", "column 5 is retained as an
+    # additional diagnostic continuum column") -- NOT 5 columns as an earlier version of
+    # this docstring claimed (that was checked against the wrong/an outdated format
+    # spec, not the real Fortran source; pspecfit is never auto-invoked by
+    # finalizeextraction, so this mismatch never surfaced as a real run-time failure,
+    # but reading the source directly leaves no ambiguity). clipped_mask
+    # (fit_losvd_robust with cleaning_method="clip"/"inflate" only) marks a pixel bad (1)
+    # instead of good (0); a plain fit_losvd result has no clipping, so every pixel
+    # is flagged good.
     clipped_mask = result.get("clipped_mask")
     bad_flag = clipped_mask.astype(int) if clipped_mask is not None else np.zeros(n_good, dtype=int)
+    cont = np.asarray(continuum) if continuum is not None else np.zeros(n_good)
     with open(paths["ascii"], "w") as f:
-        for wl, data, mod, flag in zip(wave_fit, flux_fit, model, bad_flag):
-            f.write(f"{wl:10.3f}  {data:7.3f}  {mod:7.3f}  {mod:7.3f} {flag:d}\n")
+        for wl, data, mod, c, flag in zip(wave_fit, flux_fit, model, cont, bad_flag):
+            f.write(f"{wl:10.3f}  {data:7.3f}  {mod:7.3f}  {c:7.3f}  {c:7.3f} {flag:d}\n")
 
     # .rms -- one line: sqrt(rms/n), n_good, coff, coff2 (coff/coff2 are a legacy
     # polynomial-continuum offset pair kinextract has no equivalent for -- see module docstring)
@@ -116,3 +134,181 @@ def write_fit_outputs(bin_name: str, result: dict, v_grid: np.ndarray,
             f.write(f"{v:.6f} 0 0 0 0 0\n")
 
     return paths
+
+
+def _invert_about_zero(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+    """Port of transvd.f's own `invert(x, y, n, 0., yout)` subroutine (its only call
+    site always passes `xinv=0.`): mirrors `y` about `v=0` by re-interpolating each
+    point onto its negated velocity, using the *original* (x, y) grid. Points whose
+    mirror falls outside the original domain are zeroed, matching the Fortran exactly."""
+    n = len(x)
+    xmin, xmax = -x[-1], -x[0]
+    out = np.zeros(n)
+    in_domain = (x >= xmin) & (x <= xmax)
+    mirrored = -x[in_domain]
+    out[in_domain] = np.interp(mirrored, x, y)
+    return out
+
+
+def legacy_transvd_curve(v_grid: np.ndarray, b_median: np.ndarray, b_p16: np.ndarray,
+                          b_p84: np.ndarray, *, invert: bool, model_bin_kms: float = 133.3,
+                          voff: float = 0.0, ntot: int = 1000, min_error: float = 0.005,
+                          losvd_clip: float = 0.0007, smoothing_sigma: float = 3.0
+                          ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Port of `sco_framework_updated/bin/transvd` (Fortran, `transvd.f`) chained into
+    `fix_losvd_errs.py`, the two-stage transform that previously turned a bin's own
+    `.mcfit2` curve (velocity, LOSVD median, 16th/84th percentile) into its final
+    `<bin>spmc_in` modeling input: rescale the percentile-derived error bars for the
+    data-vs-model velocity bin width, normalize the LOSVD to unit area, optionally
+    mirror the curve about v=0 (`invert`), resample onto a dense fixed 1000-point
+    grid spanning `[v_grid[0], -v_grid[0]]`, then apply `fix_losvd_errs.py`'s own
+    floor/clip/smooth/wing-zeroing cleanup. Lets `kinextract`'s own Laplace/bootstrap/
+    NUTS uncertainty (`b_median`/`b_p16`/`b_p84`, the same curve `run_losvd_errors.py`
+    already writes to `<bin>spmc.bestlosvd`) produce a `<bin>spmc_in` file directly,
+    without needing `pallmc.f`'s `.mcfit2` bridge output or the legacy `rtransvd`/
+    `transvd`/`fix_losvd_errs.py` binary chain at all.
+
+    Validated against the real Fortran: `transvd.f` (+ the real `numrec_f/spline.f`,
+    `splint.f` it links against) was rebuilt locally with gfortran and run on a real
+    bin's real `.mcfit2` (`bin0105spmc.mcfit2`, `kinextract_debug_suite`), for both
+    `invert=False` and `invert=True` (isym=0 always -- this framework never sets
+    isym=1, see `rtransvd`), chained through the real `fix_losvd_errs.py`. This port
+    matches that real chain's output to ~1e-5 absolute at all 1000 points except one:
+    the Fortran's own `xlinint` uses a half-open interval test (`xp.ge.x(j).and.
+    xp.lt.x(j+1)`) that excludes the exact right endpoint, so at the single output
+    point that lands exactly on `v_grid[-1]` (only reachable in the `invert=False`
+    case; `invert=True`'s domain check hits the *left* endpoint instead, which the
+    half-open test does cover), Fortran's `yp` keeps whatever stale value the
+    previous loop iteration left in that unreset local variable -- an accident of
+    reusing an uninitialized variable across loop iterations, not a meaningful
+    result. This port instead correctly clamps to the endpoint value there. That one
+    point sits at the extreme edge of the velocity grid, where the physical LOSVD
+    amplitude is ~0 in every real fit checked, so the deviation is immaterial.
+
+    `model_bin_kms=133.3` is an inherited legacy constant (`rtransvd`'s own source
+    comment: "Ask Karl how to get 133.3") with no derivation recovered here --
+    preserved as-is for continuity with every existing legacy-pipeline result.
+
+    Parameters
+    ----------
+    v_grid, b_median, b_p16, b_p84 : this bin's own LOSVD curve, e.g. the same arrays
+        `run_losvd_errors.py` already has in memory (`result["b_median"]`, etc.) --
+        `v_grid` must be uniformly spaced (`cfg.build_velocity_grid()`'s own grid).
+    invert : whether to mirror the curve about v=0 before resampling -- matches
+        `finalizeextraction`'s own `rtransvd <bin> 1` (non-`bnn*` bins, invert=True)
+        vs. `rtransvd <bin> -1` (`bnn*` bins, invert=False; transvd.f's own check is
+        `if(ivert.eq.1)`, so any value other than literal 1 skips inversion) split --
+        `write_spmc_in` below derives this automatically from `bin_name`.
+
+    Returns
+    -------
+    (vel, losvd, lower_err, upper_err), each a `(1000,)` array -- the exact columns
+    `<bin>spmc_in` is written from.
+    """
+    v = np.asarray(v_grid, dtype=float)
+    y = np.asarray(b_median, dtype=float)
+    y16 = np.asarray(b_p16, dtype=float)
+    y84 = np.asarray(b_p84, dtype=float)
+
+    data_bin_kms = v[2] - v[1]  # matches rtransvd's own awk: file lines 2,3 -> array indices 1,2
+    fac = np.sqrt(model_bin_kms / data_bin_kms)
+
+    v_in = v + voff
+    y_in = y.copy()
+    yl_in = (y - y16) / fac
+    yh_in = (y84 - y) / fac
+
+    total = y_in.sum()
+    y_in = y_in / total
+    yl_in = yl_in / total
+    yh_in = yh_in / total
+
+    if invert:
+        y_in = _invert_about_zero(v_in, y_in)
+        yl_in = _invert_about_zero(v_in, yl_in)
+        yh_in = _invert_about_zero(v_in, yh_in)
+
+    vp = v_in[0] - 2.0 * v_in[0] / float(ntot - 1) * np.arange(ntot)
+    in_range = (vp >= v_in[0]) & (vp <= v_in[-1])
+
+    yp = np.interp(vp, v_in, y_in)
+    ylp = np.interp(vp, v_in, yl_in)
+    yhp = np.interp(vp, v_in, yh_in)
+
+    yn = np.where(in_range, yp, 0.0)
+    ynl = np.where(in_range, yn - np.abs(ylp), 0.0)
+    # yhpold: out-of-range points carry forward the last in-range upper-error value
+    # (transvd.f never resets `yhpold` inside the else branch), so upper errors don't
+    # pinch to zero just past the data's own velocity coverage.
+    yhp_carried = np.full(ntot, 1e-1)
+    last = 1e-1
+    for i in range(ntot):
+        if in_range[i]:
+            last = yhp[i]
+        yhp_carried[i] = last
+    ynh = np.where(in_range, yn + np.abs(yhp), np.abs(yhp_carried))
+
+    yn = np.maximum(0.0, yn)
+    ynl = np.maximum(0.0, ynl)
+
+    vel, losvd, lower_err, upper_err = vp, yn, ynl, ynh
+
+    lower_err_corr = np.where((losvd - lower_err) < min_error, losvd - min_error, lower_err)
+    lower_err_corr = np.clip(lower_err_corr, 0, losvd)
+    lower_err_corr[losvd < losvd_clip] = 0
+
+    upper_err_corr = np.maximum(upper_err, losvd + min_error)
+
+    lower_err_corr = gaussian_filter1d(lower_err_corr, sigma=smoothing_sigma)
+    upper_err_corr = gaussian_filter1d(upper_err_corr, sigma=smoothing_sigma)
+
+    # fix_losvd_errs.py's own wing-zeroing: walk outward from the LOSVD's own peak in
+    # each direction and zero the lower error from its first local minimum onward.
+    center_idx = int(np.argmax(losvd))
+    lower_err_final = lower_err_corr.copy()
+
+    right_errs = lower_err_final[center_idx:]
+    right_min_global = center_idx + int(np.argmin(right_errs))
+    lower_err_final[right_min_global:] = 0
+
+    left_errs = lower_err_final[:center_idx + 1][::-1]
+    left_min_global = center_idx - int(np.argmin(left_errs))
+    lower_err_final[:left_min_global + 1] = 0
+
+    return vel, losvd, lower_err_final, upper_err_corr
+
+
+def write_spmc_in(bin_name: str, v_grid: np.ndarray, b_median: np.ndarray, b_p16: np.ndarray,
+                   b_p84: np.ndarray, outdir: str, model_bin_kms: float = 133.3) -> str:
+    """Write `<bin_name>spmc_in` directly from a `kinextract` uncertainty result,
+    replacing the legacy `pallmc.f` (`.mcfit2`) -> `rtransvd` -> `transvd` ->
+    `fix_losvd_errs.py` chain -- see `legacy_transvd_curve`'s own docstring for the
+    validated transform this reproduces and why `pallmc.f` no longer needs to
+    produce `.mcfit2` for `kinextract`-derived bins at all.
+
+    `invert` is derived from `bin_name` itself: `True` unless `bin_name` starts with
+    `"bnn"`, mirroring `finalizeextraction`'s own `rtransvd <bin> 1`/`rtransvd <bin>
+    -1` split exactly (`bin0105`, the dartboard's exact-center bin, does not start
+    with `bnn` and so is inverted, same as every other `bin*` stem).
+
+    Parameters
+    ----------
+    bin_name : the legacy bin stem, e.g. `"bin0105"` or `"bnn0704"` -- written as
+        `f"{outdir}/{bin_name}spmc_in"`.
+    v_grid, b_median, b_p16, b_p84 : this bin's own LOSVD curve (see
+        `legacy_transvd_curve`).
+    outdir : directory to write into (created if missing).
+
+    Returns
+    -------
+    Path to the written file.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    invert = not bin_name.startswith("bnn")
+    vel, losvd, lower_err, upper_err = legacy_transvd_curve(
+        v_grid, b_median, b_p16, b_p84, invert=invert, model_bin_kms=model_bin_kms)
+
+    path = os.path.join(outdir, f"{bin_name}spmc_in")
+    np.savetxt(path, np.column_stack([vel, losvd, lower_err, upper_err]),
+               fmt="%.6f %.8f %.8f %.8f")
+    return path

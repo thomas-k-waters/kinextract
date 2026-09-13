@@ -34,6 +34,8 @@ import numpy as np
 from .config import FitConfig
 from .forward_model import build_template_stack
 from .multi_template import fit_losvd
+from .noise_model import whiten
+from .robust_fit import full_pixel_model
 
 
 @dataclass
@@ -109,16 +111,26 @@ def reduce_templates_iteratively(bin_specs: list[tuple[np.ndarray, np.ndarray, n
         for bidx in participating:
             wave_fit, flux_fit, errors = bin_specs[bidx]
             A_stack = build_template_stack(wave_fit, template_wave, active_templates, v_grid)
-            A_stack_w = A_stack / errors[None, :, None]
-            y_w = flux_fit / errors
+            # whiten(..., rho=cfg.rho), not a bare A_stack/errors division -- this used to
+            # silently whiten as if rho=0.0 regardless of what cfg.rho actually held, so a
+            # caller passing a real (measured or fallback) AR(1) correlation had it quietly
+            # ignored here even though every other fit in this package respects it.
+            A_stack_w, y_w, _L = whiten(A_stack, flux_fit, errors, rho=cfg.rho)
 
-            result = fit_losvd(A_stack_w, y_w, cfg)
+            # wave_fit=wave_fit -- required whenever cfg.continuum_knots is set (fit_losvd
+            # raises otherwise); harmless to always pass since fit_losvd only uses it for
+            # continuum-cofitting's own wavelength-based B-spline basis.
+            result = fit_losvd(A_stack_w, y_w, cfg, wave_fit=wave_fit)
             w_norm = result["w"] / result["w"].sum()
             local_selected = np.where(w_norm > threshold)[0]
             global_selected = active_indices[local_selected]
 
-            A_eff_w = np.tensordot(result["w"], A_stack_w, axes=([0], [0]))
-            chi2_red = float(np.sum((A_eff_w @ result["b"] - y_w) ** 2)) / len(wave_fit)
+            # full_pixel_model, not a bare A_eff_w @ b -- under continuum-cofitting the
+            # fitted continuum is a separate multiplicative factor (reconstruct_continuum),
+            # not part of result["b"]; full_pixel_model applies it (a no-op multiply by 1.0
+            # when cfg.continuum_knots is None), so this stays correct either way.
+            model_w = full_pixel_model(result, A_stack_w, wave_fit, cfg)
+            chi2_red = float(np.sum((model_w - y_w) ** 2)) / len(wave_fit)
 
             per_bin_history[bidx].append(dict(
                 iteration=iteration, n_templates=len(active_indices),

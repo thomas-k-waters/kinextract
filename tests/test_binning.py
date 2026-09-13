@@ -11,7 +11,7 @@ import pytest
 from kinextract.binning import (
     DartboardBins, log_radial_edges, linear_radial_edges, uniform_theta_edges,
     build_reflected_sin_theta_edges, assign_spaxels_to_bins,
-    load_legacy_bin_edges, assign_legacy_dartboard_bins,
+    load_legacy_bin_edges, assign_legacy_dartboard_bins, pixel_aware_radial_edges,
 )
 
 
@@ -29,6 +29,60 @@ def test_log_radial_edges_spans_range_and_is_increasing():
 def test_log_radial_edges_rejects_nonpositive_r_min():
     with pytest.raises(ValueError, match="r_min"):
         log_radial_edges(0.0, 10.0, 5)
+
+
+def test_pixel_aware_radial_edges_second_edge_is_exactly_one_pixel():
+    edges = pixel_aware_radial_edges(pixel_scale=0.025, r_max=4.0, n_bins=10)
+    assert len(edges) == 11
+    assert edges[1] == pytest.approx(0.025)
+
+
+def test_pixel_aware_radial_edges_first_edge_is_a_formality_smaller_than_second():
+    edges = pixel_aware_radial_edges(pixel_scale=0.2, r_max=30.0, n_bins=8)
+    assert 0 < edges[0] < edges[1]
+
+
+def test_pixel_aware_radial_edges_last_edge_is_r_max_and_strictly_increasing():
+    edges = pixel_aware_radial_edges(pixel_scale=0.025, r_max=4.0, n_bins=10)
+    assert edges[-1] == pytest.approx(4.0)
+    assert np.all(np.diff(edges) > 0)
+
+
+def test_pixel_aware_radial_edges_beyond_center_is_geometric():
+    edges = pixel_aware_radial_edges(pixel_scale=1.0, r_max=100.0, n_bins=6)
+    beyond_center = edges[1:]  # pixel_scale ... r_max, geometric
+    ratios = beyond_center[1:] / beyond_center[:-1]
+    np.testing.assert_allclose(ratios, ratios[0], rtol=1e-10)
+
+
+def test_pixel_aware_radial_edges_with_dartboard_bins_collapses_only_the_center_pixel():
+    """The whole point: DartboardBins(single_center_bin=True) collapses everything
+    below r_edges[1] into one bin -- with r_edges[1]=pixel_scale exactly, only the
+    literal center pixel (r=0) should fall in that collapsed bin; the nearest ring
+    of real neighbors (r=1 pixel) must land in a genuine annulus."""
+    pixel_scale = 0.025
+    edges = pixel_aware_radial_edges(pixel_scale=pixel_scale, r_max=4.0, n_bins=15)
+    theta_edges = uniform_theta_edges(4)
+    bins = DartboardBins(r_edges=edges, theta_edges=theta_edges, center=(50.0, 50.0),
+                          single_center_bin=True)
+
+    shape = (101, 101)
+    bin_id_map, _ = assign_spaxels_to_bins(shape, bins, pixel_scale=pixel_scale)
+    center_bin_id = bin_id_map[50, 50]
+    # the literal center pixel and its immediate neighbor (1 pixel away) must NOT
+    # share the same collapsed bin id
+    neighbor_bin_id = bin_id_map[50, 51]
+    assert neighbor_bin_id != center_bin_id
+
+
+def test_pixel_aware_radial_edges_rejects_r_max_not_exceeding_pixel_scale():
+    with pytest.raises(ValueError, match="r_max"):
+        pixel_aware_radial_edges(pixel_scale=1.0, r_max=1.0, n_bins=5)
+
+
+def test_pixel_aware_radial_edges_rejects_too_few_bins():
+    with pytest.raises(ValueError, match="n_bins"):
+        pixel_aware_radial_edges(pixel_scale=0.1, r_max=10.0, n_bins=1)
 
 
 def test_linear_radial_edges_spans_range_and_is_uniform():
@@ -267,6 +321,30 @@ def test_assign_legacy_dartboard_bins_center_clips_into_innermost_ring(tmp_path)
     assert entry["irc"] == 1
 
 
+def test_assign_legacy_dartboard_bins_exact_center_lands_in_last_irv_not_first(tmp_path):
+    """plotbin3.f's own branch is `if(abs(x).ne.0) vp=atan(y/x) else vp=89.99` -- at the
+    literal grid center (x=0 *and* y=0 simultaneously, not just x=0), `np.arctan2(0, 0)`
+    silently returns 0.0 instead of the Fortran's forced 89.99, landing the center spaxel
+    in the *first* angular sector (irv=1) instead of the *last* one (irv=n_v). Confirmed
+    directly against a real N4751 run before this fix: this function reported the center
+    bin as "bin0101", plotbin3.f's own writebin (for the same 5-sector bin_v.out) writes
+    "bin0105" for the identical spaxel -- a real legacy-pipeline naming incompatibility,
+    not just an internal labeling choice (fitlovw/pallmc/... read files by this exact
+    name). test_..._perpendicular_point_lands_in_last_irv (above) does not cover this --
+    that test's own point is one pixel *off* center (x=0, y=+1.5), which np.arctan2
+    already handles correctly (arctan2(y>0, 0) = pi/2 exactly, no ambiguity); only the
+    fully-degenerate (0, 0) origin itself diverges."""
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    n_v = len(v_edges_deg) - 1
+    bin_id_map, bin_table = assign_legacy_dartboard_bins(
+        (100, 100), center=(50, 50), pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=1.0)
+    entry = next(r for r in bin_table if r["bin_id"] == bin_id_map[50, 50])
+    assert entry["irv"] == n_v
+    assert entry["bin_name"] == f"bin01{n_v:02d}"
+
+
 def test_assign_legacy_dartboard_bins_outside_outer_edge_is_unassigned(tmp_path):
     r_path, v_path = _write_legacy_edges(tmp_path)
     r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
@@ -285,3 +363,66 @@ def test_assign_legacy_dartboard_bins_perpendicular_point_lands_in_last_irv(tmp_
     minor_axis_point = (51, 50)  # x=0, y=+1.5 -> vp≈90deg, clipped to 89.99 -> last irv bin
     entry = next(r for r in bin_table if r["bin_id"] == bin_id_map[minor_axis_point])
     assert entry["irv"] == 3
+
+
+def test_fold_major_axis_default_true_matches_pre_toggle_behavior(tmp_path):
+    """fold_major_axis defaults to True specifically so every existing caller
+    (built before this parameter existed) keeps its current behavior -- see
+    assign_legacy_dartboard_bins's own docstring. Every hemisphere must be
+    +1 (north) by convention when folded, and bin_name must have no suffix."""
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    bin_id_map, bin_table = assign_legacy_dartboard_bins(
+        (100, 100), center=(50, 50), pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=1.0)
+    assert all(r["hemisphere"] == 1 for r in bin_table)
+    assert all(not r["bin_name"].endswith("s") for r in bin_table)
+
+
+def test_fold_major_axis_false_conserves_total_spaxel_count_and_footprint(tmp_path):
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    shape, center, pixel_scale = (100, 100), (50, 50), 1.0
+    bmap_f, btab_f = assign_legacy_dartboard_bins(
+        shape, center=center, pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=pixel_scale, fold_major_axis=True)
+    bmap_u, btab_u = assign_legacy_dartboard_bins(
+        shape, center=center, pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=pixel_scale, fold_major_axis=False)
+    # Same spaxels get assigned either way -- folding only changes which bin they
+    # land in, never whether they're inside r_edges[-1] at all.
+    np.testing.assert_array_equal(bmap_f >= 0, bmap_u >= 0)
+    assert sum(r["n_spaxels"] for r in btab_f) == sum(r["n_spaxels"] for r in btab_u)
+
+
+def test_fold_major_axis_false_north_plus_south_equals_folded_count(tmp_path):
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    shape, center, pixel_scale = (100, 100), (50, 50), 1.0
+    _, btab_f = assign_legacy_dartboard_bins(
+        shape, center=center, pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=pixel_scale, fold_major_axis=True)
+    _, btab_u = assign_legacy_dartboard_bins(
+        shape, center=center, pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=pixel_scale, fold_major_axis=False)
+    for row in btab_f:
+        n_folded = row["n_spaxels"]
+        n_north = next((r["n_spaxels"] for r in btab_u
+                         if r["bin_name"] == row["bin_name"] and r["hemisphere"] == 1), 0)
+        south_name = row["bin_name"] + "s"
+        n_south = next((r["n_spaxels"] for r in btab_u
+                         if r["bin_name"] == south_name and r["hemisphere"] == -1), 0)
+        assert n_north + n_south == n_folded
+
+
+def test_fold_major_axis_false_south_bin_name_has_s_suffix(tmp_path):
+    r_path, v_path = _write_legacy_edges(tmp_path)
+    r_edges, v_edges_deg = load_legacy_bin_edges(r_path, v_path)
+    bin_id_map, bin_table = assign_legacy_dartboard_bins(
+        (100, 100), center=(50, 50), pa_deg=0.0, r_edges=r_edges, v_edges_deg=v_edges_deg,
+        pixel_scale=1.5, fold_major_axis=False)
+    south_point = (49, 51)  # y=-1.5 (south of major axis), x=+1.5 -> "bin" side, south hemisphere
+    entry = next(r for r in bin_table if r["bin_id"] == bin_id_map[south_point])
+    assert entry["hemisphere"] == -1
+    assert entry["bin_name"].endswith("s")
+    assert entry["bin_name"][:-1].startswith("bin")

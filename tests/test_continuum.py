@@ -20,9 +20,22 @@ import numpy as np
 
 from kinextract import (
     FitConfig, build_template_stack, build_spline_truth, compute_losvd_moments,
-    build_bspline_basis, difference_matrix, fit_losvd_with_continuum,
+    build_bspline_basis, difference_matrix, fit_losvd_basis,
 )
 from kinextract.continuum import fit_continuum_block
+
+# fit_losvd_with_continuum was folded into fit_losvd_basis directly (its own
+# continuum_basis/D2_c parameters) -- this reproduces exactly what that removed
+# wrapper did internally, so these tests exercise the same basis/D2/max_iter as
+# before, not fit_losvd(cfg)'s own bare defaults (which would use cfg.penalty_order,
+# not the order=2 D2 these tests build by hand below via _setup).
+def _fit_with_continuum(A_stack_w, y_w, wave_fit, basis, D2, lam, n_continuum_knots=4,
+                         lam_c=2.0, ridge_c=0.1):
+    basis_c, n_coef_c = build_bspline_basis(wave_fit, n_interior_knots=n_continuum_knots, degree=3)
+    dw = (wave_fit.max() - wave_fit.min()) / (n_continuum_knots + 1)
+    D2_c = difference_matrix(n_coef_c, order=2, dv=dw, dv_ref=dw)
+    return fit_losvd_basis(A_stack_w, y_w, basis, D2, lam=lam, max_iter=15,
+                            continuum_basis=basis_c, D2_c=D2_c, lam_c=lam_c, ridge_c=ridge_c)
 
 
 def _setup(templates, true_w, vel=0.0, sig=140.0, snr=100.0, true_C=None, seed=0):
@@ -104,7 +117,7 @@ def test_3block_recovers_a_known_injected_continuum_distortion():
     A_stack_w, y_w, wave_fit, basis, D2, cfg, v_grid, true_C = _setup(
         templates, true_w, sig=140.0, snr=100.0, true_C=true_C, seed=0
     )
-    result = fit_losvd_with_continuum(A_stack_w, y_w, wave_fit, basis, D2, n_continuum_knots=4, lam=cfg.lam)
+    result = _fit_with_continuum(A_stack_w, y_w, wave_fit, basis, D2, lam=cfg.lam)
     m = compute_losvd_moments(v_grid, result["b"])
 
     assert abs(m["sherm"] - 140.0) < 5.0, f"sigma recovery off: {m['sherm']:.2f}"
@@ -147,7 +160,7 @@ def test_weights_are_not_contaminated_by_an_adversarial_continuum_degeneracy():
         A_stack_w, y_w, wave_fit, basis, D2, cfg, v_grid, true_C_ = _setup(
             templates, true_w, sig=140.0, snr=100.0, true_C=true_C, seed=seed
         )
-        result = fit_losvd_with_continuum(A_stack_w, y_w, wave_fit, basis, D2, n_continuum_knots=4, lam=cfg.lam)
+        result = _fit_with_continuum(A_stack_w, y_w, wave_fit, basis, D2, lam=cfg.lam)
         w_norm = result["w"] / result["w"].sum()
         w_errs.append(np.abs(w_norm - true_w).max())
 
@@ -180,7 +193,7 @@ def test_flat_continuum_case_matches_the_validated_2block_fit_closely():
     A_stack_w, y_w, wave_fit, basis, D2, cfg, v_grid, true_C = _setup(
         templates, true_w, sig=140.0, snr=100.0, true_C=None, seed=2
     )
-    result_3block = fit_losvd_with_continuum(A_stack_w, y_w, wave_fit, basis, D2, n_continuum_knots=4, lam=cfg.lam)
+    result_3block = _fit_with_continuum(A_stack_w, y_w, wave_fit, basis, D2, lam=cfg.lam)
     result_2block = fit_losvd_basis(A_stack_w, y_w, basis, D2, lam=cfg.lam)
 
     m3 = compute_losvd_moments(v_grid, result_3block["b"])
@@ -239,7 +252,7 @@ def test_continuum_low_snr_flagged_failure_is_attributable_and_not_a_real_accura
         return out
 
     monkeypatch.setattr(continuum_mod, "fit_continuum_block", _forced_failure)
-    result_continuum = fit_losvd_with_continuum(A_stack_w, y_w, wave_fit, basis, D2, n_continuum_knots=4, lam=cfg.lam)
+    result_continuum = _fit_with_continuum(A_stack_w, y_w, wave_fit, basis, D2, lam=cfg.lam)
 
     assert not result_continuum["success"]
     # message should name the block that actually failed, not default to the LOSVD's own.

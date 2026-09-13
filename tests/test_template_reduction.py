@@ -14,6 +14,7 @@ recovery, which the manual end-to-end validation against
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 import tempfile
 
@@ -21,6 +22,7 @@ import numpy as np
 
 from kinextract import FitConfig, build_spline_truth
 from kinextract.forward_model import build_template_stack
+from kinextract.noise_model import whiten
 from kinextract.template_reduction import (
     reduce_templates_iteratively, save_template_subset, load_template_subset,
 )
@@ -169,3 +171,60 @@ def test_save_and_load_template_subset_roundtrips():
     finally:
         if os.path.exists(path):
             os.remove(path)
+
+
+def test_cfg_rho_is_actually_respected_not_silently_whitened_as_zero():
+    # Regression test: reduce_templates_iteratively used to whiten by hand
+    # (A_stack/errors, flux/errors) regardless of cfg.rho, so a caller
+    # passing a real AR(1) correlation had it silently ignored -- every
+    # other fit path in this package respects cfg.rho via noise_model.whiten.
+    # Confirm the union/weights this loop actually returns differ between
+    # rho=0.0 and a strongly-correlated rho on the same data (a real effect,
+    # not noise -- AR(1) whitening changes which pixels the fit trusts).
+    bin_specs, templates, wavelength, cfg = _make_bin_specs(n_bins=3, snr=80.0, seed=6)
+    cfg_rho0 = dataclasses.replace(cfg, rho=0.0)
+    cfg_rho_hi = dataclasses.replace(cfg, rho=0.9)
+
+    result_rho0 = reduce_templates_iteratively(bin_specs, templates, wavelength, cfg_rho0,
+                                                threshold=1e-3, max_iterations=5)
+    result_rho_hi = reduce_templates_iteratively(bin_specs, templates, wavelength, cfg_rho_hi,
+                                                  threshold=1e-3, max_iterations=5)
+
+    chi2_rho0 = result_rho0.per_bin_history[0][0]["chi2_red"]
+    chi2_rho_hi = result_rho_hi.per_bin_history[0][0]["chi2_red"]
+    assert chi2_rho0 != chi2_rho_hi, (
+        "chi2_red identical between rho=0.0 and rho=0.9 -- cfg.rho is being ignored again"
+    )
+
+    # Cross-check against calling noise_model.whiten directly at the same rho values --
+    # the first iteration's own chi2_red should match a by-hand whitened fit exactly
+    # (same whitening this loop is supposed to use internally).
+    from kinextract.multi_template import fit_losvd
+    from kinextract.robust_fit import full_pixel_model
+    wave_fit, flux_fit, errors = bin_specs[0]
+    v_grid = cfg.build_velocity_grid()
+    A_stack = build_template_stack(wave_fit, wavelength, templates, v_grid)
+    A_stack_w, y_w, _L = whiten(A_stack, flux_fit, errors, rho=0.9)
+    result = fit_losvd(A_stack_w, y_w, cfg_rho_hi, wave_fit=wave_fit)
+    model_w = full_pixel_model(result, A_stack_w, wave_fit, cfg_rho_hi)
+    expected_chi2 = float(np.sum((model_w - y_w) ** 2)) / len(wave_fit)
+    assert np.isclose(chi2_rho_hi, expected_chi2), (
+        f"chi2_red={chi2_rho_hi} doesn't match a by-hand whiten(rho=0.9) fit ({expected_chi2}) "
+        "-- reduce_templates_iteratively isn't whitening at cfg.rho internally"
+    )
+
+
+def test_continuum_knots_runs_without_crashing():
+    # Regression test: reduce_templates_iteratively used to call fit_losvd
+    # without wave_fit, which raises ValueError as soon as cfg.continuum_knots
+    # is set (continuum-cofitting needs the wavelength grid to build its own
+    # B-spline basis) -- this combination is real, not hypothetical: any
+    # target whose kinematic-fitting notebook cofits a continuum needs its
+    # own template-calibration notebook to run under the same cfg, including
+    # continuum_knots, for template selection to reflect the real fit.
+    bin_specs, templates, wavelength, cfg = _make_bin_specs(n_bins=2, snr=80.0, seed=7)
+    cfg_continuum = dataclasses.replace(cfg, continuum_knots=3, lam_c=2.0, ridge_c=0.1)
+    result = reduce_templates_iteratively(bin_specs, templates, wavelength, cfg_continuum,
+                                           threshold=1e-3, max_iterations=3)
+    assert result.n_iterations >= 1
+    assert len(result.union_selected) >= 1

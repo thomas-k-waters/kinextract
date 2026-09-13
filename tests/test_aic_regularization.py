@@ -206,3 +206,162 @@ def test_estimate_m_eff_with_a_deliberately_mismatched_L_changes_the_result():
     m_eff_plain, _, _ = estimate_m_eff(A_stack_w, y_w, cfg, lam=2.0, n_boot=15, seed=2, L=L_uncorrelated)
     m_eff_correlated, _, _ = estimate_m_eff(A_stack_w, y_w, cfg, lam=2.0, n_boot=15, seed=2, L=L_strongly_correlated)
     assert m_eff_plain != m_eff_correlated
+
+
+def _mock_continuum(sigma=100.0, snr=80.0, seed=0, continuum_knots=4, lam_c=2.0, ridge_c=0.1):
+    """Same construction as `_mock`, plus a true sinusoidal continuum
+    distortion and `wave_fit` (needed for the continuum spline basis) --
+    for `estimate_m_eff_local`/`select_lambda_aic_local`'s continuum-
+    cofitting support specifically.
+    """
+    wavemin, step, n_pix = 4750.0, 1.25, 3681
+    wavefitmin, wavefitmax = 8400.0, 8800.0
+    wavelength = wavemin + np.arange(n_pix) * step
+    mask = (wavelength >= wavefitmin) & (wavelength <= wavefitmax)
+    wave_fit = wavelength[mask]
+
+    template = np.ones(n_pix)
+    for cen, depth in zip([8498.02, 8542.09, 8662.14], [0.55, 0.70, 0.65]):
+        template -= depth * np.exp(-0.5 * ((wavelength - cen) / 5.0) ** 2)
+
+    cfg = FitConfig(vmin=-7 * sigma, vmax=7 * sigma, lam_selection="fixed", lam=4096.0,
+                     penalty_order=3, continuum_knots=continuum_knots, lam_c=lam_c, ridge_c=ridge_c)
+    v_grid = cfg.build_velocity_grid()
+    b_truth, _ = build_spline_truth(v_grid, vel=0.0, sigma=sigma, wiggle_scale=0.0, seed=seed)
+    A_stack = build_template_stack(wave_fit, wavelength, [template], v_grid)
+    galaxy_noiseless = A_stack[0] @ b_truth
+
+    frac = (wave_fit - wave_fit.min()) / (wave_fit.max() - wave_fit.min())
+    true_C = 1.0 + 0.1 * np.sin(np.pi * frac)
+    galaxy_noiseless = galaxy_noiseless * true_C
+
+    noise_level = np.median(galaxy_noiseless) / snr
+    rng = np.random.default_rng(seed)
+    galaxy = galaxy_noiseless + rng.normal(0.0, noise_level, len(wave_fit))
+    errors = np.full(len(wave_fit), noise_level)
+    A_stack_w = A_stack / errors[None, :, None]
+    y_w = galaxy / errors
+    return A_stack_w, y_w, cfg, wave_fit
+
+
+def test_m_eff_local_continuum_off_matches_pre_continuum_behavior():
+    """Regression guard: the no-continuum branch of `estimate_m_eff_local`
+    must be untouched by the continuum extension -- same numeric result
+    as a plain `_mock()` call at a fixed lam, with `wave_fit` simply not
+    passed (as every pre-existing caller does)."""
+    A_stack_w, y_w, cfg = _mock(sigma=100.0, snr=80.0, seed=5)
+    m_eff_a, chi2_a, _ = estimate_m_eff_local(A_stack_w, y_w, cfg, lam=4096.0)
+    m_eff_b, chi2_b, _ = estimate_m_eff_local(A_stack_w, y_w, cfg, lam=4096.0, wave_fit=None)
+    assert m_eff_a == m_eff_b
+    assert chi2_a == chi2_b
+
+
+def test_m_eff_local_continuum_requires_wave_fit():
+    A_stack_w, y_w, cfg, wave_fit = _mock_continuum()
+    try:
+        estimate_m_eff_local(A_stack_w, y_w, cfg, lam=4096.0)
+        assert False, "expected ValueError for missing wave_fit under continuum_knots"
+    except ValueError as e:
+        assert "continuum_knots" in str(e) and "wave_fit" in str(e)
+
+
+def test_m_eff_local_continuum_runs_and_is_finite():
+    A_stack_w, y_w, cfg, wave_fit = _mock_continuum()
+    m_eff, chi2, result = estimate_m_eff_local(A_stack_w, y_w, cfg, lam=4096.0, wave_fit=wave_fit)
+    assert np.isfinite(m_eff) and m_eff > 0
+    assert np.isfinite(chi2) and chi2 > 0
+    assert result["success"]
+    assert "C" in result and "continuum_coeffs" in result
+
+
+def test_m_eff_local_continuum_chi2_uses_the_continuum_multiplied_model():
+    """The joint chi2 must be computed against `C * (A_eff @ b)`, not
+    `A_eff @ b` alone -- otherwise it silently ignores a real, converged
+    part of the model and disagrees with what the fit itself minimized."""
+    A_stack_w, y_w, cfg, wave_fit = _mock_continuum()
+    _, chi2, result = estimate_m_eff_local(A_stack_w, y_w, cfg, lam=4096.0, wave_fit=wave_fit)
+    w = result["w"]
+    A_eff = sum(w[k] * A_stack_w[k] for k in range(len(w)))
+    model_with_C = result["C"] * (A_eff @ result["b"])
+    model_without_C = A_eff @ result["b"]
+    chi2_with_C = float(np.sum((y_w - model_with_C) ** 2))
+    chi2_without_C = float(np.sum((y_w - model_without_C) ** 2))
+    assert abs(chi2 - chi2_with_C) < 1e-6
+    assert abs(chi2 - chi2_without_C) > 1e-3  # the two must actually differ for this to be a real check
+
+
+def test_m_eff_local_continuum_is_higher_for_less_regularized_fits():
+    # same qualitative sanity check as the no-continuum version, for the
+    # joint LOSVD+continuum linearization.
+    A_stack_w, y_w, cfg, wave_fit = _mock_continuum()
+    m_eff_flexible, _, _ = estimate_m_eff_local(A_stack_w, y_w, cfg, lam=1.0, wave_fit=wave_fit)
+    m_eff_stiff, _, _ = estimate_m_eff_local(A_stack_w, y_w, cfg, lam=1e6, wave_fit=wave_fit)
+    assert m_eff_flexible > m_eff_stiff
+
+
+def test_select_lambda_aic_local_supports_continuum():
+    A_stack_w, y_w, cfg, wave_fit = _mock_continuum()
+    lam_grid = [256.0, 1024.0, 4096.0, 16384.0]
+    result = select_lambda_aic_local(A_stack_w, y_w, cfg, lam_grid, wave_fit=wave_fit)
+    assert result.best_lam in lam_grid
+    assert len(result.chi2) == len(result.m_eff) == len(result.criterion) == len(lam_grid)
+    assert result.best_fit is not None
+    assert "C" in result.best_fit
+
+
+def test_model_prediction_includes_continuum_factor():
+    """`estimate_m_eff`'s own `_model_prediction` helper (bootstrap noise
+    is injected around this) must include the continuum multiplier, same
+    as `estimate_m_eff_local`'s chi2 does -- otherwise the bootstrap
+    "ground truth" this closed-form estimator is meant to be validated
+    against (both functions' own docstrings) is itself wrong under
+    continuum, silently. Found via that exact reasoning, not a symptom --
+    no test previously exercised `estimate_m_eff`/`select_lambda_aic`
+    under continuum at all."""
+    from kinextract.aic_regularization import _model_prediction
+    A_stack_w, y_w, cfg, wave_fit = _mock_continuum()
+    _, _, result = estimate_m_eff_local(A_stack_w, y_w, cfg, lam=4096.0, wave_fit=wave_fit)
+    assert result.get("C") is not None
+    w = result["w"]
+    A_eff = sum(w[k] * A_stack_w[k] for k in range(len(w)))
+    expected = result["C"] * (A_eff @ result["b"])
+    got = _model_prediction(A_stack_w, result)
+    np.testing.assert_allclose(got, expected)
+
+
+def test_m_eff_local_chi2_matches_bootstrap_chi2_at_the_same_lam_under_continuum():
+    """Same exact-agreement check as the no-continuum
+    `test_m_eff_local_chi2_matches_bootstrap_chi2_at_the_same_lam`, now
+    under continuum-cofitting -- both estimators fit the same
+    deterministic problem at a given lam (n_boot=1, no bootstrap
+    resampling actually needed for this comparison), so their chi2 must
+    agree exactly. This is `estimate_m_eff_local`'s own designated
+    ground-truth check (both docstrings), and previously could not pass
+    here at all -- `estimate_m_eff`'s chi2 silently ignored the continuum
+    factor before the `_model_prediction` fix above."""
+    A_stack_w, y_w, cfg, wave_fit = _mock_continuum()
+    _, chi2_local, _ = estimate_m_eff_local(A_stack_w, y_w, cfg, lam=4096.0, wave_fit=wave_fit)
+    _, chi2_boot, _ = estimate_m_eff(A_stack_w, y_w, cfg, lam=4096.0, n_boot=1, seed=0, wave_fit=wave_fit)
+    assert abs(chi2_local - chi2_boot) < 1e-6
+
+
+def test_fit_losvd_aic_local_with_continuum_no_longer_falls_back():
+    """End-to-end regression test for the fallback this whole extension
+    removes: `fit_losvd(cfg.lam_selection='aic_local', cfg.continuum_knots
+    set)` used to silently substitute a fixed lam with a UserWarning --
+    it must now actually run the adaptive scan instead."""
+    import warnings
+    from kinextract.multi_template import fit_losvd
+
+    A_stack_w, y_w, cfg, wave_fit = _mock_continuum()
+    cfg_adaptive = FitConfig(vmin=cfg.vmin, vmax=cfg.vmax, continuum_knots=cfg.continuum_knots,
+                              lam_c=cfg.lam_c, ridge_c=cfg.ridge_c, lam_selection="aic_local",
+                              penalty_order=3)
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter("always")
+        result = fit_losvd(A_stack_w, y_w, cfg_adaptive, wave_fit=wave_fit)
+    fallback_warnings = [x for x in w if "does not support continuum" in str(x.message)]
+    assert len(fallback_warnings) == 0
+    assert result["success"]
+    assert "C" in result and "continuum_coeffs" in result
+    assert np.isfinite(result["lam_used"]) and result["lam_used"] > 0

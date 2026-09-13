@@ -777,3 +777,417 @@ priority given Laplace is already the decided default and bootstrap's
 disadvantage is already unambiguous in every cell tested); rerun the 2
 NaN cases specifically against current code for full certainty the fix
 covers them (see above).
+
+---
+
+## 2026-08-07: NGC 5102 regression (point estimate + uncertainty), and a
+## package-level fix for the mechanism behind it
+
+**Trigger**: user reported NGC 5102's `07_full_galaxy_analysis.ipynb`
+output had "regressed pretty significantly" -- flat h3/h4 (~1e-4
+everywhere) and, once that was fixed, visibly "non-sensical" error bars
+on the radial profile plot (confirmed against a user-supplied screenshot).
+
+**Bug 1 -- point estimate h3/h4 collapse.** A prior phase's fixed
+`lam=4096, penalty_order=3` (validated only for N4751's real regime,
+sigma 275-1186 km/s) was carried into NGC 5102's own notebook, whose real
+sigma (14-95 km/s) gives a NSIG=7 velocity grid only ~200-700 km/s wide --
+2-14 knots at `knot_spacing_kms=95`, well under `FitConfig`'s
+`min_interior_knots=16` floor, inflating the *effective* lam by orders of
+magnitude and crushing the LOSVD toward a pure Gaussian. Fix: reverted
+NGC 5102's own notebook to `CONTINUUM_KNOTS=None, LOSVD_LAM=2.0,
+LOSVD_PENALTY_ORDER=2` (its pre-regression defaults). N4751 unaffected
+(its lowest real sigma, 275 km/s, stays safely above the knot floor even
+at NSIG=7) and left unchanged.
+
+**Bug 2 -- uncertainty instability, root cause.** `laplace_losvd_uncertainty`
+(the base, non-continuum Laplace engine) ignores `cfg.lam_selection`/
+`cfg.lam` entirely and *always* AIC-weight-scans the full
+`cfg.resolved_lam_grid()`. At NGC 5102's low S/N this handed >90% of the
+pooled weight to an unstable `lam=0.5` candidate whose own posterior is
+dominated by divergent-edge solutions -- exactly finding #2 from the
+2026-08-xx entry above (an unrepresentatively tight sample from a
+low-weight, poorly-sampled lam candidate), just now observed distorting
+*production* output rather than a synthetic sweep. Reproduced directly on
+real cached bins: `h3_std`/`h4_std` inflated 2-40x versus a single-lam
+evaluation across the 10 worst-affected bins.
+
+**Fix, package-level.** `quick_laplace_uncertainty` (pre-existing,
+previously underused) already does the right thing for a bin whose point
+estimate was fit at one *known, fixed* lam: run adaptive selection once
+if needed, then a single Laplace pass at that lam -- no grid ensemble.
+Added a three-way dispatch to `_laplace_losvd_uncertainty_worker` (the
+`laplace_losvd_uncertainty_parallel` worker): continuum-cofitting bins ->
+`laplace_continuum_uncertainty` (unchanged); non-continuum, *fixed*-lam
+bins -> `quick_laplace_uncertainty` (new route); non-continuum,
+*adaptive*-lam bins -> `laplace_losvd_uncertainty` (unchanged, still
+correct for genuine adaptive selection). This makes every future caller
+of the parallel API safe against this class of bug, not just the two
+call sites patched directly (NGC 5102's notebook, and
+`sco_framework_updated/bin/run_losvd_errors.py`, the latter of which was
+also found to be carrying *no* continuum-cofitting metadata at all across
+the GreatLakes handoff -- a second, preventative fix, since N4751's own
+GreatLakes uncertainty step hadn't been run yet and would have silently
+refit the wrong model). Verified byte-identical `.kinematics` output
+between the old `lam_grid=(lam,)` caller-side workaround and the new
+dispatch, on real N4751 bin data, across all three routes.
+
+**NGC 5102 end-to-end result** (full 275-bin re-run, both fixes applied):
+`h4_std` max fell from 0.297 to 0.094 (median 0.027), 0 bins with
+`h4_std > 0.1` (previously several), 0 NaN. Radial profile plot visually
+confirmed dramatically tighter, sensible error bars with real V/sigma/h3/
+h4 structure, matching the user's screenshot pixel-for-pixel in the
+*pre*-uncertainty-fix state (confirming the screenshot was current, not
+stale, before the fix landed).
+
+**Validation sweep, to confirm no regression and characterize the fix's
+tradeoffs** (`coverage_sweep.py`, sigma={20,50,90,300} x snr={40,80},
+n_truths=8/cell for laplace/quick_laplace, reduced to sigma={20,90} x
+snr={40,80}, n_truths=4/cell for bootstrap after it proved ~5x slower
+than expected under CPU contention from the other concurrent jobs; all
+three below use `mocks.py`'s bare-default `FitConfig`, i.e.
+`lam_selection="aic_local"` -- an *adaptive*-selection mock, not the
+fixed-lam production case the dispatch fix targets):
+
+| method | sigma cov. (raw, pooled) | h4 cov. (raw, pooled) |
+|---|---|---|
+| laplace (adaptive ensemble) | 75% | 47% |
+| quick_laplace (single-lam) | 52% | 16% |
+| bootstrap | 38% | 0% |
+
+Full test suite (342 passed, 1 skipped, 0 failed) confirms the dispatch
+change itself introduces no regression.
+
+**Reading the sweep correctly -- this is not "quick_laplace is broken."**
+In this sweep, `quick_laplace_uncertainty` still uses `lam_selection=
+"aic_local"` internally (per its own docstring: run adaptive selection
+once, then commit to a *single* resulting lam). Its worse coverage here
+versus full adaptive `laplace_losvd_uncertainty` is exactly the expected
+cost of skipping AIC-ensemble marginalization over lam-selection
+uncertainty -- there is real ambiguity in which lam the data support in
+this mock, and only the full ensemble captures it. This is *not* the
+same situation as NGC 5102/N4751's real bins, where lam is fixed by
+design (not data-selected), so there is no lam-selection uncertainty to
+marginalize and `quick_laplace_uncertainty`'s single pass at that fixed
+lam is the *correct*, matching-the-actual-model choice -- which is why
+the new dispatch routes only `lam_selection=="fixed"` bins to it, never
+`"aic_local"` ones. Bootstrap's continued last-place finish (0% h4
+coverage across all 16 cases, including the previously-untested sigma=20
+point) is consistent with every previously-recorded cell in this file.
+
+**sigma=20 specifically** (new, not previously tested in this project):
+follows the same qualitative pattern as sigma=50/90 above -- adaptive
+Laplace's h4 coverage (25% at sigma=20) is low but non-zero and still
+clearly ahead of bootstrap's 0%, consistent with the low-sigma h4
+undercoverage already flagged as an open, unresolved gap earlier in this
+file (not a new regression from this session's changes).
+
+**NUTS spot-check at sigma=20** (2 truths, same pattern as the earlier
+sigma~50/90-ish 2-cell check referenced above; `quick_laplace_uncertainty`
+vs `nuts_losvd_uncertainty` at the *same* `lam_used`, same noise draw):
+
+| truth | true sherm | true h4 | point sherm | quick_laplace sherm_std | NUTS sherm_std | quick_laplace h4_std | NUTS h4_std |
+|---|---|---|---|---|---|---|---|
+| #0 (lam=8) | 18.52 | -0.039 | 11.85 | 5.43 | 2.18 | 0.0019 | 0.0020 |
+| #1 (lam=32800) | 19.70 | -0.004 | 14.77 | 5.85 | 0.02 | 0.0004 | 0.0000 |
+
+h4_std tracks closely between the two engines at both truths (as the
+earlier spot-check also found). sherm_std does *not* -- NUTS's actual
+posterior is narrower than the Laplace approximation's at both truths,
+dramatically so at truth #1 (a very high `lam_used`, where heavy
+curvature regularization pins the coefficient posterior tightly around
+whatever the point estimate landed on). **This points away from, not
+toward, "the Laplace approximation is too narrow" as an explanation for
+low-sigma undercoverage** -- if anything the reverse holds here. Coverage
+at both truths is a **point-estimate bias** story instead: truth #0's
+point sherm (11.85) sits ~6.7 km/s below the true 18.52, more than one
+quick_laplace sigma away -- checking directly, the reported interval
+`[6.42, 17.28]` excludes the true value even though the band itself is
+the *wider* of the two engines' bands; NUTS's tighter band excludes it by
+more. Truth #1's much larger bias (14.77 vs true 19.70) happens to still
+be covered by quick_laplace's wide band but would be missed by NUTS's
+near-point posterior. **This confirms/extends finding #1 from the
+2026-08-xx entry above** (regularization-driven point-estimate bias, not
+approximation quality, is the dominant lever at low sigma) using the
+actual gold-standard posterior rather than only a standardized-residual
+argument -- n=2 is a spot-check, not a formal sweep, so treat this as
+corroborating evidence, not new statistical proof.
+
+**Not done**: a larger-n NUTS sweep at sigma=20 for a formal coverage
+percentage (each case costs ~20-40s here, vs quick_laplace's ~3-4s, so a
+full n_truths=8 x 2-snr sweep is feasible but was not run, given n=2
+already reproduces the same qualitative conclusion as the prior
+sigma~50/90-ish check); extending `coverage_sweep.py`'s
+`--apply-bias-correction` path (present but not exercised this run -- the
+`_corrected` columns in this run's CSVs are identical to `_raw` since the
+flag was off, not because correction had no effect); a point-estimate
+bias-correction fix for the Laplace engine specifically (the existing
+regularization-bias correction machinery is calibrated against bootstrap
+only, per the still-open item from the 2026-08-xx entry above -- this
+remains the single most concretely-identified lever for closing the
+low-sigma coverage gap, now corroborated twice).
+
+---
+
+## 2026-08-07 (later): NGC 5102's radial profile plot is still bad after
+## both bugs above were fixed -- a real, deeper, still-open issue, NOT a
+## regression from either fix
+
+**PARTIALLY SUPERSEDED, then VINDICATED -- see
+`dev_notes/real_data_sigma/FINDINGS.md`'s two 2026-08-08 entries.** The
+first entry (morning) correctly diagnosed a *different*, real bug (a
+fixed `lam=2.0` bypassing `max_edge_amplitude_frac`'s pedestal filter)
+and its fix (restoring `lam_selection="aic_local"`) marked this entry
+superseded that same night. That was premature: the wide error bars this
+entry chased were never actually re-checked after the aic_local fix
+landed, and turned out to still be present -- for a mechanism close to
+what this entry's own steps 3/5 already found (chi2/dof far below 1, an
+over-generous error budget), confirmed directly on 2026-08-08 (later) at
+chi2/dof=0.08-0.13. The rho-measured-from-one-aperture concern (step
+five) was real and is now fixed (`fit_losvd_robust(measure_rho=True)`);
+the concurrent "no plateau anywhere in the lam grid" finding (step three)
+turned out to be a *separate*, also-real multi-start instability problem
+in adaptive lam selection itself, fixed by switching to a fixed,
+pre-validated lam instead of chasing a plateau that isn't there to find.
+See the newer entry for the full resolution and its own honest result:
+point estimates improved substantially, but once the error budget is
+genuinely correct, the remaining uncertainty width turned out to be real,
+not a further-fixable artifact.
+
+**Trigger**: user shared a fresh screenshot of the post-fix radial profile
+plot (same notebook, both bugs above already fixed and re-verified) and
+called it "still a severe regression... horrible plots" -- V/sigma error
+bars nearly as large as the signal itself, and h4 suspiciously uniform
+(~0.03-0.05) across nearly the whole galaxy instead of showing real
+bin-to-bin structure.
+
+**First, ruled out the two already-fixed bugs as the cause** (both
+confirmed still fixed, neither explains this plot):
+- h4 shows real bin-to-bin variation (0.011 to 0.206 across 275 bins, not
+  uniformly ~1e-4) -- the point-estimate collapse bug is not back.
+- Direct check: `quick_laplace_uncertainty` at the fixed lam=2 gives
+  *smaller* sherm_std than the adaptive AIC-ensemble alternative would for
+  the same real bins (13.25 vs 23.37 at one bin; AIC's own pick is
+  lam=0.5, unstable) -- the lam-lottery fix is working as intended, not
+  contributing to the large error bars.
+
+**Second, checked whether the large error bars are simply real** (not a
+bug at all). A much older, pre-variance-inflation cache on disk
+(`clip3.0_iter3_robustTrue`, a naive hard-sigma-clip method) shows
+error bars 30-40x tighter (sherm_std median 0.51 vs current 14.3) -- but
+that old method's tiny errors are independently documented
+(`dev_notes/variance_inflation/FINDINGS.md`) as *underestimates*: real
+chi2_red on real MUSE data commonly runs 11-28 under that method, meaning
+its reported errors were structurally too small, not a "good" baseline to
+reproduce. Direct rho-sensitivity check on a real bin found the large
+error bars persist even at `rho=0` (no correlation whitening at all),
+ruling that specific knob out as the sole driver too.
+
+**Third: a multi-lam bias scan on 4 real bins (spanning the full radius
+range) found something genuinely new and concerning.** Scanning
+lam=0.125 to 64 (order-2 penalty) on each bin: **neither sherm nor h4
+plateaus anywhere in that range** -- both climb continuously and smoothly
+with lam in every bin tested, with sherm reaching unphysical values
+(200-330 km/s) at the high end. The current `LOSVD_LAM=2.0` default sits
+at an arbitrary point on this continuously-drifting curve, not on any
+validated plateau specific to NGC 5102's real data -- it was carried over
+from validation on other targets/S-N regimes, never independently
+confirmed here. The likely mechanism: **chi2/dof is well below 1 (0.30-
+0.50) even at the weakest regularization tested**, meaning the fit
+already matches the data better than the reported noise level should
+allow -- exactly the AIC-keeps-rewarding-less-regularization signature of
+an over-generous error budget, with nothing to anchor a "right" lam.
+
+**Fourth: directly measured whether variance inflation (`fit_losvd_
+inflate`, `INFLATION_CAP=8.0`) was the over-generous error source --
+ruled out cleanly.** Across all 275 real bins: median inflation factor is
+exactly 1.0 (no inflation for the typical pixel); even the per-bin
+*maximum* inflation factor only reaches a median of 2.2, and essentially
+no bins hit the cap (max 0.3% of pixels in the single worst bin).
+Confirmed directly on one bin: inflated vs. original error ratio = 1.00.
+**This was the leading hypothesis and it is wrong** -- variance inflation
+is doing almost nothing for this target's real bins, so it cannot be
+responsible for the over-generous error budget found in step three.
+
+**Fifth: traced the over-generous error budget to `MEASURED_RHO=0.88`
+itself, likely conflating genuine detector correlation with unmodeled
+model-residual structure.** `05_noise_correlation.ipynb`'s own saved
+output shows `measured_rho=0.88` was computed from a fit residual with
+**chi2_red=10.2** (raw errors) -- meaning the residual used for the lag-1
+ACF measurement is already ~3x larger than photon noise alone would
+predict, before rho is even computed. A lag-1 autocorrelation cannot
+distinguish genuine pixel-to-pixel detector correlation from smoothly-
+varying unmodeled structure (template mismatch, imperfect continuum) --
+both look identical to this estimator. Quick recheck requested by the
+user: re-measuring rho after applying the Bacon-2017 MUSE variance
+correction (`1/0.6^2`) to the input errors first -- **chi2_red drops from
+13.2 to 5.07, but rho barely moves (0.892 -> 0.873)**. This shows the
+excess correlated residual is *not* primarily an error-scale artifact --
+it is real, structured residual (most likely template mismatch / an
+imperfect P-spline continuum fit) that survives the correction, and that
+same structure is what the lag-1 ACF is (at least partly) picking up as
+"correlation."
+
+**The real methodological gap this points to**: `MEASURED_RHO=0.88` was
+measured once, from a single high-S/N representative aperture, then
+applied *uniformly* to every one of 275 real dartboard bins spanning
+`n_spaxels=1` to `n_spaxels=3366` -- a huge S/N range over which a
+fixed-magnitude template-mismatch residual represents a very different
+*fraction* of the total noise budget bin-to-bin. Applying the same rho
+measured at high S/N (where that mismatch is most visible) uniformly to
+much lower-S/N bins (where it would be proportionally less prominent)
+plausibly over-corrects exactly the low/moderate-S/N bins -- consistent
+with the chi2/dof<1 signature found in step three, and with V/sigma error
+bars that look implausibly large relative to the recovered signal.
+
+**Sixth: user asked directly whether `MUSE_VARIANCE_CORRECTION_FACTOR =
+(1/0.6)^2` itself (not rho) might be the over-correction -- checked
+model-free, and the result argues the opposite direction.** Independent
+of any fit: measured the empirical pixel-to-pixel scatter (robust,
+first-differences-based sigma) in 5 hand-picked "smooth continuum"
+windows of the same representative spectrum, compared against the mean
+raw pipeline error and the mean Bacon-corrected error in each window.
+**The empirical scatter exceeds even the Bacon-corrected error in every
+window tested (1.4x-7.5x, most consistently ~1.4-2.4x in 4 of 5
+windows)** -- i.e. if anything the correction factor looks too *weak*,
+not too aggressive, at least in these windows. Real but unverified
+caveat: these windows were chosen by eye, not confirmed line-free -- a
+real stellar spectrum has weak unresolved absorption features throughout,
+and a first-differences estimator picks up genuine line curvature as if
+it were noise, inflating the empirical number (the one 7.5x outlier
+window is almost certainly contaminated this way). This result **does
+not confirm** the correction factor is fine, but it clearly does not
+support "the correction factor is too strong" either, and it complicates
+(without resolving) the rho story in step five -- if per-pixel noise is
+itself still underestimated even after both corrections, part of what
+step five attributed to "structured model-residual correlation
+masquerading as rho" could instead be genuine, still-underestimated
+white noise, which would not inflate the lag-1 ACF the same way. **This
+project does not yet have a clean, disambiguating measurement.**
+
+**Not done / concrete next steps, in order of expected value**:
+1. Get a genuinely line-free noise estimate -- either a real blank-sky/
+   off-target spaxel (no galaxy model to mismatch or unresolved lines to
+   contaminate a first-differences estimator), or a careful line-list
+   cross-check before trusting any hand-picked "smooth" window again.
+   This single measurement would disambiguate most of steps 3, 5, and 6
+   above at once (genuine detector noise vs. model-residual-driven
+   correlation vs. correction-factor calibration).
+2. Measure rho as a function of S/N (repeat the same lag-1 ACF measurement
+   on representative apertures/bins spanning the real S/N range this
+   target actually has, not just the one high-S/N aperture) -- directly
+   tests whether rho is S/N-dependent, which the step-five mechanism
+   predicts, once step 1's contamination question is resolved.
+3. Re-run `04_template_calibration.ipynb`'s own continuum/template
+   fitting diagnostics on this representative aperture specifically, to
+   check whether the imperfect-continuum-fit hypothesis for the excess
+   chi2_red/correlated residual has direct, independent support (e.g. a
+   visibly structured residual shape reproducible across apertures).
+4. Only after 1-3: decide whether a single global rho (and/or the
+   current `MUSE_VARIANCE_CORRECTION_FACTOR`) is defensible at all for
+   this target, or whether a per-bin/per-S/N-regime approach (or a
+   different noise model entirely) is needed -- a real methodology
+   decision, not a parameter tweak, and should not be made by picking a
+   new fixed constant without the above groundwork.
+
+**Explicitly not concluded**: that `LOSVD_LAM=2.0`/`penalty_order=2`
+(the "pre-Phase-0" defaults this notebook was reverted to earlier this
+same day) are wrong in themselves -- the multi-lam scan shows the *whole
+tested range* lacks a plateau, not that some other specific lam value
+would fix it. The root identified here sits upstream, in the noise model
+feeding the whitening step, not in the regularization choice itself.
+**The notebook is left as-is** (`FORCE_RECOMPUTE=True`, `LOSVD_LAM=2.0`,
+`MEASURED_RHO=0.88` unchanged) -- current output is confirmed free of the
+two previously-fixed bugs, but should be understood as carrying this
+open, likely-real over-correction in its V/sigma (and possibly h3/h4)
+error bars until the noise-model work above is done. Do not treat the
+current radial profile plot's error bars as final/trustworthy without
+that follow-up.
+
+## 2026-08-11 (late): real-data confirmation that low-sigma NGC 5102 bins are lam-selection lottery, and the reported error bar badly under-covers it
+
+**Trigger**: user looked at `07_full_galaxy_analysis.ipynb`'s current
+radial profile (fixed `lam=4096`/`penalty_order=3`, no continuum -- see
+`dev_notes/real_data_sigma/FINDINGS.md`'s 2026-08-08/09 entries for why
+fixed, not adaptive, is the current choice there) and flagged a real,
+specific worry: the profile's sigma trends down toward the center to
+~15-30 km/s with a sharp discontinuity, not a smooth trend, and asked
+whether adaptive selection's own edge-pedestal guard
+(`max_edge_amplitude_frac`, built earlier this session for N4751) has an
+analogue that guards against the *opposite* failure -- over-regularization
+quietly deflating sigma -- since MUSE's own instrumental resolution in
+this fit window (8400-8800A, CaT triplet) works out to sigma~36-38 km/s
+(`kinextract.lsf.muse_lsf_fwhm`), i.e. these bins are being measured at
+or below the instrument's own resolution floor.
+
+**Investigated three ways**: (1) confirmed the MUSE-resolution-floor
+number above directly; (2) re-read this project's own Stage 22 sigma=20
+finding (`dev_notes/REGULARIZATION_INVESTIGATION_LOG.md`,
+2026-07-26: "m_eff=3.000 at every lam... AIC criterion flat...
+selection is a lottery... median residual >20% at EVERY lam") -- already
+documented, but never directly demonstrated on this run's own real,
+flagged bins; (3) ran a real-data lam ladder (`lam` = 64/256/1024/4096/
+16384/65536 fixed, plus `aic_local`) on the 5 lowest-sigma bins from this
+notebook's own freshly-regenerated cache (`full_galaxy_..._lam4096_
+order3_caii.pkl`, 275/275 bins, current settings).
+
+**Result: the hypothesis (fixed lam=4096 is systematically deflating
+sigma) is NOT supported -- something more specific, and arguably worse
+for public-release trustworthiness, is.** Sigma vs. lam is **not
+monotonic** in any of the 5 bins -- e.g. bin 197: 6.1, 7.0, 6.8, 5.0,
+14.7, 13.3 km/s across the ladder (lam increasing); bin 263: 1.7, 4.7,
+7.8, **17.8**, 10.7, 12.3 (the *current* `lam=4096` choice gives the
+*highest* value in that bin's own ladder, not the lowest). `lam=4096`
+is sometimes the min, sometimes the max, sometimes in between across
+these 5 bins -- there is no consistent direction, and `lam_selection=
+"aic_local"` does not reliably land somewhere better: it picked
+`lam=512` for bin 183 (giving 7.1 km/s, well outside that bin's own
+64-65536 fixed-ladder range of 10.7-27.1) and `lam=64` for bin 238 (the
+ladder's own lightest candidate). **This is exactly what Stage 22's
+"selection is a lottery" finding predicts, now demonstrated on this
+run's own real bins, not just a synthetic sigma=20 mock.**
+
+**The more serious finding: reported Laplace `sherm_std` badly
+under-covers this real instability.** For the same 5 bins, the ladder's
+own sigma range spans ~9-16 km/s (e.g. bin 197: 5.0-14.7, a 9.7 km/s
+swing; bin 195: 8.0-18.4, a 10.4 km/s swing including the adaptive
+result) -- but this run's own reported `sherm_std` for these bins is
+only **1.1-2.1 km/s** (13-41% relative to the point estimate, but
+5-10x smaller than the actual lam-to-lam swing). Laplace's own posterior
+-- computed as a curvature-based spread *around whichever single lam won
+the criterion* -- has no mechanism to represent uncertainty *over which
+lam should have won in the first place*, and that omitted term is the
+dominant one here, not a second-order correction. This is the same
+mechanism Stage 27 (`dev_notes/VALIDATION_CAMPAIGN.md`) already flagged
+in the aggregate ("resampling around a biased point estimate... interval
+can have closer-to-correct width and still be centered wrong") and the
+same "not yet root-caused" gap README.md's own Known Limitations already
+lists for `aic_local` at low sigma -- this entry is the first time either
+has been pinned to specific, real, named bins with a concrete before/
+after number, not just a suspected mechanism.
+
+**What this is not**: not a new bug introduced this session (the
+mechanism, and the open coverage problem, both predate tonight -- Stage
+22/27 already flagged the pieces separately); not fixed by switching
+07 to adaptive selection (the ladder shows adaptive is an equally noisy
+draw from the same lottery here, not a systematically better one, and
+switching would also reintroduce the real multi-start instability
+`dev_notes/real_data_sigma/FINDINGS.md`'s 2026-08-08/09 entries already
+root-caused and moved away from on this exact target); not something a
+stronger or weaker single fixed `lam` would fix either (the ladder has
+no plateau in this regime, matching the analogous "no plateau" finding
+in the entry above this one).
+
+**Recommendation, not yet implemented**: make the limitation visible
+per-bin rather than only in prose. A cheap, real diagnostic is already
+sitting in the data this notebook already computes: `losvd_objective_gap`
+(multi-start disagreement at the winning lam) and/or a 2-3-point lam
+perturbation check (refit at `0.25x`/`4x` the winning lam, see how much
+`sherm` moves) could flag "regularization-limited, treat as illustrative"
+bins directly on the radial profile plot, the same spirit as this
+session's own `edge_amplitude_frac`-based flagging for the opposite
+(pedestal) failure mode -- but this is a genuinely new, non-trivial
+diagnostic to validate (false-positive/negative rate against a known
+grid, not just "seems to flag the bins we already suspect"), not a
+same-night fix. Deferred; see `07_full_galaxy_analysis.ipynb`'s own
+Section 7 for where the honest caveat was added instead.

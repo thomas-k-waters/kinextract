@@ -110,7 +110,7 @@ def nuts_losvd_uncertainty(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfi
     basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_knots, degree=cfg.degree)
     dv = (cfg.vmax - cfg.vmin) / (n_knots + 1)
     D = difference_matrix(n_coef, order=cfg.penalty_order, dv=dv, dv_ref=cfg.knot_spacing_kms)
-    lam_vec = np.full(D.shape[0], lam)  # cfg.lam_wing == 0.0 (default): no taper, uniform lam
+    lam_vec = np.full(D.shape[0], lam)  # uniform lam across every penalty row
     A_eff_w = np.tensordot(result0["w"], A_stack_w, axes=([0], [0]))
     coeffs_map = np.asarray(result0["coeffs"])
 
