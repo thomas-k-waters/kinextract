@@ -169,13 +169,6 @@ from .noise_model import (
     whiten,
 )
 from .plotting import plot_bin_map, plot_moment_maps
-from .template_reduction import (
-    TemplateReductionResult,
-    load_template_subset,
-    reduce_templates_iteratively,
-    save_template_subset,
-)
-from .uncertainty import bootstrap_losvd, bootstrap_losvd_parallel, calibrate_noise_scale
 from .robust_fit import (
     compute_local_inflation,
     fit_losvd_robust,
@@ -183,6 +176,13 @@ from .robust_fit import (
     full_pixel_model,
     reconstruct_continuum,
 )
+from .template_reduction import (
+    TemplateReductionResult,
+    load_template_subset,
+    reduce_templates_iteratively,
+    save_template_subset,
+)
+from .uncertainty import bootstrap_losvd, bootstrap_losvd_parallel, calibrate_noise_scale
 
 __all__ = [
     "build_bspline_basis", "build_spline_truth", "difference_matrix", "default_initial_coeffs", "fit_log_spline_map",

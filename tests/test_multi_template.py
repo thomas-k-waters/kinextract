@@ -292,8 +292,24 @@ class TestFitLosvdParallel:
     def test_a_real_process_pool_is_bit_identical_to_serial(self):
         """The actual thing this function exists for: n_jobs > 1 spawns
         real worker processes (spawn context, thread-pinned) -- must
-        still reproduce exactly what a serial loop gets, per bin, and in
-        the same order the inputs were given.
+        still reproduce what a serial loop gets, per bin, and in the
+        same order the inputs were given, to floating-point precision.
+
+        **Not exact bit-identity** (confirmed directly, 2026-09-14): a
+        worker process imports JAX fresh, in a single-threaded process
+        `_limit_worker_threads` pinned *before* JAX/numpy import, while
+        the serial loop above runs in this test process's own,
+        already-initialized JAX/XLA CPU-backend state. XLA's CPU backend
+        picks its own internal reduction strategy per process/thread
+        context, independent of BLAS thread-count env vars or
+        `threadpoolctl` (checked directly: wrapping the serial loop in
+        `threadpoolctl.threadpool_limits(limits=1)` does not close the
+        gap) -- so a several-ULP difference in a summation/reduction
+        order between the two processes is expected, not a bug in the
+        dispatch/pickling logic this test actually exists to catch. Use
+        `assert_allclose` at a tolerance well above float64 ULP noise but
+        far below any difference a real bug (wrong bin, wrong data,
+        dropped replicate) would produce.
         """
         from kinextract import fit_losvd_parallel
 
@@ -310,8 +326,10 @@ class TestFitLosvdParallel:
         parallel = fit_losvd_parallel(A_stack_list, y_w_list, cfg_list, n_jobs=2)
 
         for i, (s, p) in enumerate(zip(serial, parallel)):
-            np.testing.assert_array_equal(s["b"], p["b"], err_msg=f"bin {i} mismatch")
-            np.testing.assert_array_equal(s["w"], p["w"], err_msg=f"bin {i} mismatch")
+            np.testing.assert_allclose(s["b"], p["b"], rtol=1e-8, atol=1e-10,
+                                        err_msg=f"bin {i} mismatch")
+            np.testing.assert_allclose(s["w"], p["w"], rtol=1e-8, atol=1e-10,
+                                        err_msg=f"bin {i} mismatch")
 
     def test_mismatched_list_lengths_raise_a_clear_error(self):
         from kinextract import fit_losvd_parallel

@@ -55,9 +55,9 @@ geometry.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from astropy.io import ascii
 
 import numpy as np
+from astropy.io import ascii
 
 
 def log_radial_edges(r_min: float, r_max: float, n_bins: int) -> np.ndarray:
