@@ -13,6 +13,7 @@ import warnings
 
 import numpy as np
 import pytest
+from conftest import run_jobs_in_one_worker_process
 
 from kinextract import (
     FitConfig, build_template_stack, build_spline_truth, compute_fit_rms, compute_local_inflation,
@@ -22,6 +23,7 @@ from kinextract import (
 from kinextract.cleaning import CAII_TRIPLET_CENTERS_A
 from kinextract.multi_template import fit_losvd
 from kinextract.noise_model import whiten
+from kinextract.robust_fit import _fit_losvd_robust_worker
 
 CA_CENTERS = [8498.02, 8542.09, 8662.14]
 
@@ -456,6 +458,17 @@ class TestFitLosvdRobustParallel:
 
     @pytest.mark.parametrize("cleaning_method", ["clip", "inflate"])
     def test_a_real_process_pool_is_bit_identical_to_serial(self, cleaning_method):
+        """The "serial" reference is run through a single-worker
+        `ProcessPoolExecutor` (`conftest.run_jobs_in_one_worker_process`),
+        not called directly in this test process. A direct call compares
+        against a different JAX/XLA process state (already-initialized,
+        multi-threaded) than what a real `n_jobs=2` worker sees (freshly
+        spawned, single-threaded) -- a real few-ULP difference that this
+        iterative clip/inflate fit can occasionally amplify, through a
+        sigma-clip threshold crossing, into a large, run-dependent
+        mismatch unrelated to what this test exists to catch (dispatch/
+        ordering bugs). With both sides run through matching fresh worker
+        processes, this goes back to exact equality."""
         bins = self._bins()
         A_stack_list = [b[0] for b in bins]
         flux_list = [b[1] for b in bins]
@@ -464,8 +477,9 @@ class TestFitLosvdRobustParallel:
         cfg_list = [b[4] for b in bins]
 
         kwargs = dict(cleaning_method=cleaning_method, robust_scale=True) if cleaning_method == "clip" else dict(cleaning_method=cleaning_method)
-        serial = [fit_losvd_robust(A, f, e, cfg, wave_fit=w, **kwargs)
-                  for A, f, e, w, cfg in zip(A_stack_list, flux_list, errors_list, wave_fit_list, cfg_list)]
+        jobs = [(A, f, e, cfg, w, kwargs)
+                for A, f, e, w, cfg in zip(A_stack_list, flux_list, errors_list, wave_fit_list, cfg_list)]
+        serial = run_jobs_in_one_worker_process(_fit_losvd_robust_worker, jobs)
         parallel = fit_losvd_robust_parallel(A_stack_list, flux_list, errors_list, cfg_list,
                                               wave_fit_list=wave_fit_list, n_jobs=2, **kwargs)
 
