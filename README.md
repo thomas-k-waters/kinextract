@@ -12,35 +12,6 @@ enforced after the fact, and the number of free parameters is chosen to
 match how much velocity information a spectrum actually contains, not
 fixed at an arbitrarily fine grid.
 
-## Status
-
-**v1.0.0** -- a complete, from-scratch rebuild of the fitting engine,
-uncertainty quantification, and real-data pipeline, independently
-validated end to end before being merged back in (27-stage validation
-campaign, `dev_notes/VALIDATION_CAMPAIGN.md`). The default uncertainty
-engine (Laplace + AIC-weighted) was validated via a production-scale
-coverage sweep across sigma 50-600 km/s, matching or beating parametric
-bootstrap's own coverage in every regime tested. Marked `Beta` (not
-`Stable`) because it's still actively developed and because several
-specific, real limitations are tracked openly below rather than hidden --
-not because the validated parts are shaky.
-
-The core fitting, uncertainty (Laplace and bootstrap), multi-template,
-cleaning, and continuum machinery is implemented and validated on
-synthetic data, and has also been run end-to-end on real VLT/MUSE and
-HST/STIS spectra (see `examples/notebooks/05_noise_correlation.ipynb`,
-`06_other_instruments.ipynb`, and `07_full_galaxy_analysis.ipynb` for a
-full-galaxy analysis). **Real-data-specific finding worth knowing before
-trusting a real fit**: real chi2_red on real IFU data commonly runs well
-above 1 (systematics-dominated residuals -- template mismatch, unmodeled
-continuum shape, correlated per-pixel noise -- not just photon noise),
-which affects how much regularization gets selected and how well a
-sigma-clipping/outlier-rejection scheme behaves; see
-`05_noise_correlation.ipynb` and `07_full_galaxy_analysis.ipynb`'s own
-Limitations section for the current, honest picture. Treat every
-synthetic validation result in this package as solid, and every real-data
-number as requiring the same care those notebooks show.
-
 ## Example notebooks
 
 `examples/notebooks/` walks from simple synthetic data to real data, in
