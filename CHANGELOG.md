@@ -318,3 +318,32 @@ topic index):
 
 See `README.md` for current package scope/status and
 `dev_notes/HISTORY.md` for the full index of closed/open investigations.
+
+## 1.0.1 -- Consolidate robust-fit API; fix real error-budget and template-selection bugs; add continuum support to adaptive lambda
+Breaking:
+
+    fit_losvd_clean/_inflate/_with_continuum consolidated into
+    fit_losvd_robust(cleaning_method=None|clip|inflate),
+    continuum-cofitting now orthogonal (cfg.continuum_knots).
+    robustness param renamed cleaning_method; robust_scale now
+    defaults True for clip (False was biased on real MUSE data).
+    cleaning_method=inflate now the recommended default over clip
+    (validated on 113 NGC4751 bins: residual RMS 1.41->0.96).
+    Dead/unvalidated code removed: lam_wing/taper_* mechanism,
+    ablation.py, calibrate_bias.py.
+
+Fixed:
+
+    combine_bin_spectrum_robust no longer adds a spurious empirical
+    error term that was the dominant driver of implausible error bars
+    on real data (chi2/dof as low as 0.01).
+    reduce_templates_iteratively was silently whitening as rho=0
+    regardless of cfg.rho, and couldn't do continuum-cofitting.
+    estimate_m_eff/select_lambda_aic didn't work under continuum
+    (never reachable via FitConfig, so no real fit was affected).
+    07_full_galaxy_analysis.ipynb's shipped-results fast path
+    (FORCE_RECOMPUTE=False) was broken in 3 places.
+
+New: lam_selection=aic_local now supports continuum-cofitting;
+fit_losvd_robust gained measure_rho and min_inflation_to_apply
+(opt-in, fixes an over-generous error budget found on NGC5102).

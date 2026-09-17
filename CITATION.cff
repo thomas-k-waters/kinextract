@@ -1,4 +1,4 @@
-cff-version: 1.2.0
+cff-version: 1.2.1
 title: "kinextract: Non-parametric binned-LOSVD spectral fitter for galaxy kinematics"
 message: "If you use this software in your research, please cite it as below."
 type: software
@@ -6,8 +6,8 @@ authors:
   - family-names: Waters
     given-names: Thomas, K.
     affiliation: University of Michigan
-version: 1.0.0
-date-released: "2026-08-05"
+version: 1.0.1
+date-released: "2026-09-17"
 url: "https://github.com/thomas-k-waters/kinextract"
 abstract: >
   kinextract fits galaxy spectra using a non-parametric line-of-sight velocity

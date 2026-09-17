@@ -6,4 +6,4 @@ Kept as its own tiny, dependency-free module (not folded into
 release-tag/package-version consistency check can read it without
 importing the full package (and its numpy/jax/astropy dependencies).
 """
-__version__ = "1.0.0"
+__version__ = "1.0.1"
