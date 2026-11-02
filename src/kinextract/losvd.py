@@ -126,7 +126,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from scipy.interpolate import BSpline
-from scipy.optimize import minimize as scipy_minimize
+from scipy.optimize._trustregion import _minimize_trust_region
+from scipy.optimize._trustregion_exact import IterativeSubproblem
 
 from .config import FitConfig
 
@@ -179,14 +180,58 @@ def edge_amplitude_frac(b, n_edge=5):
     return float(max(b[:n_edge].max(), b[-n_edge:].max())) / peak
 
 
+class _SubproblemCapReached(Exception):
+    pass
+
+
+class _CappedSubproblem(IterativeSubproblem):
+    """scipy's `trust-exact` subproblem with an iteration cap on every scipy version.
+
+    Before scipy 1.17 the subproblem's `solve` loops `while True`: on a badly conditioned step its damping-factor
+    bracketing can go NaN (the square root of a negative bound) and never exit -- found as a test hanging forever on
+    scipy 1.15 (scipy issue 12513; scipy 1.17 caps the loop at 25 iterations). Each pass of that loop makes at least one
+    Cholesky factorization, so this counts them and stops after `MAX_CHOLESKY`, above the at most 50 that scipy 1.17's
+    own cap allows -- with scipy >= 1.17 it never fires and results are unchanged. When it fires, the step falls back
+    to the Cauchy point (steepest descent to the model minimum inside the trust region), which still gives the
+    trust-region method the decrease it needs to converge.
+    """
+
+    MAX_CHOLESKY = 60
+
+    def __init__(self, x, fun, jac, hess, hessp=None, **kwargs):
+        super().__init__(x, fun, jac, hess, hessp, **kwargs)
+        potrf, self._n_cholesky = self.cholesky, 0
+
+        def counted(*args, **kw):
+            self._n_cholesky += 1
+            if self._n_cholesky > self.MAX_CHOLESKY:
+                raise _SubproblemCapReached
+            return potrf(*args, **kw)
+
+        self.cholesky = counted
+
+    def solve(self, tr_radius):
+        self._n_cholesky = 0
+        try:
+            return super().solve(tr_radius)
+        except _SubproblemCapReached:
+            g, H, g_norm = self.jac, self.hess, self.jac_mag
+            if g_norm == 0:
+                return np.zeros_like(g), False
+            gHg = float(g @ H @ g)
+            tau = 1.0 if gHg <= 0 else min(1.0, g_norm ** 3 / (tr_radius * gHg))
+            return -tau * tr_radius / g_norm * g, tau == 1.0
+
+
 def _trust_exact(fgh, x0: np.ndarray):
-    """Minimize with scipy's exact-Hessian trust-region Newton method.
+    """Minimize with scipy's exact-Hessian trust-region Newton method (`trust-exact`, with `_CappedSubproblem`).
 
     `fgh(x)` returns `(f, g, H)`; it is evaluated once per point and the
     result cached, since `trust-exact` asks for the value/gradient and the
-    Hessian in separate calls. A non-finite objective (an `exp` overflow at a
-    trial step) is reported as `+inf`, which the trust region rejects and
-    shrinks on -- a NaN would neither be accepted nor shrink the radius.
+    Hessian in separate calls. A non-finite objective, gradient or Hessian (an
+    `exp` overflow at a trial step) is reported as `+inf`, which the trust
+    region rejects and shrinks on -- a NaN would neither be accepted nor shrink
+    the radius, and a non-finite Hessian would stall the subproblem.
     `gtol=1e-6` on the gradient 2-norm costs about one extra Newton step at
     quadratic convergence. Near that tolerance the trust region can shrink to rounding
     level first and scipy stops with status 2 ("A bad approximation caused
@@ -202,14 +247,13 @@ def _trust_exact(fgh, x0: np.ndarray):
             cache.clear()
             with np.errstate(over="ignore", invalid="ignore"):
                 f, g, H = fgh(x)
-            if not np.isfinite(f) or not np.all(np.isfinite(g)):
+            if not np.isfinite(f) or not np.all(np.isfinite(g)) or not np.all(np.isfinite(H)):
                 f, g, H = np.inf, np.zeros_like(x), np.eye(len(x))
             cache[key] = (f, g, H)
         return cache[key]
 
-    res = scipy_minimize(lambda x: _eval(x)[:2], np.asarray(x0, dtype=float), jac=True,
-                         hess=lambda x: _eval(x)[2], method="trust-exact",
-                         options=dict(gtol=1e-6, maxiter=1000))
+    res = _minimize_trust_region(lambda x: _eval(x)[0], np.asarray(x0, dtype=float), jac=lambda x: _eval(x)[1],
+                                 hess=lambda x: _eval(x)[2], subproblem=_CappedSubproblem, gtol=1e-6, maxiter=1000)
     grad_norm = float(np.linalg.norm(res.jac))
     if not res.success and res.status == 2 and np.isfinite(res.fun) and grad_norm <= 1e-4:
         res.success = True

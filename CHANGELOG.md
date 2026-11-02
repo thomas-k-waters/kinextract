@@ -86,6 +86,12 @@ pipeline errors, `fit_gauss_hermite`, `extract_aperture_spectrum`, `detect_emiss
   `transvd_bounds_laplace`, `spmc_side_inverts`, and `muse_cube.trim_cube_wavelength_fits`.
 
 **Fixed:**
+- **The Newton solver can no longer hang.** Before scipy 1.17, `trust-exact`'s subproblem loops `while True`, and on a
+  badly conditioned step its damping-factor bracketing can go NaN (the square root of a negative bound) and never exit
+  (scipy issue 12513) -- found as a test hanging on Python 3.10 / scipy 1.15, but scipy 1.16 has the same loop.
+  `losvd._CappedSubproblem` stops it after 60 Cholesky factorizations, above the most scipy 1.17's own 25-iteration
+  cap allows (so results with scipy >= 1.17 are unchanged), and takes the Cauchy-point step instead. A non-finite
+  Hessian at a trial point now rejects the point.
 - **Parallel workers now really run single-threaded** (`multi_template.single_threaded_worker_env`, used by every
   `*_parallel` function): unpickling the pool initializer already imported numpy and JAX with the parent's unpinned
   thread settings, and nothing limited XLA's own thread pool -- 4 workers ran ~50 threads each. 16 real NGC 4751

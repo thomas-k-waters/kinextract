@@ -125,3 +125,30 @@ def test_newton_keeps_the_multi_start_escape_from_a_known_bad_local_minimum():
     gh = fit_gauss_hermite(v_grid, result["b"], fit_h3h4=True)
     assert abs(gh["vherm"] - true_v) < 10.0
     assert abs(gh["sherm"] - true_sig) < 15.0
+
+
+def test_capped_trust_exact_subproblem_falls_back_to_the_cauchy_point():
+    """Before scipy 1.17 the trust-exact subproblem can loop forever (scipy issue 12513). `_CappedSubproblem` stops
+    it after `MAX_CHOLESKY` factorizations and returns the Cauchy point: inside the trust region, along -g, and
+    lowering the quadratic model."""
+    from kinextract.losvd import _CappedSubproblem
+
+    class _Forced(_CappedSubproblem):
+        MAX_CHOLESKY = 0          # fire on the first factorization
+
+    rng = np.random.default_rng(0)
+    M = rng.normal(size=(6, 6))
+    H = M @ M.T + 0.1 * np.eye(6)
+    g = rng.normal(size=6)
+    x0 = np.zeros(6)
+    sub = _Forced(x0, lambda x: 0.0, lambda x: g, lambda x: H)
+    p, hits_boundary = sub.solve(0.5)
+    assert np.linalg.norm(p) <= 0.5 + 1e-12
+    np.testing.assert_allclose(p / np.linalg.norm(p), -g / np.linalg.norm(g))
+    assert g @ p + 0.5 * p @ H @ p < 0
+    assert hits_boundary == np.isclose(np.linalg.norm(p), 0.5)
+    # the normal path is untouched: the uncapped subclass agrees with scipy's own subproblem
+    from scipy.optimize._trustregion_exact import IterativeSubproblem
+    p_ref, _ = IterativeSubproblem(x0, lambda x: 0.0, lambda x: g, lambda x: H).solve(0.5)
+    p_cap, _ = _CappedSubproblem(x0, lambda x: 0.0, lambda x: g, lambda x: H).solve(0.5)
+    np.testing.assert_array_equal(p_cap, p_ref)

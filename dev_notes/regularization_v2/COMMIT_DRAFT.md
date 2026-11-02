@@ -94,7 +94,7 @@ Docs and examples
   results; 04's regenerated template subset and radial profile feed it.
 
 Validation: dev_notes/regularization_v2. Defaults checked bit-identical
-against the cached NGC 4751 NFM fits and bands. Tests: 275 passed.
+against the cached NGC 4751 NFM fits and bands. Tests: 276 passed.
 ```
 
 ## Release notes (GitHub, v2.0.0)
@@ -168,6 +168,9 @@ Kept as cheaper checks: `cleaning_method=None`, `laplace_losvd_uncertainty` with
 the slower, exact reference: `nuts_uncertainty`.
 
 **Fixes**
+- **The Newton solver can no longer hang.** Before SciPy 1.17, `trust-exact`'s subproblem could loop forever on a
+  badly conditioned step (SciPy issue 12513). kinextract now caps it on every SciPy version. Results with SciPy 1.17 or
+  newer are unchanged.
 - **Parallel workers now really run single-threaded.** Four workers used to start about 50 threads each.
 - **`laplace_losvd_uncertainty_parallel(..., clipped_mask=)`** centers the posterior on the robust fit. Without it,
   some NGC 4751 WFM bins reported std=0 or moved by hundreds of km/s.
