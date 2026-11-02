@@ -194,8 +194,8 @@ def sky_line_profile(wave: np.ndarray, line_wave: np.ndarray, line_flux: np.ndar
     s = fwhm / (1.0 + z) / 2.3548
     near = (lw > wave.min() - 5 * s) & (lw < wave.max() + 5 * s)
     prof = np.zeros_like(wave)
-    for l, f in zip(lw[near], lf[near]):
-        prof += f * np.exp(-0.5 * ((wave - l) / s) ** 2)
+    for center, flux in zip(lw[near], lf[near]):
+        prof += flux * np.exp(-0.5 * ((wave - center) / s) ** 2)
     norm = np.percentile(prof, 99)
     return prof / norm if norm > 0 else prof
 
@@ -240,6 +240,7 @@ def noise_model_errors(A_stack: np.ndarray, y: np.ndarray, errors: np.ndarray, w
     cleaning (outlier pixels are excluded inside `fit_noise_model` instead). `cfg` supplies the grid, penalty and
     continuum settings. Returns `fit_noise_model`'s dict plus `model` (the preliminary fit at every pixel)."""
     import dataclasses
+
     from .robust_fit import fit_losvd_robust, full_pixel_model
     c0 = dataclasses.replace(cfg, lam_rule="fixed", lam=float(lam), rho=0.0)
     r0 = fit_losvd_robust(A_stack, y, errors, c0, wave_fit=wave_fit, cleaning_method=None)

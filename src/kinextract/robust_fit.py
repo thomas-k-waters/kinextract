@@ -515,7 +515,7 @@ def fit_losvd_robust_parallel(A_stack_list, flux_fit_list, errors_list, cfg_list
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
 
-    from .multi_template import _limit_worker_threads, single_threaded_worker_env, resolve_n_jobs
+    from .multi_template import _limit_worker_threads, resolve_n_jobs, single_threaded_worker_env
 
     n_bins = len(A_stack_list)
     cfgs = cfg_list if isinstance(cfg_list, (list, tuple)) else [cfg_list] * n_bins

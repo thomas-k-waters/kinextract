@@ -478,7 +478,7 @@ def laplace_losvd_uncertainty_parallel(A_stack_w_list, y_w_list, cfg_list, wave_
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
 
-    from .multi_template import _limit_worker_threads, single_threaded_worker_env, resolve_n_jobs
+    from .multi_template import _limit_worker_threads, resolve_n_jobs, single_threaded_worker_env
 
     n_bins = len(A_stack_w_list)
 
@@ -581,7 +581,7 @@ def losvd_error_bands_parallel(A_stack_list, flux_list, errors_list, wave_fit_li
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
 
-    from .multi_template import _limit_worker_threads, single_threaded_worker_env, resolve_n_jobs
+    from .multi_template import _limit_worker_threads, resolve_n_jobs, single_threaded_worker_env
 
     n_bins = len(A_stack_list)
     cfgs = cfg_list if isinstance(cfg_list, (list, tuple)) else [cfg_list] * n_bins

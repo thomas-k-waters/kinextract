@@ -33,7 +33,6 @@ import numpy as np
 
 from .forward_model import build_velocity_grid
 
-
 # Difference order of the LOSVD roughness penalty. Third differences: the penalty's null space is any Gaussian, so
 # heavy smoothing shrinks toward the best-fitting Gaussian instead of the exponential tails of the second-difference
 # penalty, which inflated wing mass and sigma at low S/N and gave 3-4x larger h4 bias with continuum-cofitting

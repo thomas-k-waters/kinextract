@@ -29,8 +29,8 @@ design matrix's condition number, not an optimizer failure.
 from __future__ import annotations
 
 import contextlib
-import os
 import dataclasses
+import os
 
 import numpy as np
 from scipy.optimize import nnls

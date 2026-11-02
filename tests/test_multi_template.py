@@ -211,9 +211,13 @@ def test_fit_losvd_with_continuum_knots_set_runs_and_returns_C():
     y_w = galaxy / errors
 
     result = fit_losvd(A_stack_w, y_w, cfg, wave_fit=wave_fit)
-    assert result["success"]
+    # Not `result["success"]`: with continuum-cofitting the flag often ends up False on an already-converged fit
+    # (the C-mean/w-scale direction is flat to rounding level -- see continuum.fit_continuum_block), and whether the
+    # trust region stops just inside or just outside its tolerance varies with the numpy/scipy build. Check the answer.
     assert "C" in result and "continuum_coeffs" in result
     np.testing.assert_allclose(result["C"], np.ones_like(result["C"]), atol=0.05)
+    m = compute_losvd_moments(v_grid, result["b"])
+    assert abs(m["vherm"]) < 5.0 and abs(m["sherm"] - sig) < 10.0
 
 
 def test_degenerate_nnls_on_first_iteration_fails_gracefully_instead_of_crashing():

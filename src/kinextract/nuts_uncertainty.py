@@ -47,14 +47,14 @@ routinely filter around.
 """
 from __future__ import annotations
 
+import dataclasses
+
 import jax
 import jax.numpy as jnp
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, init_to_value
-
-import dataclasses
 
 from .config import PENALTY_ORDER, FitConfig
 from .gh_moments import compute_losvd_moments

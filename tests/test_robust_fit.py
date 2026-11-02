@@ -237,8 +237,12 @@ def test_continuum_knots_can_be_combined_with_cleaning_method(cleaning_method):
     continuum of exactly 1.0."""
     A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(seed=0, continuum_knots=4)
     result = fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit, cleaning_method=cleaning_method)
-    assert result["success"]
+    # Not `result["success"]`: with continuum-cofitting the flag often ends up False on an already-converged fit
+    # (the C-mean/w-scale direction is flat to rounding level -- see continuum.fit_continuum_block), and whether the
+    # trust region stops just inside or just outside its tolerance varies with the numpy/scipy build. Check the answer.
     assert "C" in result and "continuum_coeffs" in result
+    m = compute_losvd_moments(v_grid, result["b"])
+    assert abs(m["sherm"] - sig) < 10.0
     C_full = reconstruct_continuum(result, wave_fit, cfg)
     assert C_full.shape == wave_fit.shape
     np.testing.assert_allclose(C_full, np.ones_like(C_full), atol=0.2)
