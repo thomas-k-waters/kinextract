@@ -152,3 +152,21 @@ def test_capped_trust_exact_subproblem_falls_back_to_the_cauchy_point():
     p_ref, _ = IterativeSubproblem(x0, lambda x: 0.0, lambda x: g, lambda x: H).solve(0.5)
     p_cap, _ = _CappedSubproblem(x0, lambda x: 0.0, lambda x: g, lambda x: H).solve(0.5)
     np.testing.assert_array_equal(p_cap, p_ref)
+
+
+def test_capped_trust_exact_subproblem_survives_a_nan_damping_factor():
+    """A NaN damping factor (the square root of a negative bound in scipy's bracketing) must give the Cauchy step on
+    every LAPACK build -- OpenBLAS factorizes a NaN matrix 'successfully' and scipy's cho_solve then raises."""
+    from kinextract.losvd import _CappedSubproblem
+
+    class _NaNStart(_CappedSubproblem):
+        def _initial_values(self, tr_radius):
+            return np.nan, 0.0, 1.0
+
+    rng = np.random.default_rng(1)
+    M = rng.normal(size=(5, 5))
+    H = M @ M.T + 0.1 * np.eye(5)
+    g = rng.normal(size=5)
+    p, _ = _NaNStart(np.zeros(5), lambda x: 0.0, lambda x: g, lambda x: H).solve(0.3)
+    assert np.all(np.isfinite(p)) and np.linalg.norm(p) <= 0.3 + 1e-12
+    np.testing.assert_allclose(p / np.linalg.norm(p), -g / np.linalg.norm(g))

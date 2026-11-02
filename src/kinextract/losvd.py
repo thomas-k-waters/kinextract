@@ -191,9 +191,12 @@ class _CappedSubproblem(IterativeSubproblem):
     bracketing can go NaN (the square root of a negative bound) and never exit -- found as a test hanging forever on
     scipy 1.15 (scipy issue 12513; scipy 1.17 caps the loop at 25 iterations). Each pass of that loop makes at least one
     Cholesky factorization, so this counts them and stops after `MAX_CHOLESKY`, above the at most 50 that scipy 1.17's
-    own cap allows -- with scipy >= 1.17 it never fires and results are unchanged. When it fires, the step falls back
-    to the Cauchy point (steepest descent to the model minimum inside the trust region), which still gives the
-    trust-region method the decrease it needs to converge.
+    own cap allows. A NaN damping factor (one branch of the bracketing has no `abs` even in scipy 1.17) also stops it
+    at the factorization: what LAPACK does with a NaN matrix depends on the build (Apple Accelerate reports a failed
+    factorization and the loop goes on; OpenBLAS reports success and `cho_solve` then raises). In all of these cases
+    the step falls back to the Cauchy point (steepest descent to the model minimum inside the trust region), which
+    still gives the trust-region method the decrease it needs to converge. On well-behaved steps none of this fires,
+    and results with scipy >= 1.17 are unchanged.
     """
 
     MAX_CHOLESKY = 60
@@ -202,11 +205,11 @@ class _CappedSubproblem(IterativeSubproblem):
         super().__init__(x, fun, jac, hess, hessp, **kwargs)
         potrf, self._n_cholesky = self.cholesky, 0
 
-        def counted(*args, **kw):
+        def counted(H, *args, **kw):
             self._n_cholesky += 1
-            if self._n_cholesky > self.MAX_CHOLESKY:
+            if self._n_cholesky > self.MAX_CHOLESKY or not np.all(np.isfinite(H)):
                 raise _SubproblemCapReached
-            return potrf(*args, **kw)
+            return potrf(H, *args, **kw)
 
         self.cholesky = counted
 
@@ -214,7 +217,7 @@ class _CappedSubproblem(IterativeSubproblem):
         self._n_cholesky = 0
         try:
             return super().solve(tr_radius)
-        except _SubproblemCapReached:
+        except (_SubproblemCapReached, ValueError, np.linalg.LinAlgError):
             g, H, g_norm = self.jac, self.hess, self.jac_mag
             if g_norm == 0:
                 return np.zeros_like(g), False

@@ -94,7 +94,7 @@ Docs and examples
   results; 04's regenerated template subset and radial profile feed it.
 
 Validation: dev_notes/regularization_v2. Defaults checked bit-identical
-against the cached NGC 4751 NFM fits and bands. Tests: 276 passed.
+against the cached NGC 4751 NFM fits and bands. Tests: 277 passed.
 ```
 
 ## Release notes (GitHub, v2.0.0)

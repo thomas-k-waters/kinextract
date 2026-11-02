@@ -221,7 +221,7 @@ NumPyro reference uncertainty mode), `.[docs]` (building the docs),
 pytest tests/
 ```
 
-276 tests covering LOSVD recovery and the `lam` rule, the Newton
+277 tests covering LOSVD recovery and the `lam` rule, the Newton
 solver, moment estimation, multi-template fitting, robust fitting with
 error inflation (serial and parallel), continuum co-fitting, Laplace
 uncertainty and the noise-model error bands (serial and parallel), NUTS
