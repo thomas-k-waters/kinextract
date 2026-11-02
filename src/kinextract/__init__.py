@@ -16,30 +16,23 @@ Submodules:
   config         -- `FitConfig`, the tunable parameters.
   forward_model  -- template Doppler-shifting and design-matrix construction.
   gh_moments     -- summarizing a recovered LOSVD as (V, sigma, h3, h4).
-  multi_template -- `fit_losvd`, the end-to-end fitting entry point.
-  uncertainty    -- parametric-bootstrap uncertainty quantification.
+  multi_template -- `fit_losvd`, the end-to-end fitting entry point, and
+                    `with_lam_rule` (the sigma-scaled lam + edge retry).
+  robust_fit     -- `fit_losvd_robust`, the LOSVD fit for real data:
+                    per-spectrum residual-based error inflation against
+                    unmodeled contamination, CaII cores protected.
+  laplace_uncertainty -- Laplace posterior bands, and `losvd_error_bands`,
+                    the error-band recipe for real IFU data.
+  nuts_uncertainty -- NUTS sampling of the exact posterior (slow reference).
   cleaning       -- pre-fit emission-line detection/masking, plus the
-                    private hard-clip loop `robust_fit.fit_losvd_robust`
-                    uses for its `cleaning_method="clip"`/`"inflate"` modes.
-  robust_fit     -- `fit_losvd_robust`, the LOSVD fit with an optional
-                    cleaning strategy against unmodeled contamination
-                    (`cleaning_method="inflate"`, per-spectrum residual-based
-                    error inflation, is the recommended default on real
-                    data; `"clip"` is the older hard sigma-clip; `None`
-                    is a plain fit with neither).
+                    private clip loop `fit_losvd_robust` uses for cleanup.
   continuum      -- shared multiplicative continuum, 3-block alternating fit.
-  bias_correction -- synthetic-calibrated (Pinkney et al. 2003-style) correction
-                     for regularization/shrinkage bias in recovered sigma/h4.
   lsf            -- instrument/template line-spread-function (LSF) matching,
                      needed before using any template library not already
                      natively at the target instrument's own resolution.
-  aic_regularization -- data-driven regularization-strength selection via
-                     Lipka & Thomas (2021)/Thomas & Lipka (2022)'s
-                     bootstrap-estimated generalized AIC, as an alternative
-                     to a fixed `cfg.lam`.
-  noise_model    -- pluggable AR(1) noise-covariance whitening, replacing
-                     the implicit independent-per-pixel-noise assumption;
-                     `rho=0.0` (the default) reproduces old behavior exactly.
+  noise_model    -- AR(1) noise-covariance whitening (`rho`), and the
+                     sky-line + template-mismatch variance model
+                     (`noise_model_errors`) for uncertainty bands.
   emiles         -- E-MILES SSP template packing/loading, LSF-matched at
                      pack time; a first-class template source alongside
                      the real 33-star MUSE library.
@@ -66,38 +59,16 @@ from ._version import __version__
 
 # JAX float64 by default (opt out with KINEXTRACT_NO_X64=1). This is a
 # correctness requirement, not a preference: under JAX's default float32,
-# L-BFGS-B demonstrably stalls far from the optimum in the stiff
-# heavy-penalty regime the (now default) third-difference penalty operates
-# in on wide velocity grids -- measured at sigma=300/S N=30, lam=65536:
-# 35% vs 6% shape residual, objective 80 units above the true minimum,
-# reported as `success=True`. Float64 was validated as statistically
-# neutral for the order-2 penalty path on the full 480-case grid before
-# becoming the default (dev_notes/REGULARIZATION_INVESTIGATION_LOG.md,
-# 2026-07-27; ~2x runtime cost). Must run before any jax-using submodule
-# import below creates arrays.
+# objectives in the stiff heavy-penalty regime of the third-difference
+# penalty on wide velocity grids stall the optimizer far from the optimum --
+# measured at sigma=300/S N=30, lam=65536: 35% vs 6% shape residual,
+# objective 80 units above the true minimum, reported as `success=True`
+# (dev_notes/REGULARIZATION_INVESTIGATION_LOG.md, 2026-07-27). Must run
+# before any jax-using submodule import below creates arrays.
 if _os.environ.get("KINEXTRACT_NO_X64", "") != "1":
     import jax as _jax
     _jax.config.update("jax_enable_x64", True)
 
-from .aic_regularization import (
-    AICSelectionResult,
-    edge_amplitude_frac,
-    estimate_m_eff,
-    estimate_m_eff_local,
-    select_lambda_aic,
-    select_lambda_aic_local,
-)
-from .bias_correction import (
-    BiasCalibration,
-    PerLamCalibration,
-    calibration_has_lam_axis,
-    correct_losvd,
-    correct_moments,
-    estimate_snr_whitened,
-    get_default_lam_axis_calibration,
-    load_calibration_table,
-    load_per_lam_calibration_table,
-)
 from .binning import (
     DartboardBins,
     assign_legacy_dartboard_bins,
@@ -116,7 +87,7 @@ from .cleaning import (
     detect_emission_from_residual,
     detect_emission_lines,
 )
-from .config import FitConfig
+from .config import PENALTY_ORDER, FitConfig, sigma_scaled_lam
 from .continuum import fit_continuum_block
 from .emiles import load_emiles_templates, pack_emiles_templates, parse_emiles_filename
 from .forward_model import (
@@ -131,15 +102,15 @@ from .gh_moments import (
     fit_gauss_hermite,
     fit_h3_h4,
     gauss_hermite_model,
-    shape_aware_taper_correction,
 )
 from .laplace_uncertainty import (
-    laplace_continuum_uncertainty,
     laplace_covariance_at_lam,
     laplace_covariance_at_lam_with_continuum,
     laplace_losvd_uncertainty,
     laplace_losvd_uncertainty_parallel,
-    quick_laplace_uncertainty,
+    losvd_error_bands,
+    losvd_error_bands_parallel,
+    recenter_samples,
 )
 from .legacy_io import write_fit_outputs
 from .losvd import (
@@ -147,11 +118,12 @@ from .losvd import (
     build_spline_truth,
     default_initial_coeffs,
     difference_matrix,
+    edge_amplitude_frac,
     fit_log_spline_map,
 )
 from .lsf import fwhm_to_sigma, match_gaussian_lsf, muse_lsf_fwhm, variable_gaussian_convolve
 from .mock_cube import build_mock_cube
-from .multi_template import fit_losvd, fit_losvd_basis, fit_losvd_parallel
+from .multi_template import fit_losvd, fit_losvd_basis, fit_losvd_parallel, with_lam_rule
 from .muse_cube import (
     BACON2017_VARIANCE_CORRECTION_FACTOR,
     MuseCube,
@@ -160,12 +132,17 @@ from .muse_cube import (
     load_muse_cube,
     save_muse_cube_fits,
     spatial_correlation_inflation,
+    trim_cube_wavelength_fits,
     white_light_image,
 )
 from .noise_model import (
     build_ar1_covariance,
     estimate_correlation_length,
+    fit_noise_model,
+    load_muse_sky_lines,
     measure_and_whiten,
+    noise_model_errors,
+    sky_line_profile,
     whiten,
 )
 from .plotting import plot_bin_map, plot_moment_maps
@@ -182,36 +159,31 @@ from .template_reduction import (
     reduce_templates_iteratively,
     save_template_subset,
 )
-from .uncertainty import bootstrap_losvd, bootstrap_losvd_parallel, calibrate_noise_scale
 
 __all__ = [
     "build_bspline_basis", "build_spline_truth", "difference_matrix", "default_initial_coeffs", "fit_log_spline_map",
+    "edge_amplitude_frac",
     "build_velocity_grid", "shift_template", "build_template_stack",
     "mask_wavelength_windows",
     "gauss_hermite_model", "fit_gauss_hermite",
-    "compute_direct_moments", "fit_h3_h4", "compute_losvd_moments", "shape_aware_taper_correction",
-    "FitConfig",
-    "fit_losvd", "fit_losvd_basis", "fit_losvd_parallel",
-    "bootstrap_losvd", "bootstrap_losvd_parallel", "calibrate_noise_scale",
+    "compute_direct_moments", "fit_h3_h4", "compute_losvd_moments",
+    "FitConfig", "PENALTY_ORDER", "sigma_scaled_lam",
+    "fit_losvd", "fit_losvd_basis", "fit_losvd_parallel", "with_lam_rule",
     "detect_emission_lines", "DEFAULT_CAT_EMISSION_LINES", "CAII_PROTECTED_WINDOWS",
     "detect_emission_from_residual", "compute_fit_rms",
     "fit_losvd_robust", "fit_losvd_robust_parallel", "compute_local_inflation",
     "reconstruct_continuum", "full_pixel_model",
     "fit_continuum_block",
-    "BiasCalibration", "PerLamCalibration", "load_calibration_table", "load_per_lam_calibration_table",
-    "estimate_snr_whitened", "correct_moments", "correct_losvd", "calibration_has_lam_axis",
-    "get_default_lam_axis_calibration",
     "fwhm_to_sigma", "muse_lsf_fwhm", "variable_gaussian_convolve", "match_gaussian_lsf",
-    "AICSelectionResult", "estimate_m_eff", "select_lambda_aic",
-    "estimate_m_eff_local", "select_lambda_aic_local", "edge_amplitude_frac",
     "build_ar1_covariance", "whiten", "estimate_correlation_length", "measure_and_whiten",
-    "laplace_covariance_at_lam", "laplace_losvd_uncertainty", "quick_laplace_uncertainty",
-    "laplace_losvd_uncertainty_parallel", "laplace_covariance_at_lam_with_continuum",
-    "laplace_continuum_uncertainty",
+    "sky_line_profile", "load_muse_sky_lines", "fit_noise_model", "noise_model_errors",
+    "laplace_covariance_at_lam", "laplace_covariance_at_lam_with_continuum",
+    "laplace_losvd_uncertainty", "laplace_losvd_uncertainty_parallel",
+    "losvd_error_bands", "losvd_error_bands_parallel", "recenter_samples",
     "parse_emiles_filename", "pack_emiles_templates", "load_emiles_templates",
     "MuseCube", "white_light_image", "extract_aperture_spectrum", "combine_bin_spectrum_robust",
     "spatial_correlation_inflation",
-    "load_muse_cube", "save_muse_cube_fits", "BACON2017_VARIANCE_CORRECTION_FACTOR",
+    "load_muse_cube", "save_muse_cube_fits", "trim_cube_wavelength_fits", "BACON2017_VARIANCE_CORRECTION_FACTOR",
     "build_mock_cube",
     "DartboardBins", "log_radial_edges", "linear_radial_edges", "pixel_aware_radial_edges",
     "uniform_theta_edges",

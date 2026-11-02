@@ -1,7 +1,7 @@
 """Instrument/template line-spread-function (LSF) matching.
 
-**Why this module exists.** `bias_correction`'s calibration and the whole
-ablation ladder were built and validated using the package's original
+**Why this module exists.** The package's early validation ablation ladder
+was built and validated using the package's original
 33-star template library (`sco_workdir_example/.../muse_templates/`),
 which -- based on its native 1.25 Angstrom/pixel sampling, exact
 4750-9350 Angstrom range match to MUSE, and calibrated-flux-plus-error

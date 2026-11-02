@@ -367,9 +367,16 @@ def assign_legacy_dartboard_bins(shape: tuple[int, int], center: tuple[float, fl
     For a spaxel at `(dx, dy)` = pixel offset from `center`, scaled to
     arcsec by `pixel_scale`:
 
-    1. Rotate by `pa_deg` (the kinematic major-axis PA, same convention
-       `assign_spaxels_to_bins`'s own `pa_deg` uses): `x = dx*cos(pa) -
-       dy*sin(pa)`, `y = dx*sin(pa) + dy*cos(pa)`.
+    1. Rotate so the major axis lies along `+x`: `pa_deg` is the
+       kinematic major-axis PA, counterclockwise from the image `+x` axis
+       (the convention of `assign_spaxels_to_bins`, of the bin-map
+       plotting, and of the kinematic-PA fit), so `x = dx*cos(pa) +
+       dy*sin(pa)`, `y = -dx*sin(pa) + dy*cos(pa)`. `plotbin3.f` instead
+       reads a "rotation axis" `ang` and computes `x = xp*cos(ang) -
+       yp*sin(ang)`, i.e. `ang = -pa_deg`. (Before 2026-10-16 this function
+       used `+pa_deg` there, which folded the dartboard about the major
+       axis mirrored in `x`: for NGC 4751's 85.66 deg, about a line at
+       94.34 deg, 8.7 deg off.)
     2. Side: `x >= 0` -> `"bin"` (sign `+1`); `x < 0` -> `"bnn"` (sign
        `-1`, then `x` is mirrored positive for the lookup below). This
        split is across the *kinematic minor axis* (north/south of the
@@ -468,8 +475,8 @@ def assign_legacy_dartboard_bins(shape: tuple[int, int], center: tuple[float, fl
     dx = (xx - center[0]) * pixel_scale
     dy = (yy - center[1]) * pixel_scale
     pa = np.radians(pa_deg)
-    x = dx * np.cos(pa) - dy * np.sin(pa)
-    y = dx * np.sin(pa) + dy * np.cos(pa)
+    x = dx * np.cos(pa) + dy * np.sin(pa)       # plotbin3.f's rotation with ang = -pa_deg (see step 1)
+    y = -dx * np.sin(pa) + dy * np.cos(pa)
 
     side = np.where(x >= 0, 1, -1)
     hemisphere = np.where(y >= 0, 1, -1)

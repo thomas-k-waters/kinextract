@@ -195,6 +195,43 @@ def test_fitconfig_rho_defaults_to_zero_and_round_trips():
     """
     from kinextract import FitConfig
 
-    assert FitConfig().rho == 0.0
-    cfg = FitConfig(rho=0.42)
+    assert FitConfig(continuum_knots=None).rho == 0.0
+    cfg = FitConfig(rho=0.42, continuum_knots=None)
     assert cfg.rho == 0.42
+
+
+# ------------------------------------------------------------------------------------------------ systematics model
+from kinextract.noise_model import fit_noise_model, sky_line_profile
+
+
+def test_sky_line_profile_peaks_at_the_rest_frame_lines_and_is_normalized():
+    wave = np.arange(8300.0, 8850.0, 1.25)
+    z = 0.01
+    prof = sky_line_profile(wave, np.array([8400.0, 8600.0]) * (1 + z), np.array([1.0, 3.0]), z=z, fwhm=2.5 * (1 + z))
+    assert abs(wave[np.argmax(prof)] - 8600.0) <= 1.25
+    assert np.isclose(np.percentile(prof, 99), 1.0)
+    assert prof[np.argmin(np.abs(wave - 8500.0))] < 1e-6
+
+
+def test_fit_noise_model_recovers_the_injected_sky_and_mismatch_terms():
+    rng = np.random.default_rng(0)
+    n = 4000
+    model = 1.0 + 0.3 * np.sin(np.linspace(0, 40, n))
+    err = np.full(n, 0.002)
+    s = np.zeros(n); s[rng.choice(n, 400, replace=False)] = rng.uniform(0.2, 1.0, 400)
+    kappa, f = 0.05, 0.01
+    res = rng.standard_normal(n) * np.sqrt(err ** 2 + (kappa * s) ** 2 + (f * model) ** 2)
+    out = fit_noise_model(res, model, err, s)
+    assert abs(out["kappa"] * np.median(model) / kappa - 1) < 0.15
+    assert abs(out["f"] / f - 1) < 0.1
+    assert out["inflation"] > 4
+
+
+def test_fit_noise_model_leaves_pure_noise_alone():
+    rng = np.random.default_rng(1)
+    n = 3000
+    model = np.ones(n); err = np.full(n, 0.01)
+    s = np.zeros(n); s[::30] = 1.0
+    out = fit_noise_model(err * rng.standard_normal(n), model, err, s)
+    assert out["inflation"] < 1.02
+    assert np.all(out["errors"] >= err)

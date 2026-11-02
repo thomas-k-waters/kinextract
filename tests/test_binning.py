@@ -426,3 +426,21 @@ def test_fold_major_axis_false_south_bin_name_has_s_suffix(tmp_path):
     assert entry["hemisphere"] == -1
     assert entry["bin_name"].endswith("s")
     assert entry["bin_name"][:-1].startswith("bin")
+
+
+def test_legacy_dartboard_major_axis_sector_lies_on_pa():
+    """pa_deg is the major-axis PA counterclockwise from +x: the bin/bnn sector-1 wedges must be centered on pa_deg and
+    pa_deg + 180 (before 2026-10-16 they were centered on 180 - pa_deg, the axis mirrored in x)."""
+    r_edges = np.array([0.0, 5.0, 40.0])
+    v_edges_deg = np.array([0.0, 11.537, 23.578, 36.870, 53.130, 90.0])
+    for pa in (0.0, 30.0, 85.66, 120.0):
+        id_map, table = assign_legacy_dartboard_bins((201, 201), center=(100, 100), pa_deg=pa, r_edges=r_edges,
+                                                     v_edges_deg=v_edges_deg, pixel_scale=1.0)
+        yy, xx = np.mgrid[0:201, 0:201]
+        for name, axis in (("bin0201", pa), ("bnn0201", pa + 180.0)):
+            row = next(t for t in table if t["bin_name"] == name)
+            m = id_map == row["bin_id"]
+            ang = np.degrees(np.arctan2(yy[m] - 100, xx[m] - 100))
+            off = (ang - axis + 180.0) % 360.0 - 180.0          # signed offset from the expected axis direction
+            assert abs(np.median(off)) < 0.5, (pa, name, np.median(off))
+            assert np.all(np.abs(off) <= 11.537 + 1.0)

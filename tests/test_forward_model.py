@@ -96,18 +96,10 @@ def test_masking_a_localized_contaminant_recovers_the_clean_fit():
         template_flux -= depth * np.exp(-0.5 * ((wavelength - cen) / 5.0) ** 2)
 
     vel, sig, nsig, snr = 0.0, 140.0, 7, 100.0
-    # penalty_order=2 pinned deliberately (2026-07, Stage 22): this test
-    # characterizes the old order-2 fit's sensitivity to a localized
-    # contaminant (and masking's remedy for it) at a specific severity/seed
-    # count. The order-3 default's strong shrink-toward-Gaussian prior is
-    # measurably MORE robust to a bounded contaminant -- checked directly
-    # (15 seeds, same setup): the sign of (contaminated_err - clean_err)
-    # flips seed to seed and the median case shows no reliable degradation
-    # at this contaminant severity, so this specific demonstration (and its
-    # threshold/seed count) no longer applies to the new default. The
-    # increased real-data robustness itself is a genuine improvement, not a
-    # regression -- it just isn't what this test's premise is about.
-    cfg = FitConfig(vmin=vel - nsig * sig, vmax=vel + nsig * sig, penalty_order=2)
+    # The order-3 penalty's shrink-toward-Gaussian prior is robust to a mild contaminant (checked, 2026-07:
+    # at 100x the noise over 3 A the sign of the degradation flips seed to seed), so this uses a contaminant
+    # strong and wide enough to bias any fit -- the point here is that masking it removes the bias.
+    cfg = FitConfig(vmin=vel - nsig * sig, vmax=vel + nsig * sig, continuum_knots=None)
     v_grid = cfg.build_velocity_grid()
     b_truth, _ = build_spline_truth(v_grid, vel=vel, sigma=sig, wiggle_scale=0.0, seed=0)
     A_stack = build_template_stack(wave_fit, wavelength, [template_flux], v_grid)
@@ -116,7 +108,7 @@ def test_masking_a_localized_contaminant_recovers_the_clean_fit():
 
     # inject a localized contaminant: a handful of pixels near 8416 A
     # with a huge, fixed flux excess -- mimicking an unsubtracted sky line.
-    contaminant_window = (8415.0, 8418.0)
+    contaminant_window = (8413.0, 8421.0)
     contaminated_idx = (wave_fit >= contaminant_window[0]) & (wave_fit <= contaminant_window[1])
     assert contaminated_idx.sum() >= 1, "test wavelength window must actually hit some pixels"
     errors = np.full(len(wave_fit), noise_level)
@@ -132,13 +124,13 @@ def test_masking_a_localized_contaminant_recovers_the_clean_fit():
     # direction (a curvature-penalized fit is somewhat robust to a few
     # pixels, so one lucky/unlucky clean-noise draw can dominate) --
     # average over several seeds, and use a severe enough contaminant
-    # (100x the noise level) that its effect isn't marginal.
+    # (1000x the noise level) that its effect isn't marginal.
     clean_errs, contaminated_errs, masked_errs = [], [], []
     for seed in range(6):
         rng = np.random.default_rng(seed)
         galaxy_clean = galaxy_noiseless + rng.normal(0.0, noise_level, len(wave_fit))
         galaxy_contaminated = galaxy_clean.copy()
-        galaxy_contaminated[contaminated_idx] += 100.0 * noise_level
+        galaxy_contaminated[contaminated_idx] += 1000.0 * noise_level
 
         clean_errs.append(fit_and_score(wave_fit, galaxy_clean, errors))
         contaminated_errs.append(fit_and_score(wave_fit, galaxy_contaminated, errors))

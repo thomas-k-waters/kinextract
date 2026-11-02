@@ -161,7 +161,7 @@ def save_template_subset(result: TemplateReductionResult, bin_table: list[dict],
                           template_names: list[str], template_ages: np.ndarray,
                           template_metals: np.ndarray, filepath: str) -> None:
     """Save a `TemplateReductionResult` to a single `.npz`, following
-    `uncertainty.save_bootstrap`'s flattening convention. Each bin's
+    a flat, `np.savez`-friendly convention. Each bin's
     *final* iteration's weights are stored densely (`(n_bins,
     n_templates_full)`, zero where a template wasn't selected) rather
     than as ragged per-bin arrays -- avoids the `allow_pickle=True` route

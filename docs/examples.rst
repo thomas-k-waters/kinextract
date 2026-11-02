@@ -18,10 +18,10 @@ complex features -> real data -> a full galaxy analysis.
        template-mixture recovery on a synthetic mock built from real
        E-MILES templates you choose
    * - ``02_realistic_mock_fit.ipynb``
-     - A genuinely degenerate multi-template mixture, regularization
-       trade-offs, an h4 noise-floor analysis, this package's two
-       uncertainty engines (Laplace, the default, and bootstrap as a
-       cross-check), and continuum-cofitting
+     - A genuinely degenerate multi-template mixture, what the
+       regularization costs and the h4 noise floor, the ``lam`` rule
+       for broad LOSVDs, Laplace uncertainty, and the co-fitted
+       continuum
    * - ``03_template_mismatch.ipynb``
      - Fits the same mock with a correct vs. a systematically wrong
        template library and compares the recovered LOSVD directly --
@@ -29,13 +29,16 @@ complex features -> real data -> a full galaxy analysis.
    * - ``04_template_calibration.ipynb``
      - Get a MUSE cube, bin it, fit every bin against the full E-MILES
        grid, and iteratively reduce to a representative template subset
+       (the dust-free half of NGC 4751's MUSE NFM cube)
    * - ``05_noise_correlation.ipynb``
      - Real MUSE pixel-noise correlation (AR(1)), the Bacon et al. (2017)
-       variance-underestimate factor, and correlated-noise whitening
+       variance-underestimate factor, correlated-noise whitening, and the
+       sky-line + template-mismatch noise model behind ``losvd_error_bands``
    * - ``06_other_instruments.ipynb``
      - Adapting this package to a different instrument (HST/STIS):
        synthetic mocks and a real STIS spectrum fit end-to-end
    * - ``07_full_galaxy_analysis.ipynb``
-     - The capstone: a full real-galaxy analysis start to finish --
-       spatial binning, per-bin masking/cleaning/fitting/uncertainty in
-       parallel, moment maps, and radial kinematic profiles
+     - The capstone: a complete extraction of a real cube (NGC 4751, MUSE
+       NFM) -- the dust mask and a legacy dartboard, fits with the package
+       defaults, ``losvd_error_bands``, flags and hand tuning, V_sys, moment maps, radial profiles, and a mirror-symmetry
+       check of the errors

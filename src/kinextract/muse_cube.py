@@ -385,3 +385,55 @@ def save_muse_cube_fits(cube: MuseCube, fits_path: str) -> None:
     stat_hdu = fits.ImageHDU(data=(cube.error.astype(np.float32) ** 2), header=header, name="STAT")
     hdul = fits.HDUList([fits.PrimaryHDU(), data_hdu, stat_hdu])
     hdul.writeto(fits_path, overwrite=True)
+
+
+def trim_cube_wavelength_fits(in_path: str, out_path: str, wave_min: float, wave_max: float) -> None:
+    """Write a new FITS cube containing only `[wave_min, wave_max]` (Angstrom,
+    same frame as the input's own wavelength axis -- observed frame for a raw
+    ESO Phase 3 download, not rest frame) of `in_path`'s `DATA`/`STAT`
+    extensions, at the same spatial sampling and file layout `load_muse_cube`
+    reads.
+
+    A real MUSE-DEEP cube is tens of GB (the full instrument bandpass,
+    ~4750-9350 Angstrom); most single-line science (e.g. the CaII triplet
+    region for stellar kinematics) only ever fits a few hundred Angstrom of
+    that. Trimming once, on disk, to just the window actually used means
+    every downstream notebook cell loads and holds a cube an order of
+    magnitude smaller, without changing anything about how that cube reads
+    (same `DATA`/`STAT`/WCS-keyword layout as the untrimmed file).
+
+    Reads only the requested wavelength slices via `ImageHDU.section`
+    (memory-mapped -- never materializes the full input cube in RAM), so
+    this runs safely on a machine too small to hold the untrimmed cube at
+    all, which is the actual point of trimming it.
+    """
+    with fits.open(in_path, memmap=True) as hdul:
+        names = [hdu.name for hdu in hdul]
+        primary_header = hdul[0].header.copy()
+        data_header = hdul["DATA" if "DATA" in names else 0].header.copy()
+
+        crval3 = float(data_header["CRVAL3"])
+        crpix3 = float(data_header.get("CRPIX3", 1.0))
+        cd3_3 = float(data_header["CD3_3"]) if "CD3_3" in data_header else float(data_header["CDELT3"])
+        n_wave = int(data_header["NAXIS3"])
+        wave = crval3 + (np.arange(n_wave) + 1.0 - crpix3) * cd3_3
+
+        i0 = int(np.searchsorted(wave, wave_min))
+        i1 = int(np.searchsorted(wave, wave_max, side="right"))
+        if i1 <= i0:
+            raise ValueError(f"no wavelength slices in [{wave_min}, {wave_max}] "
+                              f"-- cube covers {wave[0]:.1f}-{wave[-1]:.1f} A")
+        new_crval3 = wave[i0]
+
+        out_hdus = [fits.PrimaryHDU(header=primary_header)]
+        for ext_name in ("DATA", "STAT"):
+            if ext_name not in names:
+                continue
+            trimmed = hdul[ext_name].section[i0:i1, :, :]
+            hdr = hdul[ext_name].header.copy()
+            hdr["NAXIS3"] = i1 - i0
+            hdr["CRVAL3"] = new_crval3
+            hdr["CRPIX3"] = 1.0
+            out_hdus.append(fits.ImageHDU(data=trimmed, header=hdr, name=ext_name))
+
+        fits.HDUList(out_hdus).writeto(out_path, overwrite=True)

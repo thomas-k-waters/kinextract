@@ -64,25 +64,11 @@ regime) -- treat continuum-cofitting as still maturing (one mock regime
 is not full production validation) rather than production-hardened, but
 no longer entirely unvalidated.
 
-**Penalty-order recommendation, updated by that sweep.** Earlier guidance
-(this module's docstring and `examples/notebooks/02_realistic_mock_fit.
-ipynb`'s own Section 8) pinned `penalty_order=2, lam=2.0` as "the
-documented-working combination" and called `penalty_order=3` untested.
-The sweep found the opposite: at every S/N tested (30/60/100), a fixed
-order-3 `lam` (4096-32768 range) beat order-2/lam=2.0 on both `sigma`
-bias and, especially, `h4` bias (order-2's h4 bias was 3-4x larger, at
-every S/N -- worse than not cofitting a continuum at all).
-`penalty_order=3, lam=4096.0` (`cfg.lam_selection="fixed"`) is the
-recommended starting point; `penalty_order=2, lam=2.0` still works if set
-explicitly but is no longer the default. `cfg.lam_selection="aic_local"`
-(adaptive, `FitConfig`'s own default) also supports continuum-cofitting
-now -- see `aic_regularization.estimate_m_eff_local`'s own docstring for
-the joint LOSVD+continuum linearization this relies on -- at a real,
-higher per-candidate cost (each scanned `lam` now costs a full 3-block
-alternation, not 2-block); its own validation record for the
-continuum case is newer and smaller than the fixed-`lam=4096` path's,
-so cross-check both before trusting adaptive selection for continuum
-targets in production.
+**With the order-3 LOSVD penalty at `lam` 4096 and up** (the package
+default, via `FitConfig`'s lam rule) the sweep found continuum-cofitting
+well-behaved at every S/N tested (30/60/100). The order-2 penalty it was
+first validated with gave 3-4x larger h4 bias, worse than not cofitting a
+continuum at all, and has been removed.
 
 **`C`'s recovered absolute mean is not identifiable -- only its shape
 is.** Root-caused 2026-08-01 (`dev_notes/continuum/FINDINGS.md`): a true
@@ -108,7 +94,6 @@ from __future__ import annotations
 import jax
 import jax.numpy as jnp
 import numpy as np
-from scipy.optimize import minimize as scipy_minimize
 
 
 def _neg_log_post_continuum(coeffs, M, y_w, basis, D2, lam_c, ridge_c):
@@ -125,13 +110,27 @@ def _neg_log_post_continuum(coeffs, M, y_w, basis, D2, lam_c, ridge_c):
 # call even when their shapes are identical -- jax.jit's cache is keyed on the jitted
 # function object's identity plus argument shapes/dtypes, so a fresh closure defeats
 # it entirely and forces a full retrace+recompile on every single call (every
-# alternating-minimization iteration, every bootstrap replicate). Same fix already
+# alternating-minimization iteration). Same fix already
 # applied to losvd.fit_log_spline_map's identical anti-pattern -- see that module for
 # the measured (modest but real) speedup. `lam_c` is passed as a traced argument
 # (not a Python/static one) so different lam_c values don't themselves force
 # recompilation either.
 _val_fn_continuum = jax.jit(_neg_log_post_continuum)
-_vg_fn_continuum = jax.jit(jax.value_and_grad(_neg_log_post_continuum))
+
+
+def _continuum_fgh(coeffs, M, y_w, basis, D2, lam_c, ridge_c):
+    """Value, gradient and exact Hessian of `_neg_log_post_continuum` in closed
+    form. With `m = M*exp(basis @ c)` and `r = m - y_w`:
+      g = basis.T @ (m*r) + lam_c*D2.T@D2@c + ridge_c*c
+      H = basis.T @ diag(m*m + m*r) @ basis + lam_c*D2.T@D2 + ridge_c*I
+    """
+    m = M * np.exp(basis @ coeffs)
+    r = m - y_w
+    D2c = D2 @ coeffs
+    f = 0.5 * float(r @ r) + 0.5 * lam_c * float(D2c @ D2c) + 0.5 * ridge_c * float(coeffs @ coeffs)
+    g = basis.T @ (m * r) + lam_c * (D2.T @ D2c) + ridge_c * coeffs
+    H = (basis.T * (m * m + m * r)) @ basis + lam_c * (D2.T @ D2) + ridge_c * np.eye(len(coeffs))
+    return f, g, 0.5 * (H + H.T)
 
 
 def fit_continuum_block(M: np.ndarray, y_w: np.ndarray, basis_c: np.ndarray, D2_c: np.ndarray,
@@ -141,7 +140,7 @@ def fit_continuum_block(M: np.ndarray, y_w: np.ndarray, basis_c: np.ndarray, D2_
     `M(lambda)` (the current template-mixture-and-LOSVD prediction) and
     target `y_w`, fit `C(lambda) = exp(basis_c @ coeffs)` minimizing
     `0.5*||M*C - y_w||^2 + 0.5*lam_c*||D2_c @ coeffs||^2 + 0.5*ridge_c*
-    ||coeffs||^2` via L-BFGS-B with JAX autodiff -- structurally the
+    ||coeffs||^2` (by exact-Hessian trust-region Newton) -- structurally the
     *same kind* of problem as `fit_log_spline_map` (an `exp`-linked
     spline fit by curvature-penalized nonlinear least squares) but not
     literally reusable as that function, since here the spline multiplies
@@ -162,12 +161,13 @@ def fit_continuum_block(M: np.ndarray, y_w: np.ndarray, basis_c: np.ndarray, D2_
     nonzero, not precisely tuned.
 
     **`result["success"]` is frequently False for reasons unrelated to fit
-    quality -- don't filter on it.** This function's own L-BFGS-B call
-    intermittently reports an "ABNORMAL" line-search termination on an
-    already-well-converged solution (every multi-start candidate typically
-    agrees to several decimal places regardless of the flag). Measured
-    directly: mean recovered sigma-bias is statistically indistinguishable
-    between `success=True`- and `success=False`-flagged fits. Treat this
+    quality -- don't filter on it.** The continuum's handful of
+    coefficients is often flat to rounding level along the `C`-mean/`w`-scale
+    degeneracy (module docstring), so the solver can stop short of its own
+    tolerance on an already-converged solution (every multi-start candidate
+    typically agrees to several decimal places regardless of the flag).
+    Measured directly: mean recovered sigma-bias is statistically
+    indistinguishable between `success=True`- and `success=False`-flagged fits. Treat this
     flag as a diagnostic curiosity, not a hard filter for discarding fits.
 
     **Multi-start** guards against competing local minima the same way
@@ -191,9 +191,7 @@ def fit_continuum_block(M: np.ndarray, y_w: np.ndarray, basis_c: np.ndarray, D2_
         on the wavelength grid, from `build_bspline_basis`/
         `difference_matrix` called on `wave_fit` instead of `v_grid`.
     lam_c : curvature penalty weight for the continuum spline. Default
-        2.0, unvalidated -- inherited from `lam`'s own default as a
-        starting point, not independently calibrated (see
-        `tests/test_continuum.py` for what has and hasn't been checked).
+        2.0 (recovery is insensitive to it -- see `tests/test_continuum.py`).
     ridge_c : direct L2 penalty on the continuum coefficients themselves,
         default 0.1 -- see this function's own docstring above for why
         this exists.
@@ -212,30 +210,20 @@ def fit_continuum_block(M: np.ndarray, y_w: np.ndarray, basis_c: np.ndarray, D2_
     objective -- small means every start agreed, large means this result
     only survived because of the multi-start search).
     """
+    from .losvd import _trust_exact
     n_coef = basis_c.shape[1]
     starts = _default_continuum_starts(n_coef, coeffs0)
 
     M_j, y_w_j, basis_j, D2_j = jnp.array(M), jnp.array(y_w), jnp.array(basis_c), jnp.array(D2_c)
     lam_c_j, ridge_c_j = jnp.asarray(lam_c), jnp.asarray(ridge_c)
 
-    # Fused value_and_grad, not separate val_fn/grad_fn calls -- see
-    # losvd.fit_log_spline_map's identical change for the measured 1.45x
-    # speedup and the reasoning (computing the gradient already requires
-    # the forward pass, so separate calls pay for it twice per iteration).
     def val_fn(c):
         return _val_fn_continuum(c, M_j, y_w_j, basis_j, D2_j, lam_c_j, ridge_c_j)
 
-    def vg_fn(c):
-        return _vg_fn_continuum(c, M_j, y_w_j, basis_j, D2_j, lam_c_j, ridge_c_j)
-
-    def _obj_and_grad(c):
-        v, g = vg_fn(jnp.array(c))
-        return float(v), np.array(g)
-
-    fits = []
-    for c0 in starts:
-        res = scipy_minimize(_obj_and_grad, c0, jac=True, method='L-BFGS-B')
-        fits.append(res)
+    M_np, y_np, basis_np, D2_np = (np.asarray(M, dtype=float), np.asarray(y_w, dtype=float),
+                                   np.asarray(basis_c, dtype=float), np.asarray(D2_c, dtype=float))
+    fits = [_trust_exact(lambda c: _continuum_fgh(c, M_np, y_np, basis_np, D2_np, float(lam_c), float(ridge_c)), c0)
+            for c0 in starts]
 
     objectives = [float(val_fn(jnp.array(res.x))) for res in fits]
     best_idx = int(np.argmin(objectives))

@@ -7,51 +7,48 @@ actually matter, and what do they do to each other?
 
 ## The knobs, in one place
 
+The defaults reproduce the NGC 4751 MUSE extraction validated in `dev_notes/regularization_v2/FINDINGS.md`; most
+fits need only `vmin`/`vmax` (about V +- 5-7 sigma) and, for whitening, `rho`.
+
 | Parameter | Default | Job | Interacts with |
 |---|---|---|---|
-| `penalty_order` | 3 | Which difference order the roughness penalty acts on. Order 3's null space is any *Gaussian* log-density, so heavy smoothing shrinks toward the best-fitting Gaussian instead of toward exponential tails -- this is what keeps noise-driven wing/edge-pedestal inflation under control by construction (see `max_edge_amplitude_frac` below for the direct diagnostic/guard), and won the 480-case paired validation over order 2 (23/32 cells better shape residual, overall \|sigma bias\| 5.6 vs 15.5 km/s). Order 2 keeps a modest shape edge for genuinely non-Gaussian LOSVDs (\|h3\|/h4 ~ 0.06+) at sigma 50-140, S/N~100, where order 3 shrinks real h4 by ~0.03-0.05 (a regime where h4 is near the measurement noise floor regardless -- see `dev_notes/REGULARIZATION_INVESTIGATION_LOG.md`), but has no amplitude/edge guard of its own -- if you use it, watch `edge_amplitude_frac` directly. | `lam`/`lam_grid` (order-3 lam values sit orders of magnitude higher); activates two selection safeguards in `fit_losvd` (delta-AIC parsimony tiebreak, sub-knot-sigma candidate guard); requires the package's JAX-float64 default (on automatically) |
-| `lam` | 2.0 (fallback value; see `lam_selection`; calibrated for `penalty_order=2` only -- order 3 needs values orders of magnitude higher, e.g. 4096) | Roughness penalty on the LOSVD spline. Always on. | `vmin`/`vmax`/`min_interior_knots` (a narrow grid can make `lam` behave far stronger than calibrated -- `FitConfig` warns if this happens); `penalty_order` (order 3 needs far larger values -- `FitConfig` warns on the stale combination) |
-| `lam_selection` | `"aic_local"` | Whether `lam` is picked per fit (`"aic_local"`, minimizing chi2+2·m_eff -- measured 20-57% lower sigma bias than fixed `lam=2.0`) or held at the fixed `lam` value above (`"fixed"`). Supports `continuum_knots` too (`aic_regularization.estimate_m_eff_local`'s own joint LOSVD+continuum linearization) -- real cost increase there (~4-5x per fit, each scanned `lam` costs a full 3-block alternation) and its own "lam selection is a lottery at S/N 60-150" risk (this module's own module docstring) applies more sharply under continuum; see `dev_notes/continuum/FINDINGS.md`'s 2026-08-11 entry before switching a whole real-data population over to it. | `bootstrap_losvd` (`reselect_lam=True`, the default, re-runs selection per replicate, continuum-cofitting included) and auto-switches its default bias-correction table to the `m_eff`-axis one when this is `"aic_local"` |
-| `max_edge_amplitude_frac` | 0.01 | During adaptive selection, excludes a candidate `lam` whose fitted LOSVD is still above this fraction of its own peak at either velocity-grid edge -- the divergent-edge-pedestal guard: a roughness penalty alone can't distinguish a compact LOSVD from one carrying a broad, low-amplitude pedestal across the grid, and that pedestal inflates every reported moment if left unconstrained. `aic_regularization.edge_amplitude_frac(b)` is the same check, exposed directly for diagnosing an *already-fitted* curve (e.g. a fixed-`lam` result) without refitting. Superseded an earlier per-row wing-taper penalty (`lam_wing`, removed) that needed per-target retuning to work at all; this constraint is inert on data with no pedestal and needs none. | Only active during `lam_selection="aic_local"`; has no effect on a `"fixed"` fit unless you check `edge_amplitude_frac` on its result yourself |
-| `shape_aware_correction` | False | Post-fit correction for a moment-estimator windowing bias. | Helps below ~sigma=200 km/s, measurably *hurts* above it -- `compute_losvd_moments` warns if active and the recovered sigma lands above that boundary |
-| `noise_scale` (via `calibrate_noise_scale`) | 1.0 (off) | Inflates bootstrap-replicate noise injection when the assumed per-pixel noise is wrong. | Only affects bootstrap replicates, never the point estimate or `lam`'s own behavior -- deliberately decoupled |
-| `smooth_window_A` / `inflation_cap` (`fit_losvd_robust(cleaning_method="inflate")`) | 8.0 / 8.0 | **The recommended default** response to unmodeled contamination (sky-subtraction residuals in particular) whose wavelength isn't known in advance -- per-spectrum, per-wavelength error inflation from the fit's own residual, capped and floored, refit against the inflated errors. Real full-field validation (113 real MUSE bins, NGC 4751): median whitened RMS 1.41 -> 0.96, bins tripping `cleaning_method="clip"`'s own 10%-clipped sanity warning 22/113 -> 0/113, recovered kinematics essentially unchanged. Both defaults are starting points, not universal -- real per-target tuning found `smooth_window_A=3.0` needed at MUSE's ~1.25A/pix spacing, and `inflation_cap` needing to go as high as 100 on a target whose sky-line residuals otherwise saturated the cap (`dev_notes/real_data_sigma/FINDINGS.md`). | Uses `cleaning_method="clip"`'s own hard-clip loop underneath, twice, as a loose cleanup layer only (`prelim_clip_sigma`/`final_clip_sigma`, both loose by default) -- do not tighten those to do the inflation's own job. Not yet shown to reduce absolute kinematic bias, only residual calibration/robustness -- see `robust_fit`'s own module docstring |
-| `clip_sigma` / `max_clip_fraction` / `robust_scale` (`fit_losvd_robust(cleaning_method="clip")`) | 3.0 / 0.1 / `True` | Iterative sigma-clipping, standalone. **Demoted from the previous default** -- real chi2_red on real data commonly runs well above 1 (11-28 measured), so a plain hard clip alone can compound bias rather than fix contamination; prefer `cleaning_method="inflate"` above unless you have a specific, independent reason to suspect a handful of genuine per-pixel outliers only. `robust_scale=True` (measures `clip_sigma` against a MAD-based robust scale of the current residual, not the raw whitened residual) is the default for exactly this reason -- confirmed to collapse to a biased, unconstrained fit at `robust_scale=False` whenever chi2_red is far from 1 (clipped >90% of pixels in the case that found this); `cleaning_method="inflate"`'s own internal clip passes have always hardcoded `robust_scale=True`. | Do not reach for this to fix sigma inflation from unmodeled contamination -- that's `cleaning_method="inflate"`'s job. Outlier rejection can *compound* a model bias, since the pixels disagreeing most with an already-biased fit are often exactly the ones correctly arguing against it |
-| `mask_wavelength_windows` (`windows=`) | -- | Fixed-wavelength exclusion for *known* bad-pixel ranges (e.g. sky-subtraction residuals at specific wavelengths). | Complementary to `fit_losvd_robust`'s `cleaning_method="inflate"`/`"clip"` modes, not a substitute -- use this when the bad wavelengths are known and fixed across every spectrum, the per-spectrum methods when they aren't |
-| `n_templates` (shape of `A_stack`) | -- | Not a `FitConfig` field -- the shape of the template stack you build and pass in. `fit_losvd`/`bootstrap_losvd`/`fit_losvd_robust` all accept any `n_templates >= 1`. | More templates costs identifiability: the same fixed-size LOSVD histogram now has to compete against more free template weights, which measurably worsens sigma/V bias at some sigma ranges relative to a single known template |
+| `lam` | 4096 | Strength of the roughness penalty on the third differences of the log-LOSVD spline coefficients. The third-difference penalty's null space is any *Gaussian* log-density, so heavy smoothing shrinks toward the best-fitting Gaussian instead of toward exponential tails (a second-difference penalty inflated wing mass and sigma at low S/N and gave 3-4x larger h4 bias with the continuum; it has been removed). With `lam_rule='sigma_scaled'`, the starting value. | `vmin`/`vmax`/`min_interior_knots` (a narrow grid can make `lam` behave far stronger than nominal -- `FitConfig` warns); requires the package's JAX-float64 default (on automatically) |
+| `lam_rule` | `"sigma_scaled"` | Refits LOSVDs broader than 350 km/s at `sigma_scaled_lam(sigma) = lam (sigma/350)^6` (capped at 131072): the penalty scales as sigma^-6 for a given relative shape. `"fixed"`: one fit at exactly `lam`. On 480 NGC 4751-like mocks no `lam` selector beat the rule by more than a few per cent; on the real NGC 4751 data adaptive selection failed in both directions (Gaussian LOSVDs at low S/N, broad pedestals at high S/N). | `edge_retry_factors`, `max_edge_amplitude_frac` |
+| `max_edge_amplitude_frac` / `edge_retry_factors` | 0.01 / (2, 4) | A LOSVD still holding more than this fraction of its peak within 5 points of either grid edge (`edge_amplitude_frac`) has a divergent edge pedestal -- a roughness penalty alone can't tell a compact LOSVD from one on a broad, low pedestal, and the pedestal inflates every moment. The `lam` rule refits such fits at 2x, then a further 4x, their `lam`; the Laplace sampler rejects draws above it. | `vmin`/`vmax`: a grid too narrow for the LOSVD looks like a pedestal too -- widen the grid first |
+| `continuum_knots` / `lam_c` / `ridge_c` | 4 / 2.0 / 0.1 | The co-fitted multiplicative continuum (fits need `wave_fit`). `None` switches it off, for spectra exactly continuum-normalized against the templates (e.g. mocks built from the fit's own templates). | Its absolute level is degenerate with the template weights' overall scale -- read only its shape |
+| `rho` | 0.0 | AR(1) pixel-noise correlation used for whitening. `fit_losvd_robust(..., measure_rho=True)` measures it per bin (reliable from about 20 spaxels per bin on MUSE; use a fixed value below that). | `combine_bin_spectrum_robust`'s `spatial_rho` is the separate spaxel-to-spaxel correlation |
+| `smooth_window_A` / `inflation_cap` / `min_inflation_to_apply` (`fit_losvd_robust`) | 3.0 / 100 / 1.1 | Per-spectrum, per-wavelength error inflation from a preliminary fit's own residual: smoothed over a few MUSE sky-line widths, floored at 1, capped so a badly contaminated window is down-weighted, not zeroed; skipped when nothing anywhere exceeds 1.1. Real full-field validation (113 MUSE bins, NGC 4751): median whitened RMS 1.41 -> 0.96, bins with more than 10 % of pixels clipped 22 -> 0, kinematics essentially unchanged. | A loose cleanup clip runs underneath (`prelim_clip_sigma`/`final_clip_sigma`) -- do not tighten it to do the inflation's job |
+| `excluded_wavelength_windows` (`fit_losvd_robust`) | `CAII_PROTECTED_WINDOWS` | Pixels never clipped, however large their residual: the CaII triplet cores, where a slightly mis-modeled absorption core otherwise looks like a cosmic ray to the cleanup clip. Inert for spectra that do not cover them. | Pass your own windows for other strong lines, or `None` |
+| `mask_wavelength_windows` (`windows=`) | -- | Fixed-wavelength exclusion for *known* bad-pixel ranges. | Complementary to the robust fit's inflation: use this when the bad wavelengths are known and fixed across every spectrum |
+| `n_templates` (shape of `A_stack`) | -- | Not a `FitConfig` field -- the shape of the template stack you build and pass in. Every fit function accepts any `n_templates >= 1`. | More templates costs identifiability: the same LOSVD now competes against more free template weights -- condition the library first (`04_template_calibration.ipynb`) |
 
 ## Recommended starting points by regime
 
-- **Current defaults (`penalty_order=3`, `lam_selection="aic_local"`,
-  `max_edge_amplitude_frac=0.01`) are the validated starting point
-  everywhere** the 480-case 2026-07 grid covers (sigma 20-300, S/N
-  30-100, single template and mixtures) -- no per-regime tuning needed
-  for the regularization strength itself.
+- **Most spectra: the defaults.** `FitConfig(vmin=..., vmax=...)` and
+  `fit_losvd_robust(A_stack, flux, err, cfg, wave_fit=wave)`, then
+  `losvd_error_bands` for the uncertainties.
+- **Real IFU spectra whose residuals are systematics-dominated** (reduced
+  chi2 before inflation well above 1 and growing with S/N -- sky-line
+  residuals, template mismatch):
+  - Take the error bands from **`losvd_error_bands`**, which fits the
+    sky-line + template-mismatch noise model and runs Laplace with it, not
+    from the pipeline errors. Do not *fit* with those errors: at a fixed
+    `lam`, near-uniformly larger errors act as a stronger penalty and
+    over-smooth.
+  - If you write SCO `spmc_in` files from these bands, pass `b_samples=`
+    and `model_bins=` to `write_spmc_in_laplace`.
+  - Details: `dev_notes/regularization_v2/FINDINGS.md`.
 - **Known, fixed bad-pixel wavelengths** (e.g. sky-subtraction residuals
   recurring at the same wavelengths across every spectrum in a survey):
   `mask_wavelength_windows`, applied before fitting.
-- **Unmodeled contamination whose wavelength/severity varies per spectrum**
-  (sky-subtraction residuals whose amplitude scales with S/N and radius,
-  a bad detector column, real chi2_red structurally above 1): start with
-  **`fit_losvd_robust(cleaning_method="inflate")`**, the recommended default --
-  see its own table row above.
-- **A specific, independent reason to suspect only a handful of genuine
-  per-pixel outliers** (a visually obvious cosmic ray, a flagged bad
-  detector column, nothing suggesting the noise vector itself is
-  structurally miscalibrated): plain `cleaning_method="clip"` alone is still
-  reasonable here -- reserve `"inflate"`'s extra machinery for when
-  contamination is more pervasive or its wavelength isn't localized to a
-  few pixels.
+- **A quick look**: `fit_losvd_robust(..., cleaning_method=None)` (one
+  plain fit) or `laplace_losvd_uncertainty` with the pipeline errors.
 - **A recovered LOSVD looks visually skewed/asymmetric in a way that
   doesn't match physical expectations**: check `edge_amplitude_frac(b)`
-  before suspecting a real regularization or fitting bug -- if it's ~0,
-  the shape is noise-driven or a genuine physical signal near its own
-  Cramer-Rao detection floor (see `examples/notebooks/02_realistic_mock_fit.ipynb`'s
-  Section 5/6), not a divergent edge pedestal.
-- **Suspected wrong per-pixel noise level**: `calibrate_noise_scale`,
-  validated only for a uniformly-wrong noise level -- do not apply to
-  data whose residuals show a handful of localized outlier pixels rather
-  than a uniform mis-specification (check your own residuals first).
+  first -- if it's ~0, the shape is noise-driven or a genuine physical
+  signal near its own Cramer-Rao detection floor (see
+  `examples/notebooks/02_realistic_mock_fit.ipynb`'s Section 5), not a
+  divergent edge pedestal.
 
 ## Combining spaxels into one bin spectrum
 

@@ -28,15 +28,16 @@ design matrix's condition number, not an optimizer failure.
 """
 from __future__ import annotations
 
+import contextlib
+import os
 import dataclasses
 
 import numpy as np
 from scipy.optimize import nnls
 
-from .config import FitConfig
+from .config import PENALTY_ORDER, FitConfig
 from .losvd import (
     build_bspline_basis,
-    default_initial_coeffs,
     difference_matrix,
     fit_log_spline_map,
 )
@@ -44,10 +45,9 @@ from .losvd import (
 
 def _alternate_once(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2: np.ndarray,
                      lam: float, ridge_lam: float, w0: np.ndarray, max_iter: int, tol: float,
-                     patience: int = 2, losvd_single_start: bool = False,
+                     patience: int = 2,
                      continuum_basis: np.ndarray | None = None, D2_c: np.ndarray | None = None,
                      lam_c: float = 2.0, ridge_c: float = 0.1,
-                     losvd_warm_start: bool = True,
                      initial_coeffs: np.ndarray | None = None) -> dict:
     """One alternating-minimization trajectory from a single starting
     weight vector `w0`, to convergence or `max_iter` iterations. Two- or
@@ -55,25 +55,8 @@ def _alternate_once(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
 
     Tracks the best-seen solution across all iterations (not just the
     last), stopping after `patience` iterations with no improvement --
-    each half-step's own L-BFGS-B sub-solve has its own floating-point
-    noise, so the joint objective typically oscillates in a tight band
+    each half-step's own sub-solve has its own floating-point noise, so the joint objective typically oscillates in a tight band
     rather than settling to a bit-identical fixed point.
-
-    `losvd_single_start` (default False): if True, only the FIRST
-    iteration's LOSVD sub-fit uses a single, deterministic starting point
-    (`default_initial_coeffs`, the data-driven ridge estimate) instead of
-    `fit_log_spline_map`'s own default multi-start pool -- later iterations
-    still warm-start from the previous iteration's own converged
-    coefficients exactly as they do when this is False (see
-    `FitConfig.losvd_single_start`'s own docstring for a 2026-07-30 bug
-    this behavior fixes: forcing the deterministic start on every
-    iteration, not just the first, disabled warm-starting entirely and
-    made this ablation flag slower than the thing it was meant to be a
-    faster alternative to). Exists for isolating the multi-start search's
-    own marginal effect on recovered bias -- not recommended for
-    real fits, since `fit_log_spline_map`'s own docstring documents a real,
-    otherwise-invisible failure mode (~1-in-150 fits landing in a
-    meaningfully-worse local minimum) that multi-start exists to catch.
 
     `continuum_basis`/`D2_c`/`lam_c`/`ridge_c` (default `continuum_basis=None`,
     off -- reproduces the plain two-block `(b, w)` alternation exactly):
@@ -87,8 +70,7 @@ def _alternate_once(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
     `initial_coeffs` (default `None`): seeds the LOSVD warm-start slot
     before iteration 0, letting a caller who already has a nearby-lam or
     nearby-fit solution skip even the *first* iteration's multi-start
-    search -- see `select_lambda_aic_local`'s `warm_start_lam_grid` option.
-    Ignored if `losvd_warm_start=False`.
+    search.
     """
     n_templates = A_stack.shape[0]
     n_pix = A_stack.shape[1]
@@ -107,17 +89,14 @@ def _alternate_once(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
     # docstring), and `w` moves only slightly per iteration afterwards, so
     # re-running a cold 3-start search every iteration re-solves an already-
     # solved problem. Profiled directly on the standard 3-template mock: a
-    # default fit ran 114 L-BFGS-B optimizations, of which ~2/3 were these
-    # redundant re-searches. The first iteration's own multi-start gap is
+    # cold search per iteration ran 114 optimizations, of which ~2/3 were
+    # these redundant re-searches. The first iteration's own multi-start gap is
     # kept as the reported diagnostic, since that is the iteration where the
     # basin was actually chosen.
     #
     # `initial_coeffs`, if given, seeds this same warm-start slot before the
     # loop even starts -- letting a caller skip iteration 0's own multi-start
-    # too, e.g. `select_lambda_aic_local` warm-starting each lam grid point
-    # from the previous (neighbouring) lam's converged solution. `None`
-    # (the default) reproduces the original cold-start-on-iteration-0
-    # behavior exactly.
+    # too. `None` (the default) multi-starts on iteration 0.
     warm_coeffs = initial_coeffs
     first_objective_gap = None
 
@@ -125,29 +104,7 @@ def _alternate_once(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
         # Block 1: fix (w, [C]), solve b
         A_mix = np.tensordot(w, A_stack, axes=([0], [0]))
         A_eff = C[:, None] * A_mix if has_continuum else A_mix
-        if losvd_single_start and iteration == 0:
-            # Ablates ONLY the iteration-0 multi-start *search* (this flag's whole
-            # documented purpose -- "isolating the multi-start search's own marginal
-            # effect"), not the separate iteration-to-iteration warm-start mechanism
-            # below. Previously this branch fired on every iteration, forcing a fresh
-            # deterministic ridge start (and therefore a from-scratch L-BFGS-B
-            # optimization) each time instead of ever warm-starting from the
-            # previous, already-converged iteration -- found directly (2026-07-30):
-            # this made `losvd_single_start=True` fits ~3x *slower* than full
-            # multi-start on a real-templates/order-3 case (14-15s vs 4.5-6s),
-            # the opposite of its own docstring's "~2.5x faster" claim, which was
-            # evidently measured before this interaction mattered as much as it
-            # does under the current order-3/adaptive-lam-grid default. Iterations
-            # after the first now warm-start exactly like the non-single-start
-            # path (see the `elif` below), matching what `losvd_single_start`'s
-            # docstring already claimed it did.
-            coeffs0 = default_initial_coeffs(A_eff, y_w, basis, ridge_lam=ridge_lam)
-        elif losvd_warm_start:
-            coeffs0 = warm_coeffs  # None (full multi-start) unless `initial_coeffs` seeded it
-        else:
-            coeffs0 = None  # legacy: a cold multi-start search on every iteration
-        result_b = fit_log_spline_map(A_eff, y_w, basis, D2, lam=lam, ridge_lam=ridge_lam,
-                                       coeffs0=coeffs0)
+        result_b = fit_log_spline_map(A_eff, y_w, basis, D2, lam=lam, ridge_lam=ridge_lam, coeffs0=warm_coeffs)
         b = result_b["b"]
         coeffs = result_b["coeffs"]
         warm_coeffs = coeffs
@@ -166,10 +123,8 @@ def _alternate_once(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
             # zero effective design matrix on the next iteration. If this
             # happens on the very first iteration, `best` is still None,
             # so fall back to this iteration's own (w0-based) LOSVD
-            # sub-fit, explicitly flagged as failed -- a single
-            # pathological noise draw among many `bootstrap_losvd`
-            # replicates then produces one flagged-bad replicate instead
-            # of aborting the whole bootstrap call.
+            # sub-fit, explicitly flagged as failed, rather than aborting
+            # (a parallel batch then keeps its other bins).
             if best is None:
                 best = dict(b=b, w=w0.copy(), coeffs=coeffs, objective=np.inf,
                             success=False,
@@ -200,7 +155,7 @@ def _alternate_once(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
         A_final = C[:, None] * A_mix if has_continuum else A_mix
         resid = A_final @ b - y_w
         chi2 = 0.5 * np.sum(resid ** 2)
-        # `lam` may be a per-row vector (the wing taper) -- weight row-wise.
+        # `lam` may be a per-row vector -- weight row-wise.
         rough = 0.5 * float(np.sum(np.asarray(lam) * (D2 @ coeffs) ** 2))
         if has_continuum:
             rough += 0.5 * lam_c * np.sum((D2_c @ continuum_coeffs) ** 2)
@@ -252,10 +207,8 @@ def fit_losvd_basis(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
                      lam: float = 2.0, ridge_lam: float = 1.0,
                      w0_pool: list[np.ndarray] | None = None,
                      max_iter: int = 20, tol: float = 1e-4, patience: int = 2,
-                     losvd_single_start: bool = False,
                      continuum_basis: np.ndarray | None = None, D2_c: np.ndarray | None = None,
                      lam_c: float = 2.0, ridge_c: float = 0.1,
-                     losvd_warm_start: bool = True,
                      initial_coeffs: np.ndarray | None = None) -> dict:
     """Jointly recover the LOSVD and template mixture weights, given an
     already-built spline basis and roughness-penalty operator. Prefer
@@ -276,9 +229,6 @@ def fit_losvd_basis(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
     max_iter : maximum alternating iterations per starting point.
     tol : relative convergence tolerance on the joint objective between
         successive iterations.
-    losvd_single_start : passed through to `_alternate_once` -- see its
-        own docstring. Default False (multi-start, the safe/recommended
-        setting).
     continuum_basis, D2_c, lam_c, ridge_c : optional continuum block (default
         `continuum_basis=None`, off -- reproduces the plain two-block
         fit exactly). When given, adds a third alternating block that
@@ -293,7 +243,7 @@ def fit_losvd_basis(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
     initial_coeffs : optional single starting guess in LOSVD coefficient
         space, applied to every trajectory in `w0_pool` -- see
         `_alternate_once`'s own docstring. Lets a caller who already has a
-        nearby solution (e.g. a neighbouring `lam` value's converged fit)
+        nearby solution (e.g. a neighboring `lam` value's converged fit)
         skip iteration 0's multi-start search too, not just later
         iterations'.
 
@@ -332,9 +282,8 @@ def fit_losvd_basis(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
     trajectories = [
         _alternate_once(A_stack, y_w, basis, D2, lam, ridge_lam, w0, max_iter, tol,
                          patience=patience,
-                         losvd_single_start=losvd_single_start,
                          continuum_basis=continuum_basis, D2_c=D2_c, lam_c=lam_c, ridge_c=ridge_c,
-                         losvd_warm_start=losvd_warm_start, initial_coeffs=initial_coeffs)
+                         initial_coeffs=initial_coeffs)
         for w0 in w0_pool
     ]
     objectives = [t["objective"] for t in trajectories]
@@ -363,12 +312,56 @@ def fit_losvd_basis(A_stack: np.ndarray, y_w: np.ndarray, basis: np.ndarray, D2:
     return result
 
 
+def with_lam_rule(fit_at, cfg: FitConfig) -> dict:
+    """Run `fit_at(cfg)` under `cfg.lam_rule` and return the final fit with `lam_used` and `lam_tried` set.
+
+    `fit_at` takes a `FitConfig` with `lam_rule='fixed'` and returns a fit result dict with `b` on
+    `cfg.build_velocity_grid()`. With `lam_rule='fixed'` it is called once, at `cfg.lam`. With
+    `lam_rule='sigma_scaled'` (the default), the NGC 4751 recipe (dev_notes/regularization_v2/FINDINGS.md,
+    findings 21-25):
+
+    1. fit at `cfg.lam`;
+    2. if `config.sigma_scaled_lam(sigma, lam0=cfg.lam)` of that fit's sigma is larger, refit there (broad
+       LOSVDs need more smoothing under the order-3 penalty);
+    3. while the LOSVD still holds more than `cfg.max_edge_amplitude_frac` of its peak at the grid edge
+       (`losvd.edge_amplitude_frac`), refit at the current `lam` times each of `cfg.edge_retry_factors` in
+       turn. The last fit is kept even if it is still at the edge -- check `edge_amplitude_frac(result['b'])`.
+
+    `fit_losvd` and `fit_losvd_robust` call this; use it directly to put any other fit procedure under the rule.
+    """
+    from .config import sigma_scaled_lam
+    from .gh_moments import compute_losvd_moments
+    from .losvd import edge_amplitude_frac
+
+    fixed = dataclasses.replace(cfg, lam_rule="fixed")
+    lam = float(cfg.lam)
+    result = fit_at(fixed)
+    tried = [lam]
+    if cfg.lam_rule == "sigma_scaled":
+        sigma = compute_losvd_moments(cfg.build_velocity_grid(), result["b"], fit_h3h4=True)["sherm"]
+        lam_sigma = sigma_scaled_lam(sigma, lam0=cfg.lam)
+        if lam_sigma > lam:
+            lam = lam_sigma
+            result = fit_at(dataclasses.replace(fixed, lam=lam))
+            tried.append(lam)
+        for factor in cfg.edge_retry_factors:
+            if cfg.max_edge_amplitude_frac <= 0 or edge_amplitude_frac(result["b"]) <= cfg.max_edge_amplitude_frac:
+                break
+            lam *= factor
+            result = fit_at(dataclasses.replace(fixed, lam=lam))
+            tried.append(lam)
+    result["lam_used"] = lam
+    result["lam_tried"] = tried
+    return result
+
+
 def fit_losvd(A_stack: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
               wave_fit: np.ndarray | None = None,
               initial_coeffs: np.ndarray | None = None) -> dict:
     """Run a LOSVD + template-mixture-weight fit end-to-end from a
     `FitConfig`: builds the spline basis and velocity-spacing-scaled
-    roughness-penalty operator from `cfg`, then calls `fit_losvd_basis`.
+    order-3 roughness-penalty operator from `cfg`, then calls
+    `fit_losvd_basis` under `cfg.lam_rule` (`with_lam_rule`).
 
     `A_stack`/`y_w` must already correspond to `cfg.build_velocity_grid()`
     -- build `A_stack` on that same grid via
@@ -377,70 +370,30 @@ def fit_losvd(A_stack: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
     (pass a length-1 list to `build_template_stack`).
 
     `wave_fit` : the observed wavelength grid `A_stack`/`y_w` correspond
-        to. Only required if `cfg.continuum_knots is not None` (raises
-        `ValueError` if missing in that case) -- turns on continuum-
-        cofitting (see `kinextract.continuum`), building the
-        continuum's own wavelength-based B-spline basis/penalty from
-        `cfg.continuum_knots`/`cfg.lam_c`. `None` (the default) reproduces
-        this package's original two-block-only behavior exactly.
-
-    `cfg.lam_selection` (default `'aic_local'`): if set, `lam` is chosen
-    per fit via `aic_regularization.select_lambda_aic_local` before doing
-    anything else below, then treated exactly like an explicitly-passed
-    fixed `lam` for the rest of this call -- see `FitConfig.lam_selection`'s
-    own help text for why this is the default and what it costs. Supports
-    continuum-cofitting (`cfg.continuum_knots` set) -- `estimate_m_eff_local`'s
-    own docstring has the joint LOSVD+continuum linearization this relies
-    on. The `lam` actually used is always reported back as `result['lam_used']`.
+        to. Required when `cfg.continuum_knots` is set (the default, 4):
+        the continuum spline is built on wavelength (see
+        `kinextract.continuum`). Raises `ValueError` if missing then.
 
     `initial_coeffs` : optional single starting guess in LOSVD coefficient
-    space, passed straight through to the fixed-`lam` fit at the end of
-    this call -- see `fit_losvd_basis`'s own docstring. Ignored when
-    `cfg.lam_selection == 'aic_local'` and no wing taper is active (that
-    path's own lam-grid scan, `select_lambda_aic_local`, has its own
-    independent warm-start chaining across the grid -- see its
-    `warm_start_lam_grid` option -- so a single caller-supplied seed
-    would only ever help the first, cheapest grid point).
+    space, passed to every fit the lam rule makes -- see
+    `fit_losvd_basis`'s own docstring.
+
+    The `lam` of the returned fit is `result['lam_used']`; every `lam` tried
+    is in `result['lam_tried']`.
     """
     if cfg.continuum_knots is not None and wave_fit is None:
         raise ValueError(
             "fit_losvd: cfg.continuum_knots is set but wave_fit was not provided -- "
             "continuum-cofitting needs the observed wavelength grid to build its own "
-            "wavelength-based B-spline basis (continuum acts on wavelength, not velocity)."
+            "wavelength-based B-spline basis (continuum acts on wavelength, not velocity). "
+            "Pass wave_fit, or FitConfig(continuum_knots=None) to switch cofitting off."
         )
-
-    lam_selection_result = None
-    if cfg.lam_selection == "aic_local":
-        # Local import: aic_regularization.py imports fit_losvd from this module at
-        # module level, so a top-level import here would be circular -- same pattern
-        # continuum.py/_alternate_once already use for fit_continuum_block.
-        from .aic_regularization import select_lambda_aic_local
-        # parsimony_delta=2.0 and the sub-knot-sigma candidate guard for
-        # the order-3 penalty only -- see select_lambda_aic_local's own
-        # docstring for the evidence and for why both stay OFF for order 2.
-        is_d3 = cfg.penalty_order == 3
-        lam_selection_result = select_lambda_aic_local(
-            A_stack, y_w, cfg, np.asarray(cfg.resolved_lam_grid()),
-            parsimony_delta=2.0 if is_d3 else 0.0,
-            min_resolvable_sigma_frac=0.5 if is_d3 else 0.0,
-            max_edge_amplitude_frac=cfg.max_edge_amplitude_frac,
-            warm_start_lam_grid=True,
-            self_normalize_lam_grid=cfg.self_normalize_lam_grid,
-            wave_fit=wave_fit)
-        cfg = dataclasses.replace(cfg, lam=lam_selection_result.best_lam, lam_selection="fixed")
-
-    # The selection scan already fit at every candidate lam, so the fit at the
-    # winning lam is reusable rather than repeated -- including under continuum-
-    # cofitting now that estimate_m_eff_local's own joint linearization supports it.
-    reusable_selection_fit = None
-    if lam_selection_result is not None and lam_selection_result.best_fit is not None:
-        reusable_selection_fit = lam_selection_result.best_fit
 
     v_grid = cfg.build_velocity_grid()
     n_knots = cfg.resolved_n_interior_knots()
     basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_knots, degree=cfg.degree)
     dv = (cfg.vmax - cfg.vmin) / (n_knots + 1)
-    D = difference_matrix(n_coef, order=cfg.penalty_order, dv=dv, dv_ref=cfg.knot_spacing_kms)
+    D = difference_matrix(n_coef, order=PENALTY_ORDER, dv=dv, dv_ref=cfg.knot_spacing_kms)
 
     continuum_basis = D2_c = None
     if cfg.continuum_knots is not None:
@@ -448,17 +401,12 @@ def fit_losvd(A_stack: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         dw = (wave_fit.max() - wave_fit.min()) / (cfg.continuum_knots + 1)
         D2_c = difference_matrix(n_coef_c, order=2, dv=dw, dv_ref=dw)
 
-    if reusable_selection_fit is not None:
-        result = reusable_selection_fit
-    else:
-        result = fit_losvd_basis(A_stack, y_w, basis, D, lam=cfg.lam, ridge_lam=cfg.ridge_lam,
-                                  losvd_single_start=cfg.losvd_single_start,
-                                  continuum_basis=continuum_basis, D2_c=D2_c, lam_c=cfg.lam_c,
-                                  ridge_c=cfg.ridge_c, initial_coeffs=initial_coeffs)
+    def fit_at(c):
+        return fit_losvd_basis(A_stack, y_w, basis, D, lam=c.lam, ridge_lam=c.ridge_lam,
+                               continuum_basis=continuum_basis, D2_c=D2_c, lam_c=c.lam_c,
+                               ridge_c=c.ridge_c, initial_coeffs=initial_coeffs)
 
-    result["lam_used"] = cfg.lam
-    result["lam_selection_result"] = lam_selection_result
-    return result
+    return with_lam_rule(fit_at, cfg)
 
 
 def _fit_losvd_worker(args):
@@ -604,7 +552,7 @@ def _limit_worker_threads():
     variables improved an 8-worker, 40-bin case from 1.53x to 1.70x --
     still not linear, since this is a heterogeneous-core Apple Silicon
     machine, but a real, free improvement from eliminating
-    oversubscription). OG `kinextract`'s own parallel bootstrap solves
+    oversubscription). OG `kinextract`'s own parallel driver solves
     the identical problem via `threadpoolctl`; this uses plain
     environment variables instead to avoid a new dependency for a
     kinextract package that doesn't otherwise need one.
@@ -629,10 +577,9 @@ def _limit_worker_threads():
     for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
         os.environ[var] = "1"
-    # `select_lambda_aic_local` constructs a FitConfig-equivalent check for every
-    # candidate lam in its own scan grid, not just the one finally selected -- so
-    # FitConfig's own "knot spacing much finer than knot_spacing_kms is calibrated
-    # against" warning can fire once per candidate per bin per replicate, easily
+    # The lam rule builds a FitConfig for every lam it tries, not just the final
+    # one -- so FitConfig's own "knot spacing much finer than knot_spacing_kms is
+    # calibrated against" warning can fire once per lam per bin, easily
     # hundreds of times across a real multi-bin run (confirmed directly:
     # `examples/notebooks/07_full_galaxy_analysis.ipynb`, see
     # `dev_notes/real_data_sigma/FINDINGS.md`'s warning-frequency entry). Dedup for
@@ -645,6 +592,41 @@ def _limit_worker_threads():
     # callers too.
 
 
+_WORKER_THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                       "VECLIB_MAXIMUM_THREADS")
+_XLA_SINGLE_THREAD_FLAGS = "--xla_cpu_multi_thread_eigen=false intra_op_parallelism_threads=1"
+
+
+@contextlib.contextmanager
+def single_threaded_worker_env():
+    """Context manager: while a `spawn` process pool is created and running, give the PARENT's environment the
+    single-thread settings, so every worker process inherits them from its first instruction.
+
+    `_limit_worker_threads` (the pool initializer) alone does not achieve this: before a spawned worker can run its
+    initializer it has to unpickle it, which imports `kinextract` -- and so numpy (whose BLAS reads its thread count at
+    load time) and JAX -- with the parent's unpinned environment. Measured 2026-10-22 on 16 real NGC 4751 WFM bins,
+    4 workers: 27.4 s -> 18.2 s wall for `fit_losvd_robust_parallel` (identical results), and a machine load of ~30 on
+    8 cores during a 4-worker run without it. Also sets XLA's CPU backend to one thread (`XLA_FLAGS`,
+    appended to any flags already set), which no BLAS variable covers. The parent's previous values are restored on
+    exit; the parent's own already-loaded numpy/JAX are unaffected.
+    """
+    saved = {v: os.environ.get(v) for v in _WORKER_THREAD_VARS + ("XLA_FLAGS", "JAX_PLATFORMS")}
+    try:
+        for v in _WORKER_THREAD_VARS:
+            os.environ[v] = "1"
+        xla = os.environ.get("XLA_FLAGS", "")
+        if "xla_cpu_multi_thread_eigen" not in xla:
+            os.environ["XLA_FLAGS"] = (xla + " " + _XLA_SINGLE_THREAD_FLAGS).strip()
+        os.environ.setdefault("JAX_PLATFORMS", "cpu")
+        yield
+    finally:
+        for v, val in saved.items():
+            if val is None:
+                os.environ.pop(v, None)
+            else:
+                os.environ[v] = val
+
+
 def fit_losvd_parallel(A_stack_list, y_w_list, cfg_list, wave_fit=None, n_jobs=None):
     """Fit many independent LOSVD problems -- e.g. every spatial bin of a
     dartboard-binned galaxy cube -- in parallel via a process pool.
@@ -652,11 +634,9 @@ def fit_losvd_parallel(A_stack_list, y_w_list, cfg_list, wave_fit=None, n_jobs=N
     Every bin's fit is completely independent (no shared state between
     bins), so this is pure wall-clock speedup with zero accuracy cost --
     identical per-bin numerics to calling `fit_losvd` serially in a loop,
-    just distributed across worker processes. This targets a different
-    cost than `select_lambda_aic_local`'s `warm_start_lam_grid` (which
-    speeds up *one* fit): a full-galaxy analysis with hundreds of bins was
-    measured at "over an hour" mainly because those hundreds of
-    already-optimized single-bin fits were run one at a time.
+    just distributed across worker processes: a full-galaxy analysis with
+    hundreds of bins was measured at "over an hour" mainly because those
+    hundreds of single-bin fits were run one at a time.
 
     Parameters
     ----------
@@ -711,11 +691,11 @@ def fit_losvd_parallel(A_stack_list, y_w_list, cfg_list, wave_fit=None, n_jobs=N
     to 1 (`_limit_worker_threads`) before importing `kinextract`,
     since `n_jobs` processes each defaulting to all-core BLAS threading
     would oversubscribe the machine by a factor of `n_jobs` -- the same
-    problem OG `kinextract`'s own parallel bootstrap solves via
+    problem OG `kinextract`'s own parallel driver solves via
     `threadpoolctl`.
 
     **Measured** (`dev_notes/speed/`, 3-E-MILES-template mock, order-3
-    default, adaptive lam selection, on the M1 above): ~2.1x wall-clock
+    default, on the M1 above): ~2.1x wall-clock
     speedup per bin at `n_jobs=4` on 80 bins vs. a serial loop -- real,
     but well short of the naive 4x from 4 workers, since worker-startup
     and per-process JIT-warmup costs don't fully amortize at this bin
@@ -749,6 +729,6 @@ def fit_losvd_parallel(A_stack_list, y_w_list, cfg_list, wave_fit=None, n_jobs=N
     # resolve_n_jobs's own docstring for why this is memory-aware, not just cpu_count()).
     per_job_bytes = 4 * max((a.nbytes for a in A_stack_list), default=0)
     n_jobs = resolve_n_jobs(n_jobs, per_job_bytes)
-    with ProcessPoolExecutor(max_workers=n_jobs, mp_context=get_context("spawn"),
-                              initializer=_limit_worker_threads) as pool:
+    with single_threaded_worker_env(), ProcessPoolExecutor(max_workers=n_jobs, mp_context=get_context("spawn"),
+                                                           initializer=_limit_worker_threads) as pool:
         return list(pool.map(_fit_losvd_worker, jobs))

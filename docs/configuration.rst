@@ -9,23 +9,24 @@ fields you want to override, e.g.:
    from kinextract import FitConfig
 
    cfg = FitConfig(
-       vmin=-500.0, vmax=500.0,      # velocity grid bounds, km/s
-       lam_selection="aic_local",     # auto-select regularization strength (the default)
-       penalty_order=3,               # third-difference, shrink-toward-Gaussian penalty (the default)
+       vmin=-1500.0, vmax=1500.0,    # velocity grid bounds, km/s (about V +- 5-7 sigma)
+       rho=0.7,                      # AR(1) pixel-noise correlation, for whitening
    )
 
 There is no configuration-file loader -- every field is a normal
 constructor argument or attribute. For the complete list of tunable
 fields, grouped by subsystem, call ``FitConfig.describe()`` (or
-``FitConfig.describe("lam")`` for just the regularization-selection
-options) or read the class docstring below.
+``FitConfig.describe("lam")`` for just the regularization options) or
+read the class docstring below.
 
-Regularization strength is selected automatically per fit
-(``lam_selection="aic_local"``, the default) via a bootstrap-estimated
-generalized AIC. Continuum handling: either pre-normalize the spectrum
-once before fitting, or co-fit a shared multiplicative continuum directly
-in the same alternating optimization
-(:func:`kinextract.fit_losvd_with_continuum`, :mod:`kinextract.continuum`).
+The defaults are the recipe validated on NGC 4751 MUSE data: ``lam = 4096``
+on the third-difference penalty, raised for broad LOSVDs and for fits still
+at the velocity-grid edge (``lam_rule='sigma_scaled'``, see
+:func:`kinextract.sigma_scaled_lam` and
+:func:`kinextract.with_lam_rule`), and a co-fitted multiplicative continuum
+with 4 knots (``continuum_knots``, :mod:`kinextract.continuum`; ``None``
+switches it off for exactly continuum-normalized spectra).
+``FitConfig(lam=..., lam_rule='fixed')`` fits at exactly one ``lam``.
 
 .. autoclass:: kinextract.config.FitConfig
    :members: describe

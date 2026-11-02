@@ -14,7 +14,7 @@ import pytest
 
 from kinextract.muse_cube import (
     MuseCube, white_light_image, extract_aperture_spectrum, combine_bin_spectrum_robust,
-    load_muse_cube, save_muse_cube_fits, spatial_correlation_inflation,
+    load_muse_cube, save_muse_cube_fits, spatial_correlation_inflation, trim_cube_wavelength_fits,
 )
 
 EMILES_GRID = "src/kinextract/template_data/emiles_muse_grid.npz"
@@ -168,6 +168,35 @@ def _correlated_cube(seed=0, n_wave=40, ny=6, nx=6, per_spaxel_sigma=2.0):
     error = np.full((n_wave, ny, nx), per_spaxel_sigma)
     wave = 8400.0 + np.arange(n_wave) * 1.25
     return MuseCube(flux=flux, error=error, wave=wave, pixel_scale=0.2), true_flux
+
+
+def test_trim_cube_wavelength_fits_keeps_only_the_requested_window(tmp_path):
+    cube = _tiny_cube(seed=2)  # wave = 8400.0 + arange(20)*1.25 -> 8400.0-8423.75
+    in_path = str(tmp_path / "full.fits")
+    out_path = str(tmp_path / "trimmed.fits")
+    save_muse_cube_fits(cube, in_path)
+
+    trim_cube_wavelength_fits(in_path, out_path, wave_min=8410.0, wave_max=8415.0)
+    trimmed = load_muse_cube(out_path)
+
+    in_window = (cube.wave >= 8410.0) & (cube.wave <= 8415.0)
+    assert trimmed.flux.shape[0] == int(in_window.sum())
+    assert trimmed.wave.min() >= 8410.0
+    assert trimmed.wave.max() <= 8415.0
+    np.testing.assert_allclose(trimmed.wave, cube.wave[in_window], atol=1e-3)
+    np.testing.assert_allclose(trimmed.flux, cube.flux[in_window], atol=1e-3)
+    # spatial dimensions and pixel scale are untouched by a wavelength-only trim
+    assert trimmed.shape == cube.shape
+    assert trimmed.pixel_scale == pytest.approx(cube.pixel_scale, rel=1e-3)
+
+
+def test_trim_cube_wavelength_fits_raises_on_empty_window(tmp_path):
+    cube = _tiny_cube(seed=3)
+    in_path = str(tmp_path / "full.fits")
+    out_path = str(tmp_path / "trimmed.fits")
+    save_muse_cube_fits(cube, in_path)
+    with pytest.raises(ValueError, match="no wavelength slices"):
+        trim_cube_wavelength_fits(in_path, out_path, wave_min=1000.0, wave_max=1001.0)
 
 
 def test_combine_bin_spectrum_robust_error_is_pure_formal_inverse_variance():

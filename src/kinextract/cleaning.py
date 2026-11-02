@@ -313,11 +313,11 @@ def _fit_losvd_clip(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
     `np.tensordot(w, A_stack_w, axes=([0],[0]))` (further multiplied by
     the continuum `C` first, when `cfg.continuum_knots` is set).
 
-    Private -- the hard-clip half of `fit_losvd_robust`'s two cleaning
-    strategies (`robust_fit.py`), which is the public entry point (takes
-    unwhitened inputs and whitens internally; also reachable via
-    `cleaning_method="inflate"`, whose own preliminary/final passes call
-    this same function underneath). Kept here, not there, since it shares
+    Private -- the loose cleanup clip inside `fit_losvd_robust`'s
+    `cleaning_method="inflate"` passes (`robust_fit.py`), which is the public
+    entry point (takes unwhitened inputs and whitens internally). Fits at
+    `cfg.lam` exactly (the caller applies the lam rule around the whole
+    procedure). Kept here, not there, since it shares
     `_robust_sigma`/`_failed_fit_result` with this module's emission-
     detection utilities and is the natural home for the whitened-input,
     single-bin clip loop itself.
@@ -331,7 +331,17 @@ def _fit_losvd_clip(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         current residual` (`robust_scale=True`). Default 3.0, the
         conventional choice (e.g. matching pPXF's own default).
     max_iter : maximum refit iterations. Default 3; stops early if an
-        iteration flags no new outliers.
+        iteration flags no new outliers. If the last allowed iteration
+        still flags new outliers, they are NOT added to `clipped_mask`
+        (there is no refit without them, so the returned fit includes
+        them) -- `clipped_mask` is always exactly the pixel set the returned
+        `b`/`w`/`C` were fit without. Those still-flagged pixels are counted
+        in `n_flagged_not_refit` (`clip_converged` is False when it's > 0).
+        Before 2026-10-15 they were added to `clipped_mask` anyway, so any
+        bin that hit `max_iter` reported pixels as clipped that its own fit
+        had used; anything re-fitting from `~clipped_mask` (e.g.
+        `laplace_losvd_uncertainty_parallel(..., clipped_mask=...)`) then
+        landed on a different solution than this fit's own.
     max_clip_fraction : warn (not error) if more than this fraction of
         pixels end up clipped across all iterations. Default 0.1.
     wave_fit : the observed wavelength grid `A_stack_w`/`y_w` correspond
@@ -364,11 +374,8 @@ def _fit_losvd_clip(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         as the surviving pixel set changes. Confirmed to behave far
         better than `False` on the same real bins that broke it (RMS
         improved substantially, clip fractions realistic, not a runaway)
-        -- `cleaning_method="inflate"`'s own internal clip passes have
-        always hardcoded `robust_scale=True` for exactly this reason;
-        this default brings the standalone `cleaning_method="clip"` path
-        in line with it. Set `False` only to reproduce this function's
-        pre-2026-08 behavior exactly.
+        -- `fit_losvd_robust`'s clip passes always use `robust_scale=True`
+        for exactly this reason.
     excluded_wavelength_windows : optional sequence of `(lo, hi)` rest-frame
         wavelength ranges (same units/frame as `wave_fit`, which is
         required if this is set) that are never candidates for clipping,
@@ -397,6 +404,7 @@ def _fit_losvd_clip(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
     n_coef_min = cfg.resolved_n_interior_knots() + cfg.degree + 1  # LOSVD spline coefficient count
     result = None
     n_iter_run = 0
+    n_flagged_not_refit = 0
     for it in range(max_iter):
         n_iter_run = it + 1
         if keep.sum() < n_coef_min:
@@ -424,6 +432,10 @@ def _fit_losvd_clip(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
         newly_bad_local = (np.abs(resid) > clip_sigma * scale) & ~protected[keep]
         if not np.any(newly_bad_local):
             break
+        if it == max_iter - 1:
+            # no refit left to exclude them from -- see max_iter in the docstring
+            n_flagged_not_refit = int(newly_bad_local.sum())
+            break
         keep_idx = np.flatnonzero(keep)
         keep[keep_idx[newly_bad_local]] = False
 
@@ -443,13 +455,15 @@ def _fit_losvd_clip(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
     result["clipped_mask"] = ~keep
     result["n_clipped"] = n_clipped
     result["n_iterations"] = n_iter_run
+    result["n_flagged_not_refit"] = n_flagged_not_refit
+    result["clip_converged"] = n_flagged_not_refit == 0
     return result
 
 
 def _failed_fit_result(A_stack_w: np.ndarray, message: str) -> dict:
     """A NaN-filled, `success=False` result dict shaped like
     `fit_losvd_robust`'s own return value -- for a per-bin failure that
-    should flag that one bin as unusable (moment maps render it grey,
+    should flag that one bin as unusable (moment maps render it gray,
     e.g. via `plot_bin_map` simply omitting it from `values_by_bin_id`)
     rather than crashing an entire multi-bin batch. A real spectrum can
     fail for reasons that have nothing to do with a coding bug --

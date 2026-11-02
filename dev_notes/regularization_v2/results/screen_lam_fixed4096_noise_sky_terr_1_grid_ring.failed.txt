@@ -1,0 +1,4 @@
+gauss|550.0|40.0|xsl|clean|0	ValueError('zero error width at the LOSVD peak (degenerate posterior?)')
+gauss|550.0|120.0|xsl|clean|4	ValueError('zero error width at the LOSVD peak (degenerate posterior?)')
+wings|550.0|40.0|xsl|clean|1	ValueError('zero error width at the LOSVD peak (degenerate posterior?)')
+wings|550.0|40.0|xsl|skyadd|6	ValueError('zero error width at the LOSVD peak (degenerate posterior?)')

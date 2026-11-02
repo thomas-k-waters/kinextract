@@ -1,99 +1,49 @@
-"""Laplace + AIC-weighted uncertainty -- the package's primary uncertainty
-engine (Phase 1 of `dev_notes/V1_HARDENING_ROADMAP.md`), replacing
-`bootstrap_losvd` as the recommended default. `bootstrap_losvd` remains
-available as a cross-check: it has real properties this method
-structurally cannot give (e.g. empirical skew/multimodality across
-replicates, and genuine protection against landing in the wrong
-optimization basin -- see its own module docstring and "Honest scope"
-below).
+"""Laplace uncertainty for the non-parametric LOSVD, and the package's error-band recipe for real IFU data.
 
-**Why this replaces bootstrap as the default.** `bootstrap_losvd`
-resamples noise around a single, fixed point estimate and refits --
-structurally blind to that point estimate's own bias, which is exactly
-why its empirical coverage is poor, especially for h4 (measured as low
-as ~3-11% against a 68% target -- see `dev_notes/uncertainty/FINDINGS.md`).
-This module instead treats `lam` itself as an uncertain hyperparameter:
-it computes a Laplace (curvature) approximation to the posterior at
-*each* candidate `lam` in `cfg.resolved_lam_grid()`, then combines them
-with AIC-derived weights via posterior-predictive sampling. The
-between-lam disagreement this picks up is exactly the kind of
-uncertainty a single-lam-pinned bootstrap ensemble cannot see by
-construction (regardless of `n_boot`) -- validated in the originating
-prototype (`dev_notes/uncertainty/laplace_prototype.py`) to give h4
-coverage of 56% vs. bootstrap's 6% on the same cases, at a fraction of
-the runtime (bootstrap pays for `n_boot` full nonlinear refits; this
-pays for one closed-form linear solve per `lam` in the grid, typically
-6 values, plus cheap posterior-predictive sampling -- no new
-optimizations at all beyond the `lam`-grid fits `aic_local` selection
-already has to do).
+**The method.** The P-spline roughness penalty is the Bayesian equivalent
+of a Gaussian prior on the spline coefficients (Eilers & Marx 1996), so
+the Hessian of the negative log-posterior at the fitted solution
+(`losvd._neg_log_post`, the exact objective `fit_log_spline_map`
+minimizes, template weights held at their converged value) gives an
+approximate posterior covariance in one linear solve -- jointly with the
+continuum coefficients when continuum-cofitting is on (the default). Draws
+`coeffs ~ N(coeffs_MAP, cov)` are pushed through `exp(basis @ coeffs)`
+(unit-area normalized) to give sampled LOSVD curves, and each curve's
+`(vherm, sherm, h3, h4)` comes from the same `compute_losvd_moments`
+estimator used everywhere else. The same draws give the curve-level band
+(`b_p16`/`b_p84`/`b_median`) and the moment errors.
 
-**The math, in two ingredients:**
+The posterior is evaluated at one `lam`, the fit's own (`cfg.lam`; pass a
+fit's `lam_used`). Marginalizing over `lam` was tested and barely changed
+the errors (dev_notes/regularization_v2/FINDINGS.md, finding 14).
 
-1. **Laplace covariance on the LOSVD spline coefficients, at a fixed
-   `lam`.** The P-spline roughness penalty already *is* the Bayesian
-   equivalent of a Gaussian prior on `coeffs` (Eilers & Marx 1996's own
-   framing) -- so the negative-log-*posterior*'s Hessian at the converged
-   solution (`losvd._neg_log_post`, the exact objective
-   `fit_log_spline_map` minimizes, template weights held at their own
-   converged value) gives an approximate posterior covariance in one
-   linear solve. This reuses `aic_regularization.estimate_m_eff_local`'s
-   own fit and linearization -- no extra fitting cost beyond what
-   `select_lambda_aic_local` already pays to choose `lam` in the first
-   place.
-2. **Posterior-predictive sampling, AIC-weighted across the `lam`
-   grid.** At each `lam`, draw `coeffs ~ N(coeffs_MAP, cov_coeffs)`,
-   push each draw through `exp(basis @ coeffs)` (unit-area normalized,
-   matching `bootstrap_losvd`'s own `b_boot` convention) to get sampled
-   LOSVD curves, and read off `(vherm, sherm, h3, h4)` from each sampled
-   curve via the same `compute_losvd_moments` estimator used everywhere
-   else in this package. Samples are allocated across `lam` values in
-   proportion to `softmax(-0.5*(chi2 + w_m*m_eff))` (the same criterion
-   `select_lambda_aic_local` uses), then pooled into one combined
-   ensemble -- percentiles/medians/stds of *that* pooled ensemble are
-   this module's entire "law of total variance" mechanism, no separate
-   closed-form propagation formula needed. This is a genuine (if
-   approximate) parametric bootstrap from the Laplace-approximated
-   posterior, not a linearized moment-propagation trick -- the same
-   sampling machinery gives curve-level uncertainty (`b_p16`/`b_p84`/
-   `b_median`) and moment-level uncertainty consistently, from one
-   mechanism.
+**Real IFU data: `losvd_error_bands`.** On real MUSE spectra the
+residuals are dominated by sky-line residuals and template mismatch, not
+photon noise, and Laplace bands from the pipeline errors under-cover. The
+validated recipe (NGC 4751; FINDINGS findings 16-18 and 23) is:
+1. fit with the plain errors (`fit_losvd_robust`);
+2. fit the sky-line + template-mismatch variance model
+   (`noise_model.noise_model_errors`) to a preliminary fit's residuals;
+3. run Laplace with those errors (times the robust fit's own inflation),
+   at the fit's `lam` and `rho`, without its clipped pixels;
+4. move the draws onto the plain-error fit (`recenter_samples`) -- the
+   point estimate keeps the better shape, the band carries the
+   systematics.
+`losvd_error_bands` does steps 2-4 for one bin, `losvd_error_bands_parallel`
+for many. Do not *fit* with the noise-model errors: at a fixed `lam`,
+near-uniformly larger errors act as a stronger penalty and over-smooth.
 
-**Honest scope, read before trusting this over bootstrap:**
-
+**Honest scope:**
 - **Template-weight uncertainty is not modeled.** `w` is NNLS-constrained
-  (non-Gaussian) and is held fixed at its converged value for the
-  covariance computation -- the same simplification
-  `estimate_m_eff_local` already makes for effective degrees of freedom.
-  No `w_std`/`w_p16`/`w_p84` fields exist here (unlike `bootstrap_losvd`).
-- **Continuum-coefficient uncertainty is not yet supported.**
-  `cfg.continuum_knots` must be `None` -- raises `ValueError` otherwise.
-  Tracked as a Phase 2 follow-up in the roadmap, once continuum-
-  cofitting's own vertical-offset bug is root-caused and fixed (the two
-  are coupled: the Hessian needs to extend to the joint
-  `(LOSVD coeffs, continuum coeffs)` block, which is more work with an
-  unresolved continuum bug still in the picture).
-- **Multi-start's own basin-selection risk is not modeled.** This
-  computes the Laplace covariance around the single best-found optimum
-  at each `lam`, exactly like the bootstrap point estimate's own
-  optimizer -- a genuinely different basin winning on a different noise
-  draw is invisible to a unimodal Gaussian approximation. `objective_gap`
-  (from `fit_log_spline_map`, reported per `lam` via `result["objective_gap"]`)
-  is the closest available diagnostic: a small gap means another basin
-  was competitive, exactly when this assumption is least trustworthy.
-
-Two entry points:
-
-- `laplace_losvd_uncertainty` -- the full method described above.
-  Mirrors `bootstrap_losvd`'s output-dict shape closely enough to be a
-  near-drop-in swap: `result0`, `point0`, `b_median`, `b_std`, `b_p16`,
-  `b_p84`, `vherm_std`, `sherm_std`, `h3_std`, `h4_std` all mean the same
-  thing and can be read the same way.
-- `quick_laplace_uncertainty` -- a cheap, single-`lam` variant (no
-  AIC-weighting across the grid -- just one Laplace-covariance pass at
-  whichever `lam` the point estimate actually used) for fast sanity
-  checks, e.g. inside a notebook loop over many bins where the full
-  method's cost isn't warranted. Explicitly the "quick error check"
-  option, not the recommended default for a reported result.
+  (non-Gaussian) and is held fixed at its converged value.
+- **Template mismatch biases the point estimate**, which no band width
+  fixes: on clean, high-S/N mocks built from different templates than the
+  fit, the model-binned coverage is still about 0.42 with these bands.
+- **Multi-start's own basin-selection risk is not modeled.** A different
+  basin winning on a different noise draw is invisible to a unimodal
+  Gaussian approximation. `objective_gap` (from `fit_log_spline_map`) is
+  the closest diagnostic: a small gap means another basin was competitive.
+  `nuts_uncertainty` samples the exact posterior instead (slower).
 """
 from __future__ import annotations
 
@@ -104,8 +54,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .aic_regularization import estimate_m_eff_local, select_lambda_aic_local
-from .config import FitConfig
+from .config import PENALTY_ORDER, FitConfig
 from .gh_moments import compute_losvd_moments
 from .losvd import _neg_log_post, build_bspline_basis, difference_matrix
 
@@ -136,27 +85,28 @@ def _neg_log_post_joint(theta, n_coef_losvd, basis, D, A_eff_w, y_w, lam_vec,
 
 
 def laplace_covariance_at_lam(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig, lam: float) -> dict:
-    """Fit at a fixed `lam` (reusing `estimate_m_eff_local`'s own fit --
-    it already computes `chi2`/`m_eff`/the full `fit_losvd` result at
-    this `lam`, so this is not an extra fit), then return the Laplace
-    covariance of the spline coefficients at that solution.
+    """Fit at exactly `lam` (no continuum: `cfg.continuum_knots` must be None), then return the Laplace covariance
+    of the spline coefficients at that solution.
 
-    Returns a dict: `result` (the `fit_losvd`-shaped fit result),
-    `chi2`, `m_eff`, `coeffs` (the converged coefficients, the Laplace
-    mean), `cov_coeffs` (n_coef x n_coef Laplace covariance), `basis`,
-    `v_grid` -- everything `_sample_curves_and_moments` needs.
+    Returns a dict: `result` (the `fit_losvd` result), `chi2`, `coeffs` (the converged coefficients, the Laplace
+    mean), `cov_coeffs` (n_coef x n_coef Laplace covariance), `basis`, `v_grid` -- everything
+    `_sample_curves_and_moments` needs.
     """
-    m_eff, chi2, result = estimate_m_eff_local(A_stack_w, y_w, cfg, lam)
+    from .multi_template import fit_losvd
 
-    v_grid = cfg.build_velocity_grid()
-    n_knots = cfg.resolved_n_interior_knots()
-    basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_knots, degree=cfg.degree)
-    dv = (cfg.vmax - cfg.vmin) / (n_knots + 1)
-    D = difference_matrix(n_coef, order=cfg.penalty_order, dv=dv, dv_ref=cfg.knot_spacing_kms)
+    fit_cfg = dataclasses.replace(cfg, lam_rule="fixed", lam=lam)
+    result = fit_losvd(A_stack_w, y_w, fit_cfg)
+
+    v_grid = fit_cfg.build_velocity_grid()
+    n_knots = fit_cfg.resolved_n_interior_knots()
+    basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_knots, degree=fit_cfg.degree)
+    dv = (fit_cfg.vmax - fit_cfg.vmin) / (n_knots + 1)
+    D = difference_matrix(n_coef, order=PENALTY_ORDER, dv=dv, dv_ref=fit_cfg.knot_spacing_kms)
     lam_vec = np.full(D.shape[0], lam)  # uniform lam across every penalty row
 
     A_eff_w = np.tensordot(result["w"], A_stack_w, axes=([0], [0]))
     coeffs = np.asarray(result["coeffs"])
+    chi2 = float(np.sum((A_eff_w @ result["b"] - y_w) ** 2))
 
     H = np.asarray(_hessian_fn(jnp.array(coeffs), jnp.array(basis), jnp.array(D),
                                jnp.array(A_eff_w), jnp.array(y_w), jnp.array(lam_vec)))
@@ -165,22 +115,14 @@ def laplace_covariance_at_lam(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitCo
     except np.linalg.LinAlgError:
         cov_coeffs = np.linalg.pinv(H)
 
-    return dict(result=result, chi2=float(chi2), m_eff=float(m_eff), coeffs=coeffs,
-                cov_coeffs=cov_coeffs, basis=basis, v_grid=v_grid)
+    return dict(result=result, chi2=chi2, coeffs=coeffs, cov_coeffs=cov_coeffs, basis=basis, v_grid=v_grid)
 
 
 def laplace_covariance_at_lam_with_continuum(A_stack_w: np.ndarray, y_w: np.ndarray, wave_fit: np.ndarray,
-                                              cfg: FitConfig, lam: float, n_continuum_knots: int = 4,
-                                              lam_c: float = 2.0, ridge_c: float = 0.1) -> dict:
-    """`laplace_covariance_at_lam`'s continuum-cofitting counterpart --
-    fits at a fixed `lam` (continuum-cofitting only ever supports a fixed
-    `lam`, adaptive selection is not extended to it -- see this module's
-    own "Honest scope" section) via plain `fit_losvd` with
-    `cfg.continuum_knots` set (the same continuum-cofitting entry point
-    every other caller in the package uses -- there is no longer a
-    separate `fit_losvd_with_continuum` wrapper; `fit_losvd`'s own
-    default starting weights/coefficients already match what that
-    wrapper used), then returns the Laplace covariance of the *joint*
+                                              cfg: FitConfig, lam: float) -> dict:
+    """`laplace_covariance_at_lam`'s continuum-cofitting counterpart: fits at
+    exactly `lam` with `fit_losvd` (continuum from `cfg.continuum_knots`/
+    `lam_c`/`ridge_c`), then returns the Laplace covariance of the *joint*
     `(LOSVD coeffs, continuum coeffs)` vector, `w` held fixed at its
     converged value -- the same simplification `laplace_covariance_at_lam`
     already makes for `w` alone.
@@ -196,13 +138,13 @@ def laplace_covariance_at_lam_with_continuum(A_stack_w: np.ndarray, y_w: np.ndar
     """
     from .multi_template import fit_losvd
 
-    fit_cfg = dataclasses.replace(cfg, continuum_knots=n_continuum_knots, lam_c=lam_c, ridge_c=ridge_c,
-                                   lam_selection="fixed", lam=lam)
+    fit_cfg = dataclasses.replace(cfg, lam_rule="fixed", lam=lam)
+    n_continuum_knots, lam_c, ridge_c = fit_cfg.continuum_knots, fit_cfg.lam_c, fit_cfg.ridge_c
     v_grid = fit_cfg.build_velocity_grid()
     n_knots = fit_cfg.resolved_n_interior_knots()
     basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_knots, degree=fit_cfg.degree)
     dv = (fit_cfg.vmax - fit_cfg.vmin) / (n_knots + 1)
-    D = difference_matrix(n_coef, order=fit_cfg.penalty_order, dv=dv, dv_ref=fit_cfg.knot_spacing_kms)
+    D = difference_matrix(n_coef, order=PENALTY_ORDER, dv=dv, dv_ref=fit_cfg.knot_spacing_kms)
     lam_vec = np.full(D.shape[0], lam)
 
     result = fit_losvd(A_stack_w, y_w, fit_cfg, wave_fit=wave_fit)
@@ -235,23 +177,23 @@ def _sample_curves_and_moments(coeffs_map: np.ndarray, cov_coeffs: np.ndarray, b
                                 max_draw_multiplier: int = 20) -> tuple:
     """Draw `n_samples` posterior-predictive LOSVD curves from
     `N(coeffs_map, cov_coeffs)`, push each through `exp(basis @ coeffs)`,
-    unit-area normalize (matching `bootstrap_losvd`'s `b_boot` convention
-    -- removes the `(w, b) -> (c*w, b/c)` scale degeneracy), and read off
+    unit-area normalize (removes the `(w, b) -> (c*w, b/c)` scale
+    degeneracy), and read off
     `(vherm, sherm, h3, h4)` from each sampled curve via
     `compute_losvd_moments` (not JAX-traceable itself -- calls
     `scipy.optimize.least_squares` for h3/h4 -- so this loop is plain
     Python/numpy, not autodiff/vmap).
 
-    **Rejects divergent-edge draws, matching `max_edge_amplitude_frac`'s
-    own existing role in `select_lambda_aic_local` (Stage 23) -- found to
-    be necessary, not optional, here too.** The order-3 curvature
+    **Rejects divergent-edge draws (`max_edge_amplitude_frac`, the
+    threshold the lam rule uses for the point estimate) -- found to be
+    necessary, not optional.** The order-3 curvature
     penalty's null space contains divergent solutions (e.g. the mirror-
     image `exp(+av^2)`, `VALIDATION_CAMPAIGN.md` Stage 23) that a weakly-
     regularized `lam`'s point estimate can already avoid by construction
-    (multi-start L-BFGS-B just doesn't converge there), but naive
+    (the multi-start optimizer just doesn't converge there), but naive
     posterior-predictive *sampling* in coefficient space has no such
     protection: at low `lam`, several coefficient directions are only
-    weakly constrained by the data (small `m_eff` relative to `n_coef`),
+    weakly constrained by the data (few effective degrees of freedom relative to `n_coef`),
     giving those directions a large Laplace variance, and pushing a
     large excursion in one of those directions through the highly
     nonlinear `exp()` link can land squarely in the divergent null-space
@@ -297,8 +239,7 @@ def _sample_curves_and_moments(coeffs_map: np.ndarray, cov_coeffs: np.ndarray, b
             f"_sample_curves_and_moments: only {len(b_samples)}/{n_samples} draws passed the "
             f"max_edge_amplitude_frac={max_edge_amplitude_frac} filter after {n_drawn} attempts "
             "-- this lam's own posterior is dominated by divergent-edge solutions. Using what "
-            "was drawn rather than looping forever; consider excluding this lam from the "
-            "ensemble (see min_weight_to_sample / max_edge_amplitude_frac in the caller).",
+            "was drawn rather than looping forever.",
             UserWarning, stacklevel=2,
         )
     else:
@@ -350,9 +291,7 @@ def _sample_joint_curves_and_moments(coeffs_map: np.ndarray, coeffs_c_map: np.nd
     explores it far beyond anything physically reasonable. Compensating
     `C` exactly cancels this spurious component of the draw-to-draw
     spread, leaving only the genuinely different-fit variation the
-    Laplace covariance is meant to characterize -- the same principle
-    `bootstrap_losvd`'s own unit-area `b_boot` convention already applies
-    to the plain (no-continuum) `(w, b)` scale invariance.
+    Laplace covariance is meant to characterize.
     """
     theta_map = np.concatenate([coeffs_map, coeffs_c_map])
     kept_b, kept_c = [], []
@@ -436,442 +375,245 @@ def _degenerate_point_fallback(fn_name: str, point0: dict, b_point: np.ndarray, 
     return b_list, C_list, vherm_list, sherm_list, h3_list, h4_list
 
 
-def _check_no_continuum(cfg: FitConfig, fn_name: str) -> None:
-    if cfg.continuum_knots is not None:
-        raise ValueError(
-            f"{fn_name}: cfg.continuum_knots is set, but this module does not support "
-            "continuum-cofitting yet (see module docstring's 'Honest scope' section -- "
-            "tracked as a Phase 2 follow-up in dev_notes/V1_HARDENING_ROADMAP.md)."
-        )
-
-
-def quick_laplace_uncertainty(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
-                               n_samples: int = 200, seed: int | None = None,
-                               fit_h3h4: bool = True) -> dict:
-    """Cheap, single-`lam` Laplace uncertainty -- no AIC-weighting across
-    `cfg.resolved_lam_grid()`, just one Laplace-covariance pass at
-    whichever `lam` the point estimate actually uses. The fast "sanity
-    check" option; use `laplace_losvd_uncertainty` for a reported result.
-
-    If `cfg.lam_selection == 'aic_local'`, this still has to run the full
-    adaptive selection once to find that `lam` (`select_lambda_aic_local`
-    -- exactly the same cost `fit_losvd` itself already pays for its own
-    point estimate, not extra work this function adds), but only computes
-    *one* Laplace covariance/sampling pass afterward, skipping the other
-    `len(lam_grid) - 1` grid points' own Hessian+sampling cost that
-    `laplace_losvd_uncertainty` pays for its between-lam term.
-    """
-    _check_no_continuum(cfg, "quick_laplace_uncertainty")
-    rng = np.random.default_rng(seed)
-
-    if cfg.lam_selection == "aic_local":
-        sel = select_lambda_aic_local(A_stack_w, y_w, cfg, np.asarray(cfg.resolved_lam_grid()))
-        lam = sel.best_lam
-    else:
-        lam = cfg.lam
-
-    lc = laplace_covariance_at_lam(A_stack_w, y_w, cfg, lam)
-    result0 = lc["result"]
-    v_grid = lc["v_grid"]
-    point0 = compute_losvd_moments(v_grid, result0["b"], fit_h3h4=fit_h3h4)
-
-    b_samples, vherm_s, sherm_s, h3_s, h4_s = _sample_curves_and_moments(
-        lc["coeffs"], lc["cov_coeffs"], lc["basis"], v_grid, n_samples, rng, fit_h3h4=fit_h3h4,
-        max_edge_amplitude_frac=cfg.max_edge_amplitude_frac)
-    if len(b_samples) == 0:
-        b_list, vherm_list, sherm_list, h3_list, h4_list = _degenerate_point_fallback(
-            "quick_laplace_uncertainty", point0, result0["b"], v_grid)
-        b_samples, vherm_s, sherm_s, h3_s, h4_s = (
-            b_list[0], vherm_list[0], sherm_list[0], h3_list[0], h4_list[0])
-
-    return dict(
-        method="quick_laplace",
-        result0=result0, point0=point0,
-        lam_used=float(lam),
-        objective_gap_at_best=result0.get("objective_gap"),
-        b_samples=b_samples,
-        b_median=np.median(b_samples, axis=0),
-        b_std=b_samples.std(axis=0, ddof=1),
-        b_p16=np.percentile(b_samples, 16, axis=0),
-        b_p84=np.percentile(b_samples, 84, axis=0),
-        vherm_samples=vherm_s, sherm_samples=sherm_s, h3_samples=h3_s, h4_samples=h4_s,
-        vherm_std=float(vherm_s.std(ddof=1)), sherm_std=float(sherm_s.std(ddof=1)),
-        h3_std=float(h3_s.std(ddof=1)), h4_std=float(h4_s.std(ddof=1)),
-    )
-
-
-def laplace_continuum_uncertainty(A_stack_w: np.ndarray, y_w: np.ndarray, wave_fit: np.ndarray,
-                                   cfg: FitConfig, lam: float | None = None, n_continuum_knots: int = 4,
-                                   lam_c: float = 2.0, ridge_c: float = 0.1, n_samples: int = 300,
-                                   seed: int | None = None, fit_h3h4: bool = True) -> dict:
-    """Laplace uncertainty for a continuum-cofitting fit -- the
-    continuum-aware counterpart to `quick_laplace_uncertainty` (single,
-    fixed `lam` only, no AIC-weighting across `cfg.resolved_lam_grid()`),
-    since continuum-cofitting itself only ever supports a fixed `lam`
-    (adaptive selection is not extended to it -- see `fit_losvd`'s own
-    `UserWarning` and this module's "Honest scope" section). Not a
-    special case of `laplace_losvd_uncertainty`: that function's whole
-    mechanism is AIC-weighted sampling *across* several `lam` values,
-    which continuum-cofitting structurally cannot do yet.
-
-    Computes the Laplace covariance of the *joint* `(LOSVD coeffs,
-    continuum coeffs)` vector (`laplace_covariance_at_lam_with_
-    continuum`), then draws posterior-predictive `(b, C)` curve pairs
-    from it (`_sample_joint_curves_and_moments`) -- `w` held fixed at its
-    converged value, matching every other Laplace function in this
-    module.
-
-    `lam` : if `None` (default), uses `cfg.lam` directly (continuum-
-        cofitting's own convention -- `cfg.lam_selection` is not
-        consulted, since adaptive selection doesn't apply here).
-
-    Returns a dict shaped like `quick_laplace_uncertainty`'s own (same
-    `result0`, `point0`, `lam_used`, `b_samples`/`b_median`/`b_std`/
-    `b_p16`/`b_p84`, `vherm_samples`/etc. and their `_std` summaries),
-    plus continuum-specific fields: `C_samples`, `C_median`, `C_std`,
-    `C_p16`, `C_p84`. **Read `C`'s shape (relative variation) as the
-    meaningful uncertainty here, not its absolute level** -- `C`'s mean
-    is not identifiable from the model alone regardless of how well
-    constrained its shape is (see `kinextract.continuum`'s own module
-    docstring, root-caused in `dev_notes/continuum/FINDINGS.md`'s
-    2026-08-01 entry) -- `C_std`/`C_p16`/`C_p84` inherit that same
-    non-identifiability at the DC/mean level, not just the point estimate.
-
-    **`C_median`'s own absolute level will generally NOT match
-    `result0['C']`'s** -- expected, not a bug. `b_samples` are
-    canonicalized to unit area (matching every other engine's `b_median`
-    convention in this package), and `C_samples` are compensated by the
-    exact same per-draw factor to keep each draw's own likelihood
-    unchanged (`_sample_joint_curves_and_moments`'s own docstring has the
-    full derivation) -- but `result0['b']` itself is *not* unit-area
-    (`fit_losvd` never canonicalizes it), so `result0['C']`
-    and `C_median` live on two different, equally arbitrary points along
-    the same non-identifiable gauge direction. Comparing `C_median` to a
-    known true continuum (e.g. a validation mock) should always be done
-    mean-subtracted (`C_median - C_median.mean()` vs `true_C -
-    true_C.mean()`), exactly like `continuum.py`'s own recommended
-    diagnostic -- never by comparing raw levels.
-    """
-    rng = np.random.default_rng(seed)
-    lam_val = cfg.lam if lam is None else lam
-
-    lc = laplace_covariance_at_lam_with_continuum(
-        A_stack_w, y_w, wave_fit, cfg, lam_val, n_continuum_knots=n_continuum_knots,
-        lam_c=lam_c, ridge_c=ridge_c)
-    result0 = lc["result"]
-    v_grid = lc["v_grid"]
-    point0 = compute_losvd_moments(v_grid, result0["b"], fit_h3h4=fit_h3h4)
-
-    b_samples, C_samples, vherm_s, sherm_s, h3_s, h4_s = _sample_joint_curves_and_moments(
-        lc["coeffs"], lc["continuum_coeffs"], lc["cov_joint"], lc["n_coef"], lc["basis"],
-        lc["basis_c"], v_grid, n_samples, rng, fit_h3h4=fit_h3h4,
-        max_edge_amplitude_frac=cfg.max_edge_amplitude_frac)
-    if len(b_samples) == 0:
-        b_list, C_list, vherm_list, sherm_list, h3_list, h4_list = _degenerate_point_fallback(
-            "laplace_continuum_uncertainty", point0, result0["b"], v_grid, C_point=result0["C"])
-        b_samples, C_samples, vherm_s, sherm_s, h3_s, h4_s = (
-            b_list[0], C_list[0], vherm_list[0], sherm_list[0], h3_list[0], h4_list[0])
-
-    return dict(
-        method="laplace_continuum",
-        result0=result0, point0=point0,
-        lam_used=float(lam_val),
-        b_samples=b_samples,
-        b_median=np.median(b_samples, axis=0),
-        b_std=b_samples.std(axis=0, ddof=1),
-        b_p16=np.percentile(b_samples, 16, axis=0),
-        b_p84=np.percentile(b_samples, 84, axis=0),
-        C_samples=C_samples,
-        C_median=np.median(C_samples, axis=0),
-        C_std=C_samples.std(axis=0, ddof=1),
-        C_p16=np.percentile(C_samples, 16, axis=0),
-        C_p84=np.percentile(C_samples, 84, axis=0),
-        vherm_samples=vherm_s, sherm_samples=sherm_s, h3_samples=h3_s, h4_samples=h4_s,
-        vherm_std=float(vherm_s.std(ddof=1)), sherm_std=float(sherm_s.std(ddof=1)),
-        h3_std=float(h3_s.std(ddof=1)), h4_std=float(h4_s.std(ddof=1)),
-    )
-
-
 def laplace_losvd_uncertainty(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfig,
-                               w_m: float = 2.0, n_samples: int = 300, seed: int | None = None,
-                               fit_h3h4: bool = True, min_weight_to_sample: float = 0.01) -> dict:
-    """The full method: AIC-weighted posterior-predictive sampling across
-    `cfg.resolved_lam_grid()`. See module docstring for the math and
-    "Honest scope" section.
+                              wave_fit: np.ndarray | None = None, lam: float | None = None,
+                              n_samples: int = 300, seed: int | None = None, fit_h3h4: bool = True) -> dict:
+    """Laplace posterior of a LOSVD fit at one `lam` (default `cfg.lam`; pass the fit's `lam_used`).
 
-    `w_m` : the same AIC criterion weight (`chi2 + w_m*m_eff`)
-        `select_lambda_aic_local` uses -- kept consistent so the `lam`
-        this function's own point estimate lands on matches what
-        `fit_losvd(cfg)` (adaptive selection) would pick.
-    `n_samples` : total posterior-predictive sample budget, allocated
-        across `lam` grid points in proportion to their AIC weight (a
-        `lam` with weight below `min_weight_to_sample` is skipped
-        entirely -- not worth a Hessian/sampling pass for a candidate the
-        criterion has already all but ruled out).
+    Refits the MAP at that `lam` on the given whitened `A_stack_w`/`y_w` (drop a robust fit's clipped pixels
+    first), computes the Laplace covariance -- of the joint `(LOSVD, continuum)` coefficients when
+    `cfg.continuum_knots` is set (then `wave_fit` is required) -- and draws `n_samples` posterior-predictive
+    LOSVD curves from it, rejecting draws still at the grid edge (`cfg.max_edge_amplitude_frac`).
 
-    Returns a dict shaped to be a near-drop-in swap for `bootstrap_losvd`'s
-    return value: `result0`, `point0`, `b_median`, `b_std`, `b_p16`,
-    `b_p84`, `vherm_std`, `sherm_std`, `h3_std`, `h4_std` mean the same
-    thing and can be read the same way. `b_samples`/`vherm_samples`/etc.
-    (not `b_boot`/`vherm_boot`) hold the raw pooled posterior-predictive
-    draws -- named differently from `bootstrap_losvd`'s `*_boot` fields on
-    purpose, since these are not bootstrap replicates. `lam_used`,
-    `lam_grid`, `lam_weights` are new fields specific to this method.
-    No bias-correction fields (`*_corrected`) -- `bias_correction.py`'s
-    calibration tables were built against `bootstrap_losvd`'s own point
-    estimate and have not been validated against this method's.
+    Returns `result0` (the MAP fit), `point0` (its moments), `lam_used`, `b_samples` (unit area),
+    `b_median`/`b_std`/`b_p16`/`b_p84`, `vherm_samples`/`sherm_samples`/`h3_samples`/`h4_samples` and their
+    `*_std`; with continuum-cofitting also `C_samples`/`C_median`/`C_std`/`C_p16`/`C_p84`. **Read `C`'s shape
+    as the meaningful uncertainty, not its absolute level** -- `C`'s mean is not identifiable (see
+    `kinextract.continuum`), and `C_median`'s level will generally not match `result0['C']`'s: the draws are
+    unit-area in `b` with `C` compensated by the same factor, while `result0['b']` is not unit-area. Compare
+    continua mean-subtracted.
     """
-    _check_no_continuum(cfg, "laplace_losvd_uncertainty")
     rng = np.random.default_rng(seed)
-    lam_grid = np.asarray(cfg.resolved_lam_grid(), dtype=float)
-
-    per_lam = [laplace_covariance_at_lam(A_stack_w, y_w, cfg, lam) for lam in lam_grid]
-    criteria = np.array([lc["chi2"] + w_m * lc["m_eff"] for lc in per_lam])
-    weights = np.exp(-0.5 * (criteria - criteria.min()))
-    weights /= weights.sum()
-
-    best_idx = int(np.argmin(criteria))
-    result0 = per_lam[best_idx]["result"]
-    v_grid = per_lam[best_idx]["v_grid"]
-    point0 = compute_losvd_moments(v_grid, result0["b"], fit_h3h4=fit_h3h4)
-
-    b_list, vherm_list, sherm_list, h3_list, h4_list = [], [], [], [], []
-    n_sampled_lams = 0
-    for i, lc in enumerate(per_lam):
-        if weights[i] < min_weight_to_sample:
-            continue
-        n_i = max(1, int(round(weights[i] * n_samples)))
-        b_s, vherm_s, sherm_s, h3_s, h4_s = _sample_curves_and_moments(
-            lc["coeffs"], lc["cov_coeffs"], lc["basis"], v_grid, n_i, rng, fit_h3h4=fit_h3h4,
+    lam_val = float(cfg.lam if lam is None else lam)
+    C_samples = None
+    if cfg.continuum_knots is not None:
+        if wave_fit is None:
+            raise ValueError("laplace_losvd_uncertainty: cfg.continuum_knots is set but wave_fit was not "
+                             "provided -- the continuum spline is built on wavelength.")
+        lc = laplace_covariance_at_lam_with_continuum(A_stack_w, y_w, np.asarray(wave_fit, float), cfg, lam_val)
+        result0, v_grid = lc["result"], lc["v_grid"]
+        point0 = compute_losvd_moments(v_grid, result0["b"], fit_h3h4=fit_h3h4)
+        b_samples, C_samples, vherm_s, sherm_s, h3_s, h4_s = _sample_joint_curves_and_moments(
+            lc["coeffs"], lc["continuum_coeffs"], lc["cov_joint"], lc["n_coef"], lc["basis"],
+            lc["basis_c"], v_grid, n_samples, rng, fit_h3h4=fit_h3h4,
             max_edge_amplitude_frac=cfg.max_edge_amplitude_frac)
-        # If the divergent-edge rejection filter (_sample_curves_and_moments's own
-        # docstring) exhausted most of its draw budget, the surviving handful of
-        # samples is a small, unrepresentative slice of this lam's own posterior --
-        # its std can land anywhere, including artificially tight, which showed up
-        # directly in a coverage-sweep standardized-residual breakdown as a small
-        # number of wildly overconfident cells rather than a smooth trend (see
-        # dev_notes/uncertainty/FINDINGS.md, 2026-08-01). Excluding this lam's
-        # contribution entirely once too few of its own requested samples survived
-        # (rather than pooling the unreliable partial sample) trades a slightly
-        # smaller effective sample size for not letting one bad lam's own
-        # sampling noise dominate the pooled ensemble's reported width.
-        if len(b_s) < 0.5 * n_i:
-            warnings.warn(
-                f"laplace_losvd_uncertainty: lam={lam_grid[i]:g} only produced "
-                f"{len(b_s)}/{n_i} requested posterior-predictive samples (its own "
-                "posterior is dominated by divergent-edge solutions) -- excluding this "
-                "lam's contribution from the pooled ensemble rather than pooling an "
-                "unrepresentative partial sample. If this fires often, the affected "
-                "lam values are contributing little useful signal to this fit's "
-                "uncertainty band regardless.", UserWarning, stacklevel=2,
-            )
-            continue
-        b_list.append(b_s); vherm_list.append(vherm_s); sherm_list.append(sherm_s)
-        h3_list.append(h3_s); h4_list.append(h4_s)
-        n_sampled_lams += 1
-
-    if n_sampled_lams == 0:
-        # min_weight_to_sample excluded every lam, or every lam's own sampling yield was
-        # too low to trust (the per-lam loop above's own 0.5*n_i floor) -- fall back to
-        # sampling the winner alone rather than returning an empty ensemble.
-        warnings.warn(
-            "laplace_losvd_uncertainty: every lam in the grid fell below min_weight_to_sample "
-            "-- falling back to sampling only the winning lam. This should not normally happen; "
-            "consider lowering min_weight_to_sample.", UserWarning, stacklevel=2,
-        )
-        lc = per_lam[best_idx]
-        b_s, vherm_s, sherm_s, h3_s, h4_s = _sample_curves_and_moments(
+        if len(b_samples) == 0:
+            b_list, C_list, vherm_list, sherm_list, h3_list, h4_list = _degenerate_point_fallback(
+                "laplace_losvd_uncertainty", point0, result0["b"], v_grid, C_point=result0["C"])
+            b_samples, C_samples, vherm_s, sherm_s, h3_s, h4_s = (
+                b_list[0], C_list[0], vherm_list[0], sherm_list[0], h3_list[0], h4_list[0])
+    else:
+        lc = laplace_covariance_at_lam(A_stack_w, y_w, cfg, lam_val)
+        result0, v_grid = lc["result"], lc["v_grid"]
+        point0 = compute_losvd_moments(v_grid, result0["b"], fit_h3h4=fit_h3h4)
+        b_samples, vherm_s, sherm_s, h3_s, h4_s = _sample_curves_and_moments(
             lc["coeffs"], lc["cov_coeffs"], lc["basis"], v_grid, n_samples, rng, fit_h3h4=fit_h3h4,
             max_edge_amplitude_frac=cfg.max_edge_amplitude_frac)
-        b_list, vherm_list, sherm_list, h3_list, h4_list = [b_s], [vherm_s], [sherm_s], [h3_s], [h4_s]
+        if len(b_samples) == 0:
+            b_list, vherm_list, sherm_list, h3_list, h4_list = _degenerate_point_fallback(
+                "laplace_losvd_uncertainty", point0, result0["b"], v_grid)
+            b_samples, vherm_s, sherm_s, h3_s, h4_s = (
+                b_list[0], vherm_list[0], sherm_list[0], h3_list[0], h4_list[0])
 
-    if sum(len(b) for b in b_list) == 0:
-        # Even the winning lam's own posterior-predictive sampling produced zero valid
-        # draws (found directly running at real-data scale, 2026-08-03) -- see
-        # _degenerate_point_fallback's own docstring for why this needs handling here.
-        b_list, vherm_list, sherm_list, h3_list, h4_list = _degenerate_point_fallback(
-            "laplace_losvd_uncertainty", point0, result0["b"], v_grid)
-
-    b_samples = np.concatenate(b_list, axis=0)
-    vherm_samples = np.concatenate(vherm_list)
-    sherm_samples = np.concatenate(sherm_list)
-    h3_samples = np.concatenate(h3_list)
-    h4_samples = np.concatenate(h4_list)
-
-    return dict(
+    out = dict(
         method="laplace",
-        result0=result0, point0=point0,
-        lam_used=float(lam_grid[best_idx]), lam_grid=lam_grid, lam_weights=weights,
+        result0=result0, point0=point0, lam_used=lam_val,
         objective_gap_at_best=result0.get("objective_gap"),
         b_samples=b_samples,
         b_median=np.median(b_samples, axis=0),
         b_std=b_samples.std(axis=0, ddof=1),
         b_p16=np.percentile(b_samples, 16, axis=0),
         b_p84=np.percentile(b_samples, 84, axis=0),
-        vherm_samples=vherm_samples, sherm_samples=sherm_samples,
-        h3_samples=h3_samples, h4_samples=h4_samples,
-        vherm_std=float(vherm_samples.std(ddof=1)), sherm_std=float(sherm_samples.std(ddof=1)),
-        h3_std=float(h3_samples.std(ddof=1)), h4_std=float(h4_samples.std(ddof=1)),
+        vherm_samples=vherm_s, sherm_samples=sherm_s, h3_samples=h3_s, h4_samples=h4_s,
+        vherm_std=float(vherm_s.std(ddof=1)), sherm_std=float(sherm_s.std(ddof=1)),
+        h3_std=float(h3_s.std(ddof=1)), h4_std=float(h4_s.std(ddof=1)),
     )
+    if C_samples is not None:
+        out.update(C_samples=C_samples, C_median=np.median(C_samples, axis=0), C_std=C_samples.std(axis=0, ddof=1),
+                   C_p16=np.percentile(C_samples, 16, axis=0), C_p84=np.percentile(C_samples, 84, axis=0))
+    return out
 
 
 def _laplace_losvd_uncertainty_worker(args):
-    """Top-level (picklable) per-bin worker for
-    `laplace_losvd_uncertainty_parallel` -- process pools need a
-    module-level function, not a closure, since workers unpickle it by
-    import path (same requirement as `uncertainty._bootstrap_losvd_worker`).
-
-    Three-way dispatch, not two: continuum-cofitting bins always go to
-    `laplace_continuum_uncertainty` (only ever supports a fixed `lam`, see
-    that function's own docstring); of the remaining, non-continuum bins,
-    `cfg.lam_selection == "fixed"` goes to `quick_laplace_uncertainty`
-    (single Laplace pass at `cfg.lam`) rather than `laplace_losvd_
-    uncertainty` (AIC-weighted sampling *across* `cfg.resolved_lam_grid()`).
-    That grid-scan is only meaningful when `lam_selection == "aic_local"`
-    (an actually-adaptive choice the grid's own candidates represent real
-    uncertainty over); for a genuinely fixed `lam`, scanning the grid
-    anyway evaluates candidates nothing will ever select, and can hand
-    most of the pooled posterior's weight to a candidate under-regularized
-    enough, at low S/N, to be dominated by divergent-edge solutions --
-    confirmed directly, 2026-08-07 (NGC 5102's own real bins, this
-    project's capstone low-sigma example): `h3_std`/`h4_std` inflated
-    2-40x over the single-lam value on the 10 worst-affected bins, with
-    the sampler's own divergent-edge rejection filter warning on nearly
-    every draw. `quick_laplace_uncertainty`'s own docstring already
-    describes it as the correct choice once `lam` is already decided
-    (kept in sync as of that same fix -- see this module's own dev_notes/
-    uncertainty/FINDINGS.md entry for the full before/after).
-    """
-    (A_stack_w, y_w, cfg, seed, w_m, n_samples, fit_h3h4, min_weight_to_sample,
-     wave_fit, lam, n_continuum_knots, lam_c, ridge_c) = args
-    if cfg.continuum_knots is not None:
-        return laplace_continuum_uncertainty(
-            A_stack_w, y_w, wave_fit, cfg, lam=lam, n_continuum_knots=n_continuum_knots,
-            lam_c=lam_c, ridge_c=ridge_c, n_samples=n_samples, seed=seed, fit_h3h4=fit_h3h4,
-        )
-    if cfg.lam_selection == "fixed":
-        return quick_laplace_uncertainty(
-            A_stack_w, y_w, cfg, n_samples=n_samples, seed=seed, fit_h3h4=fit_h3h4,
-        )
-    return laplace_losvd_uncertainty(
-        A_stack_w, y_w, cfg, w_m=w_m, n_samples=n_samples, seed=seed,
-        fit_h3h4=fit_h3h4, min_weight_to_sample=min_weight_to_sample,
-    )
+    """Top-level (picklable) per-bin worker for `laplace_losvd_uncertainty_parallel`."""
+    A_stack_w, y_w, cfg, wave_fit, lam, n_samples, seed, fit_h3h4 = args
+    return laplace_losvd_uncertainty(A_stack_w, y_w, cfg, wave_fit=wave_fit, lam=lam, n_samples=n_samples,
+                                     seed=seed, fit_h3h4=fit_h3h4)
 
 
-def laplace_losvd_uncertainty_parallel(A_stack_w_list, y_w_list, cfg_list, w_m: float = 2.0,
-                                        n_samples: int = 300, seed: int | None = None,
-                                        fit_h3h4: bool = True, min_weight_to_sample: float = 0.01,
-                                        n_jobs: int | None = None, wave_fit=None, lam=None,
-                                        n_continuum_knots: int = 4, lam_c: float = 2.0,
-                                        ridge_c: float = 0.1) -> list[dict]:
-    """Laplace uncertainty for many independent bins in parallel via a
-    process pool -- the Laplace analogue of `uncertainty.
-    bootstrap_losvd_parallel`, same interface and parallelization
-    strategy (`ProcessPoolExecutor`, `spawn` context, BLAS threads pinned
-    to 1 per worker via `multi_template._limit_worker_threads` -- see
-    that function's own docstring for why).
-
-    Each bin's Laplace fit is already far cheaper per-bin than a full
-    bootstrap ensemble (no `n_boot` refits -- one closed-form covariance
-    per `lam` in the grid, typically 6 values, plus cheap posterior-
-    predictive sampling -- see `laplace_losvd_uncertainty`'s own module
-    docstring), so this parallelizes the *same* embarrassingly-parallel
-    across-bins structure `bootstrap_losvd_parallel` does, for the same
-    reason: many independent bins, zero shared state, pure wall-clock
-    speedup with zero accuracy cost relative to a serial per-bin loop
-    with the same per-bin seed.
-
-    **Per-bin three-way dispatch, not a single uniform method.** A bin
-    whose own `cfg.continuum_knots` is set is routed to
-    `laplace_continuum_uncertainty` (fixed-`lam` joint LOSVD+continuum
-    Laplace covariance). Of the remaining bins, `cfg.lam_selection ==
-    "fixed"` routes to `quick_laplace_uncertainty` (single Laplace pass
-    at `cfg.lam`); only `cfg.lam_selection == "aic_local"` gets the full
-    `laplace_losvd_uncertainty` (AIC-weighted across `cfg.resolved_
-    lam_grid()`) -- see `_laplace_losvd_uncertainty_worker`'s own
-    docstring for why scanning that grid for an already-fixed `lam` is
-    not just wasted cost but a real accuracy risk at low S/N. Mixing any
-    combination of these across bins in the same call is supported (each
-    bin's own `cfg` decides), matching how `cfg_list` already lets every
-    other per-bin setting vary.
+def laplace_losvd_uncertainty_parallel(A_stack_w_list, y_w_list, cfg_list, wave_fit=None, lam=None,
+                                        n_samples: int = 300, seed: int | None = None, fit_h3h4: bool = True,
+                                        n_jobs: int | None = None, clipped_mask=None) -> list[dict]:
+    """`laplace_losvd_uncertainty` for many independent bins in parallel (`ProcessPoolExecutor`, `spawn`
+    context, BLAS threads pinned to 1 per worker -- see `multi_template.single_threaded_worker_env`).
 
     Parameters
     ----------
-    A_stack_w_list, y_w_list : sequences of the same length, one entry per
-        bin, each matching `laplace_losvd_uncertainty`'s own `A_stack_w`/
-        `y_w`.
-    cfg_list : a single `FitConfig` (reused for every bin) or a sequence
-        of one per bin.
-    seed : base seed. Bin `i` uses `seed + i` (or `None` for every bin,
-        drawing fresh entropy each time, if `seed` itself is `None`) --
-        matches `bootstrap_losvd_parallel`'s own convention, so results
-        are directly comparable to (and, at `n_jobs=1`, bit-identical to)
-        a serial `for i, ...: laplace_losvd_uncertainty(..., seed=seed+i)`
-        loop.
-    w_m, n_samples, fit_h3h4, min_weight_to_sample : shared across every
-        non-continuum bin, forwarded to `laplace_losvd_uncertainty`.
-    wave_fit, lam, n_continuum_knots, lam_c, ridge_c : shared across every
-        continuum bin, forwarded to `laplace_continuum_uncertainty`.
-        `wave_fit` accepts either a single array (shared across every
-        continuum bin) or a sequence of one per bin, matching
-        `bootstrap_losvd_parallel`'s own `wave_fit` convention. Ignored
-        entirely for bins with `continuum_knots=None`.
-    n_jobs : worker process count. `None` (default) uses `os.cpu_count()`,
-        memory-permitting -- see `multi_template.resolve_n_jobs`'s own
-        docstring. `1` disables the process pool and runs serially
-        in-process.
+    A_stack_w_list, y_w_list : sequences of the same length, one entry per bin (whitened).
+    cfg_list : a single `FitConfig` (reused for every bin) or a sequence of one per bin.
+    wave_fit : a single array (shared) or a sequence of one per bin; required for bins with continuum-cofitting.
+    lam : `None` (each bin's `cfg.lam`), a float, or a sequence of one per bin -- pass the fits' `lam_used`.
+    seed : base seed. Bin `i` uses `seed + i` (or `None` for every bin if `seed` is `None`), so results match a
+        serial loop with the same per-bin seeds.
+    clipped_mask : optional boolean pixel mask (`True` = clipped), a single array or a sequence of one per bin
+        (`None` entries allowed) -- pass each bin's `fit_losvd_robust(...)["clipped_mask"]`. Those pixels are
+        dropped from `A_stack_w`/`y_w`/`wave_fit` before the Laplace fit, exactly as the robust fit dropped them.
+        Without this the Laplace MAP is refit on the full pixel set, clipped outliers included, and can land on a
+        different solution: found on real NGC 4751 WFM data (2026-10-15), 2-6 clipped pixels per bin pulled the
+        MAP from sigma ~140-380 km/s to ~520-890 km/s, divergent at the v_grid edges.
+    n_jobs : worker count; `None` uses `multi_template.resolve_n_jobs`'s memory-aware default, `1` runs serially.
 
-    Returns
-    -------
-    list of result dicts, one per bin, in the same order as the inputs
-    (each `laplace_losvd_uncertainty`'s, `quick_laplace_uncertainty`'s, or
-    `laplace_continuum_uncertainty`'s own shape, depending on that bin's
-    `cfg` -- all three share the same key set, see each one's own
-    docstring) -- not a generator, so a failure partway through surfaces
-    before any results are used.
+    Returns a list of `laplace_losvd_uncertainty` result dicts, in input order.
     """
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
 
-    from .multi_template import _limit_worker_threads, resolve_n_jobs
+    from .multi_template import _limit_worker_threads, single_threaded_worker_env, resolve_n_jobs
 
     n_bins = len(A_stack_w_list)
+
+    def per_bin(x, name):
+        out = list(x) if isinstance(x, (list, tuple)) else [x] * n_bins
+        if len(out) != n_bins:
+            raise ValueError(f"{name}, given as a sequence, must have one entry per bin (got {len(out)} for "
+                             f"{n_bins} bins).")
+        return out
+
     if len(y_w_list) != n_bins:
-        raise ValueError(f"A_stack_w_list and y_w_list must have the same length "
-                          f"(got {n_bins} and {len(y_w_list)}).")
-    cfgs = cfg_list if isinstance(cfg_list, (list, tuple)) else [cfg_list] * n_bins
-    if len(cfgs) != n_bins:
-        raise ValueError(f"cfg_list, given as a sequence, must have one entry per bin "
-                          f"(got {len(cfgs)} for {n_bins} bins).")
-    waves = wave_fit if isinstance(wave_fit, (list, tuple)) else [wave_fit] * n_bins
-    if len(waves) != n_bins:
-        raise ValueError(f"wave_fit, given as a sequence, must have one entry per bin "
-                          f"(got {len(waves)} for {n_bins} bins).")
-    for cfg, wf in zip(cfgs, waves):
-        if cfg.continuum_knots is not None and wf is None:
-            raise ValueError(
-                "laplace_losvd_uncertainty_parallel: a bin has cfg.continuum_knots set but no "
-                "wave_fit was provided for it -- continuum-cofitting needs the observed "
-                "wavelength grid (see laplace_continuum_uncertainty's own docstring)."
-            )
+        raise ValueError(f"A_stack_w_list and y_w_list must have the same length (got {n_bins} and {len(y_w_list)}).")
+    cfgs, waves, lams = per_bin(cfg_list, "cfg_list"), per_bin(wave_fit, "wave_fit"), per_bin(lam, "lam")
+    masks = per_bin(clipped_mask, "clipped_mask")
     seeds = [None] * n_bins if seed is None else [seed + i for i in range(n_bins)]
+    A_stack_w_list, y_w_list = list(A_stack_w_list), list(y_w_list)   # copies: the caller's lists stay untouched
+    for i, m in enumerate(masks):
+        if m is None:
+            continue
+        m = np.asarray(m, dtype=bool)
+        if m.shape != (A_stack_w_list[i].shape[1],):
+            raise ValueError(f"clipped_mask for bin {i} has shape {m.shape}, expected "
+                             f"({A_stack_w_list[i].shape[1]},) to match A_stack_w's pixel axis.")
+        if m.any():
+            A_stack_w_list[i] = A_stack_w_list[i][:, ~m, :]
+            y_w_list[i] = np.asarray(y_w_list[i])[~m]
+            if waves[i] is not None:
+                waves[i] = np.asarray(waves[i])[~m]
 
-    jobs = [
-        (A_stack_w_list[i], y_w_list[i], cfgs[i], seeds[i], w_m, n_samples, fit_h3h4,
-         min_weight_to_sample, waves[i], lam, n_continuum_knots, lam_c, ridge_c)
-        for i in range(n_bins)
-    ]
-
+    jobs = [(A_stack_w_list[i], y_w_list[i], cfgs[i], waves[i], lams[i], n_samples, seeds[i], fit_h3h4)
+            for i in range(n_bins)]
     if n_jobs == 1:
         return [_laplace_losvd_uncertainty_worker(job) for job in jobs]
-
-    # 4x the largest single design matrix -- posterior-predictive samples are drawn
-    # over the (small) coefficient/velocity-grid space, not copies of A_stack_w itself,
-    # so the base design matrix still dominates a job's own memory footprint (see
-    # resolve_n_jobs's own docstring for why this cap is memory-aware, not just cpu_count()).
+    # 4x the largest design matrix: draws live in the small coefficient/velocity space, so A_stack_w dominates.
     per_job_bytes = 4 * max((a.nbytes for a in A_stack_w_list), default=0)
     n_jobs = resolve_n_jobs(n_jobs, per_job_bytes)
-    with ProcessPoolExecutor(max_workers=n_jobs, mp_context=get_context("spawn"),
-                              initializer=_limit_worker_threads) as pool:
+    with single_threaded_worker_env(), ProcessPoolExecutor(max_workers=n_jobs, mp_context=get_context("spawn"),
+                                                           initializer=_limit_worker_threads) as pool:
         return list(pool.map(_laplace_losvd_uncertainty_worker, jobs))
+
+
+def losvd_error_bands(A_stack: np.ndarray, flux: np.ndarray, errors: np.ndarray, wave_fit: np.ndarray, fit: dict,
+                      cfg: FitConfig, sky_profile: np.ndarray | None = None, n_samples: int = 300,
+                      n_moment_draws: int = 100, seed: int | None = 0, fit_h3h4: bool = True) -> dict:
+    """Error bands for a `fit_losvd_robust` fit on real IFU data: the sky-line + template-mismatch noise model,
+    Laplace at the fit's `lam` and `rho` without its clipped pixels, re-centered on the fit (module docstring).
+
+    Parameters
+    ----------
+    A_stack, flux, errors, wave_fit : the unwhitened inputs of the fit.
+    fit : the `fit_losvd_robust` result (`b`, `lam_used`, `rho_used`, `errors_inflated`, `clipped_mask`).
+    cfg : the `FitConfig` of the fit; its `lam` (the lam rule's starting value) is the `lam` of the preliminary
+        fit the noise model is measured on.
+    sky_profile : the LSF-blended sky-line spectrum on `wave_fit` (`noise_model.sky_line_profile`); `None` for
+        data without sky residuals (the mismatch term alone is fitted).
+    n_samples : posterior draws; `n_moment_draws` of them give the moment errors.
+
+    Returns
+    -------
+    dict
+        `b_samples`, `b_median`, `b_p16`, `b_p84` (re-centered, unit area); `vherm_err`, `sherm_err`, `h3_err`,
+        `h4_err` (half the 16-84 % range of the draws' moments -- robust to the few broad draws); `kappa`, `f`,
+        `inflation` (the noise model: sky term in units of the median model, mismatch fraction, median error
+        inflation); `lam_used`.
+    """
+    from .noise_model import noise_model_errors, whiten
+
+    wave_fit = np.asarray(wave_fit, float)
+    errors = np.asarray(errors, float)
+    sky = np.zeros_like(wave_fit) if sky_profile is None else np.asarray(sky_profile, float)
+    nm = noise_model_errors(A_stack, flux, errors, wave_fit, cfg, sky, lam=cfg.lam)
+    c = dataclasses.replace(cfg, lam_rule="fixed", lam=float(fit["lam_used"]), rho=float(fit["rho_used"]))
+    A_w, y_w, _ = whiten(A_stack, flux, np.asarray(fit["errors_inflated"], float) * nm["errors"] / errors, rho=c.rho)
+    keep = ~np.asarray(fit["clipped_mask"], bool)
+    lap = laplace_losvd_uncertainty(A_w[:, keep, :], y_w[keep], c, wave_fit=wave_fit[keep], n_samples=n_samples,
+                                    seed=seed, fit_h3h4=fit_h3h4)
+    v_grid = c.build_velocity_grid()
+    r = recenter_samples(lap["b_samples"], v_grid, fit["b"])
+    M = np.array([[m["vherm"], m["sherm"], m["h3"], m["h4"]]
+                  for m in (compute_losvd_moments(v_grid, x, fit_h3h4=fit_h3h4)
+                            for x in r["b_samples"][:n_moment_draws])])
+    half = (np.percentile(M, 84, axis=0) - np.percentile(M, 16, axis=0)) / 2
+    return dict(r, vherm_err=float(half[0]), sherm_err=float(half[1]), h3_err=float(half[2]), h4_err=float(half[3]),
+                kappa=nm["kappa"], f=nm["f"], inflation=nm["inflation"], lam_used=c.lam)
+
+
+def _losvd_error_bands_worker(args):
+    """Top-level (picklable) per-bin worker for `losvd_error_bands_parallel`."""
+    A_stack, flux, errors, wave_fit, fit, cfg, sky, kwargs = args
+    return losvd_error_bands(A_stack, flux, errors, wave_fit, fit, cfg, sky_profile=sky, **kwargs)
+
+
+def losvd_error_bands_parallel(A_stack_list, flux_list, errors_list, wave_fit_list, fit_list, cfg_list,
+                               sky_profile_list=None, n_jobs: int | None = None, seed: int | None = 0,
+                               **kwargs) -> list[dict]:
+    """`losvd_error_bands` for many bins in parallel, one process per bin at a time (same pool setup as
+    `fit_losvd_robust_parallel`). `cfg_list` and `sky_profile_list` take a single value or one per bin; bin `i`
+    uses `seed + i`. Other keyword arguments go to every `losvd_error_bands` call. Returns a list in input order.
+    """
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    from .multi_template import _limit_worker_threads, single_threaded_worker_env, resolve_n_jobs
+
+    n_bins = len(A_stack_list)
+    cfgs = cfg_list if isinstance(cfg_list, (list, tuple)) else [cfg_list] * n_bins
+    skies = sky_profile_list if isinstance(sky_profile_list, (list, tuple)) else [sky_profile_list] * n_bins
+    if not (len(flux_list) == len(errors_list) == len(wave_fit_list) == len(fit_list) == len(cfgs) == len(skies)
+            == n_bins):
+        raise ValueError("losvd_error_bands_parallel: every per-bin sequence needs one entry per bin.")
+    jobs = [(A_stack_list[i], flux_list[i], errors_list[i], wave_fit_list[i], fit_list[i], cfgs[i], skies[i],
+             dict(kwargs, seed=None if seed is None else seed + i)) for i in range(n_bins)]
+    if n_jobs == 1:
+        return [_losvd_error_bands_worker(job) for job in jobs]
+    per_job_bytes = 4 * max((a.nbytes for a in A_stack_list), default=0)
+    n_jobs = resolve_n_jobs(n_jobs, per_job_bytes)
+    with single_threaded_worker_env(), ProcessPoolExecutor(max_workers=n_jobs, mp_context=get_context("spawn"),
+                                                           initializer=_limit_worker_threads) as pool:
+        return list(pool.map(_losvd_error_bands_worker, jobs))
+
+
+def recenter_samples(b_samples: np.ndarray, v_grid: np.ndarray, b_point: np.ndarray, clip: float = 1e3) -> dict:
+    """Move posterior draws onto a different point estimate, keeping their relative scatter.
+
+    For bands taken from one posterior (e.g. Laplace with `noise_model.noise_model_errors` errors) around a fit made
+    with other errors (the plain-error fit, whose shape is better at fixed lam): each draw is multiplied by
+    `b_point / median(draws)` per velocity (both unit-area) -- a shift in log b, the LOSVD's own parametrization --
+    clipped to [1/clip, clip], and renormalized to unit area. Returns `b_samples`, `b_median`, `b_p16`, `b_p84`."""
+    v = np.asarray(v_grid, float)
+    b0 = np.maximum(np.asarray(b_point, float), 0.0)
+    b0 = b0 / np.trapezoid(b0, v)
+    bs = np.asarray(b_samples, float)
+    bs = bs / np.trapezoid(bs, v, axis=1)[:, None]      # unit-area first, so `clip` acts on shape ratios only
+    ratio = np.clip(b0 / np.maximum(np.median(bs, axis=0), 1e-300), 1.0 / clip, clip)
+    bs = bs * ratio[None, :]
+    bs = bs / np.trapezoid(bs, v, axis=1)[:, None]
+    return dict(b_samples=bs, b_median=np.median(bs, axis=0), b_p16=np.percentile(bs, 16, axis=0),
+                b_p84=np.percentile(bs, 84, axis=0))

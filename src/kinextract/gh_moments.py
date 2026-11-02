@@ -15,7 +15,12 @@ standalone, general-purpose alternative -- primarily for comparison
 against the wider dynamics literature, which almost universally reports
 jointly-fit Gauss-Hermite moments this way -- but is no longer the
 recommended way to get V/sigma; see `compute_direct_moments`'s own
-docstring for the benchmark this is based on.
+docstring for the benchmark this is based on. That benchmark used
+adaptively-regularized fits, whose broad wing pedestals hurt a joint GH
+fit; on fits at the default fixed `lam` (order-3 penalty, smooth
+near-Gaussian wings) the two agree to about 0.5 km/s on the same grid,
+with the direct moment's taper costing ~1-2 % in sigma
+(`tests/test_gh_moments.py`).
 
 **Windowing detail that matters: the direct-moment window must be
 smooth, not a hard cutoff.** A raw full-domain moment gets dragged around
@@ -49,12 +54,9 @@ dynamics literature.
 """
 from __future__ import annotations
 
-import warnings
 
 import numpy as np
 from scipy.optimize import least_squares
-
-from .bias_correction import correct_moments as _correct_moments
 
 
 def _fh3(w: np.ndarray) -> np.ndarray:
@@ -220,65 +222,8 @@ def fit_h3_h4(v: np.ndarray, b: np.ndarray, vel: float, sig: float) -> dict:
     return dict(h3=float(h3), h4=float(h4), amp=float(amp), success=bool(res.success))
 
 
-def shape_aware_taper_correction(vel_est: float, sig_est: float, h3_est: float, h4_est: float,
-                                  core_threshold: float = 0.01, taper_width: float = 0.004) -> tuple[float, float]:
-    """Correction factor/shift for `compute_direct_moments`'s taper-
-    windowing bias (see `compute_direct_moments`'s own docstring), tuned
-    to the *specific* recovered shape rather than a universal (Gaussian)
-    constant.
-
-    **Mechanism.** The windowing bias is a purely geometric property of
-    the taper applied to a given shape -- confirmed shape- and noise-
-    independent (identical at S/N=100 and S/N=100000 on the same true
-    shape). Given a current `(vel, sig, h3, h4)` estimate, build a fine-
-    grid *reference* Gauss-Hermite curve with exactly that shape, run it
-    through the identical taper windowing, and measure the bias that
-    shape produces -- then return the factor/shift needed to undo it.
-    Exact (zero residual bias) when applied to the noiseless truth its
-    own shape estimate came from, by construction.
-
-    **On noisy fits, a real net improvement, with one known exception.**
-    Tested across the standard 13-case validation grid (20 seeds/case,
-    S/N~100): excluding sigma=300, mean |bias| dropped from 1.95 to 1.41
-    km/s (~28%), and the case this was built for (h4=+0.1) improved
-    substantially (-3.88 -> -1.36 km/s, ~65%). **At sigma=300 specifically,
-    this correction makes bias worse, not better** (e.g. V=0/sigma=300:
-    +0.8 -> +4.8 km/s) -- that regime already has a separate, not-yet-
-    understood issue (a "sloppy," near-degenerate parameter manifold at
-    high coefficient counts, see `kinextract.uncertainty`'s module
-    docstring), and the noisier h3/h4 *estimate* this correction depends
-    on there means it's applying a real correction mechanism to an
-    unreliable shape estimate, compounding rather than fixing the
-    existing problem. Not resolved -- until it is, don't use this
-    correction on sigma ~300+ (broad, well-detected) targets specifically.
-
-    Returns
-    -------
-    (factor, v_shift) -- multiply the raw `sherm` by `factor`, add
-    `v_shift` to the raw `vherm`.
-    """
-    v_ref = np.linspace(vel_est - 20 * sig_est, vel_est + 20 * sig_est, 50000)
-    b_ref = np.maximum(gauss_hermite_model(v_ref, 1.0, vel_est, sig_est, h3_est, h4_est), 0.0)
-    tot = np.trapezoid(b_ref, v_ref)
-    if tot <= 0:
-        return 1.0, 0.0
-    true_v_ref = float(np.trapezoid(b_ref * v_ref, v_ref) / tot)
-    true_s_ref = float(np.sqrt(np.trapezoid(b_ref * (v_ref - true_v_ref) ** 2, v_ref) / tot))
-    dm_ref = compute_direct_moments(v_ref, b_ref, core_threshold=core_threshold, taper_width=taper_width)
-    if not np.isfinite(dm_ref["sherm"]) or dm_ref["sherm"] <= 0:
-        return 1.0, 0.0
-    factor = true_s_ref / dm_ref["sherm"]
-    v_shift = true_v_ref - dm_ref["vherm"]
-    return factor, v_shift
-
-
-_SHAPE_AWARE_UNSAFE_SIGMA = 200.0
-
-
 def compute_losvd_moments(v: np.ndarray, b: np.ndarray, core_threshold: float = 0.01,
-                           fit_h3h4: bool = True, shape_aware_correction: bool = False,
-                           regularization_bias_correction: bool = False, snr: float | None = None,
-                           bias_calibration=None, lam: float | None = None) -> dict:
+                           fit_h3h4: bool = True) -> dict:
     """**The recommended way to summarize a recovered LOSVD as (V, sigma,
     h3, h4).** V and sigma come from a smooth-taper direct moment
     (`compute_direct_moments`) -- confirmed to beat `fit_gauss_hermite`'s
@@ -288,50 +233,6 @@ def compute_losvd_moments(v: np.ndarray, b: np.ndarray, core_threshold: float = 
     values (`fit_h3_h4`) rather than a full joint fit -- confirmed to
     lose nothing relative to jointly fitting all 5 parameters.
 
-    `shape_aware_correction` (default False, opt-in): apply
-    `shape_aware_taper_correction` to `vherm`/`sherm` using the h3/h4
-    just estimated. A real, tested improvement for skewed/kurtotic
-    LOSVDs *except* at high sigma (~300+ km/s) where it currently makes
-    things worse -- see that function's own docstring for the numbers
-    and the (not yet understood) reason. Off by default because of that
-    exception, not because the underlying correction is unvalidated. Has
-    no effect on `h3`/`h4` themselves. Ignored if `fit_h3h4=False`
-    (h3=h4=0 has no windowing bias for V/sigma to correct). If enabled
-    and the *recovered* sigma comes back above `_SHAPE_AWARE_UNSAFE_SIGMA`
-    (200 km/s -- conservative, interpolated between the validated-good
-    140 km/s case and the validated-bad 300 km/s case, not itself a
-    directly-tested boundary), this function emits a `UserWarning`
-    recommending the caller re-fit with `shape_aware_correction=False`
-    -- the fit's own output, not just the input configuration, is what
-    determines whether this opt-in helped or hurt, so the check has to
-    happen post-fit, here, where sigma is actually known.
-
-    `regularization_bias_correction` (default False, opt-in): apply
-    `kinextract.bias_correction.correct_moments` to `sherm`/`h4`
-    (applied after `shape_aware_correction`, if both are requested --
-    the two target different, independent mechanisms -- windowing-taper
-    geometry vs. Tikhonov roughness-penalty shrinkage -- but running both
-    together is not itself separately validated; each is individually
-    validated on its own). Requires `snr` (see
-    `kinextract.bias_correction.estimate_snr_whitened`) -- raises
-    `ValueError` if not supplied, since there's no way to look up the
-    right calibration point without it. Corrects `sherm`/`h4` only; `V`
-    and `h3` pass through unchanged (see `bias_correction`'s own module
-    docstring for why). Warns, via `bias_correction`'s own machinery, if
-    `snr`/the recovered `sherm` falls outside the calibration grid's
-    range rather than silently extrapolating. `bias_calibration` lets you
-    pass a specific `BiasCalibration` (e.g. from
-    `load_calibration_table(other_path)`) instead of the default table.
-
-    `lam` (default `None`): this function has no fit context of its own
-    (only the already-recovered curve `b`), so unlike `uncertainty.
-    bootstrap_losvd` it cannot look this up itself -- pass the fit's own
-    `lam` (e.g. `result["lam_used"]`) only if correcting a fit made with
-    *adaptive* regularization against a `PerLamCalibration` (`lam_grid`
-    varied in a `PerLamCalibration`-building sweep). Omit it for this
-    package's fixed `lam=2.0` default -- see `bias_correction.
-    correct_moments`'s own docstring for what happens either way.
-
     Returns a dict with the same keys as `fit_gauss_hermite` (vherm,
     sherm, h3, h4, amp, model, success) so the two are interchangeable,
     including for the diagnostic case of comparing them directly against
@@ -340,13 +241,7 @@ def compute_losvd_moments(v: np.ndarray, b: np.ndarray, core_threshold: float = 
     `success` reflects the h3/h4 fit's own convergence when `fit_h3h4` is
     True (V/sigma are a direct calculation, not an optimization, so they
     can't fail to converge -- only degenerate input, e.g. b<=0
-    everywhere, produces NaN, in which case `success` is False). If
-    `regularization_bias_correction=True`, the dict additionally has
-    `sherm_raw`/`h4_raw` (the pre-correction values) and
-    `sig_uncertainty_inflation`/`h4_uncertainty_inflation` (the
-    calibration's own bias scatter at this point -- add in quadrature to
-    a bootstrap-derived std; `bootstrap_losvd` does this automatically
-    when its own `apply_bias_correction=True`).
+    everywhere, produces NaN, in which case `success` is False).
     """
     direct = compute_direct_moments(v, b, core_threshold=core_threshold)
     vel, sig = direct["vherm"], direct["sherm"]
@@ -357,56 +252,11 @@ def compute_losvd_moments(v: np.ndarray, b: np.ndarray, core_threshold: float = 
     if fit_h3h4:
         h34 = fit_h3_h4(v, b, vel, sig)
         h3, h4, amp, success = h34["h3"], h34["h4"], h34["amp"], h34["success"]
-        if shape_aware_correction:
-            factor, v_shift = shape_aware_taper_correction(vel, sig, h3, h4, core_threshold=core_threshold)
-            sig = sig * factor
-            vel = vel + v_shift
-            if sig > _SHAPE_AWARE_UNSAFE_SIGMA:
-                warnings.warn(
-                    f"compute_losvd_moments: shape_aware_correction=True produced sherm={sig:.1f} "
-                    f"km/s, above the {_SHAPE_AWARE_UNSAFE_SIGMA:.0f} km/s regime where this "
-                    "correction is documented to make sigma *worse*, not better (validated bad at "
-                    "sigma=300; validated good at sigma=140) -- see shape_aware_taper_correction's "
-                    "own docstring. Re-run with shape_aware_correction=False for this fit.",
-                    UserWarning, stacklevel=2,
-                )
     else:
         bpos = np.maximum(np.asarray(b, float), 0.0)
         amp = float(np.trapezoid(bpos, np.asarray(v, float)))
         h3 = h4 = 0.0
         success = True
 
-    extra = {}
-    corrected = False
-    if regularization_bias_correction:
-        if snr is None:
-            raise ValueError(
-                "compute_losvd_moments: regularization_bias_correction=True requires snr "
-                "(see kinextract.bias_correction.estimate_snr_whitened)."
-            )
-        corr = _correct_moments(vel, sig, h4, snr, calibration=bias_calibration, lam=lam)
-        extra = dict(
-            sherm_raw=sig, h4_raw=h4,
-            sig_uncertainty_inflation=corr["sig_uncertainty_inflation"],
-            h4_uncertainty_inflation=corr["h4_uncertainty_inflation"],
-        )
-        sig = corr["sherm_corrected"]
-        h4 = corr["h4_corrected"]
-        corrected = True
-
     model = gauss_hermite_model(np.asarray(v, float), amp, vel, sig, h3, h4)
-    if corrected:
-        # The calibrated correction shifts h4 by an offset chosen to cancel
-        # a population-level bias -- nothing constrains the *shifted* h4 to
-        # stay inside the (h3, h4) region where the truncated Gauss-Hermite
-        # series stays non-negative everywhere (a known property of this
-        # expansion even uncorrected, see `losvd.py`'s own docstring on
-        # h4=-0.1). Clip rather than leave a "density" that goes negative
-        # near the core edges -- matches the convention already used
-        # everywhere else in this package a Gauss-Hermite curve is treated
-        # as a final density (`shape_aware_taper_correction`'s own `b_ref`), just not
-        # previously applied to this specific corrected-model reconstruction.
-        # Not applied to the *uncorrected* branch above -- that pre-existing
-        # behavior is unchanged, out of scope for this fix.
-        model = np.maximum(model, 0.0)
-    return dict(vherm=vel, sherm=sig, h3=h3, h4=h4, amp=amp, model=model, success=success, **extra)
+    return dict(vherm=vel, sherm=sig, h3=h3, h4=h4, amp=amp, model=model, success=success)

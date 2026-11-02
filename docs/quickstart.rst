@@ -4,75 +4,75 @@ Quick start
 .. code-block:: python
 
    import numpy as np
-   from kinextract import FitConfig, build_template_stack, compute_losvd_moments
-   from kinextract.multi_template import fit_losvd
+   from kinextract import FitConfig, build_template_stack, compute_losvd_moments, fit_losvd_robust
 
-   # wave_fit, galaxy, errors: your observed (rest-frame) wavelength grid,
-   # normalized flux, and per-pixel noise, all the same length.
-   # template_wave, templates: a template library's common wavelength grid
-   # and a list of per-template flux arrays (see the E-MILES notebook for
-   # how to build one, or `kinextract.emiles.load_emiles_templates`).
+   # wave_fit, flux, errors: your observed spectrum on its rest-frame wavelength grid, all the same length.
+   # template_wave, templates: a template library's common wavelength grid and a list of per-template flux
+   # arrays (see `kinextract.load_emiles_templates`, or 04_template_calibration.ipynb).
 
-   cfg = FitConfig(vmin=-500.0, vmax=500.0)   # velocity grid bounds, km/s
+   cfg = FitConfig(vmin=-1500.0, vmax=1500.0)   # velocity grid bounds, km/s: about V +- 5-7 sigma
    v_grid = cfg.build_velocity_grid()
    A_stack = build_template_stack(wave_fit, template_wave, templates, v_grid)
 
-   A_stack_w = A_stack / errors[None, :, None]
-   y_w = galaxy / errors
-   result = fit_losvd(A_stack_w, y_w, cfg)
+   fit = fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit)
+   print(f"success: {fit['success']}  lam_used: {fit['lam_used']:.0f}")
 
-   print(f"success: {result['success']}  lam_used: {result['lam_used']:.3g}")
-
-   moments = compute_losvd_moments(v_grid, result["b"])
+   moments = compute_losvd_moments(v_grid, fit["b"])
    print(f"V={moments['vherm']:.1f}  sigma={moments['sherm']:.1f}  "
          f"h3={moments['h3']:.3f}  h4={moments['h4']:.3f}")
 
-Regularization strength (``cfg.lam``) is selected automatically per fit via
-``cfg.lam_selection="aic_local"`` (the default) -- pass
-``FitConfig(lam_selection="fixed", lam=...)`` for a fixed value instead. See
-:meth:`~kinextract.config.FitConfig.describe` (or ``help(FitConfig)``) for
-every tunable field grouped by subsystem, e.g. ``FitConfig.describe("lam")``
-for just the regularization options.
+The defaults are the recipe validated on NGC 4751 MUSE data (``dev_notes/regularization_v2/FINDINGS.md``):
 
-If the spectrum is not already continuum-normalized, either pre-normalize it
-once, or co-fit a shared multiplicative continuum directly
-(:func:`kinextract.fit_losvd_with_continuum`, :mod:`kinextract.continuum`) --
-see ``02_realistic_mock_fit.ipynb``.
+- **Regularization:** ``lam = 4096`` on the third-difference penalty. ``FitConfig.lam_rule='sigma_scaled'`` refits
+  LOSVDs broader than 350 km/s at ``sigma_scaled_lam(sigma) = 4096 (sigma / 350)^6`` (capped at 131072), and refits
+  a fit whose LOSVD is still at the velocity-grid edge at 2x, then a further 4x, its ``lam``. The ``lam`` used is
+  ``fit['lam_used']``; ``FitConfig(lam=..., lam_rule='fixed')`` pins one.
+- **The continuum:** a smooth multiplicative continuum (4 knots) is co-fitted, so ``wave_fit`` is needed;
+  ``FitConfig(continuum_knots=None)`` switches it off for spectra that are exactly continuum-normalized.
+- **Cleaning:** ``fit_losvd_robust`` inflates the errors wherever the residuals call for it (sky-line residuals,
+  bad pixels), with the CaII triplet cores protected from clipping. ``cleaning_method=None`` is a plain fit, a
+  quick check.
 
-Error estimation
------------------
+``fit_losvd`` is the same fit without the cleaning, on already-whitened inputs. See
+:meth:`~kinextract.config.FitConfig.describe` (or ``help(FitConfig)``) for every tunable field grouped by
+subsystem, e.g. ``FitConfig.describe("lam")``.
 
-.. code-block:: python
+Error bands
+-----------
 
-   from kinextract import laplace_losvd_uncertainty
-
-   lap = laplace_losvd_uncertainty(A_stack_w, y_w, cfg)
-   print(f"sigma = {lap['point0']['sherm']:.1f} +/- {lap['sherm_std']:.1f}")
-
-``laplace_losvd_uncertainty`` is the default uncertainty engine -- a
-production-scale coverage sweep across sigma 50-600 km/s found it matches
-or beats parametric-bootstrap coverage in every tested regime, dramatically
-so for h4, at a real speed advantage. ``bootstrap_losvd`` (same call
-pattern, ``n_boot=200, n_jobs=4``) remains available as a cross-check for
-real ensemble properties (empirical skew, multimodality) the Laplace
-approximation can't give.
-
-See ``01_basic_mock_fit.ipynb`` and ``02_realistic_mock_fit.ipynb`` for the
-full worked pattern, including both engines and bias-corrected variants.
-
-Characterizing recovery bias
------------------------------
-
-Regularization biases recovered sigma/h4, worse at low S/N. A
-synthetic-calibrated correction is available
-(:func:`kinextract.correct_moments`) but is opt-in, not the default -- see
-:mod:`kinextract.bias_correction`'s own module docstring for its current
-trust status, and ``04_template_calibration.ipynb`` for building a
-calibration matched to your own template library.
+On real IFU spectra the residuals are dominated by sky-line residuals and template mismatch, not photon noise.
+``losvd_error_bands`` fits a per-pixel variance model for them (``err^2 + (kappa s)^2 + (f model)^2``, with ``s``
+the LSF-blended sky-line spectrum), runs the Laplace posterior with those errors at the fit's ``lam``, and moves
+the draws onto the fit:
 
 .. code-block:: python
 
-   from kinextract import correct_moments, estimate_snr_whitened
+   from kinextract import load_muse_sky_lines, losvd_error_bands, sky_line_profile
 
-   snr = estimate_snr_whitened(model_w)   # model_w: the fit's own best-fit model, whitened units
-   corrected = correct_moments(moments["vherm"], moments["sherm"], moments["h4"], snr)
+   lines = load_muse_sky_lines("MU_GSKL_140101A_sky_lines.fits")       # MUSE pipeline static calibration
+   bands = losvd_error_bands(A_stack, flux, errors, wave_fit, fit, cfg,
+                             sky_profile=sky_line_profile(wave_fit, *lines, z=z))
+   print(f"sigma = {moments['sherm']:.1f} +/- {bands['sherm_err']:.1f}")
+   # bands["b_p16"], bands["b_p84"]: the LOSVD band; bands["b_samples"]: the posterior draws
+
+Pass ``sky_profile=None`` for data without sky residuals. ``losvd_error_bands_parallel`` runs many bins at once.
+For the posterior from the pixel errors alone, use ``laplace_losvd_uncertainty``; for its exact (non-Gaussian)
+form, ``kinextract.nuts_uncertainty.nuts_losvd_uncertainty`` (slow; the ``nuts`` extra).
+
+See ``01_basic_mock_fit.ipynb`` and ``02_realistic_mock_fit.ipynb`` for the worked pattern on mocks, and
+``05_noise_correlation.ipynb`` (Section 8) and ``07_full_galaxy_analysis.ipynb`` for real data.
+
+Inputs for SCO Schwarzschild models
+-----------------------------------
+
+``kinextract.legacy_io.write_spmc_in_laplace`` writes the ``spmc_in`` files SCO's ``model.x`` reads, from the bands.
+With ``b_samples=`` and ``model_bins=`` each 300 km/s model velocity bin carries at least its binned posterior
+scatter (``model.x`` sums per-point errors linearly, which understates it):
+
+.. code-block:: python
+
+   from kinextract.legacy_io import write_spmc_in_laplace
+
+   write_spmc_in_laplace("bin0105", v_grid - v_sys, bands["b_median"], bands["b_p16"], bands["b_p84"], "spmc/",
+                         vmax_out=1950.0, b_samples=bands["b_samples"],
+                         model_bins=(np.linspace(-1800, 1800, 13), 150.0))

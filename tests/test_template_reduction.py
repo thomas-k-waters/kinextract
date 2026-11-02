@@ -64,14 +64,7 @@ def _make_bin_specs(n_bins=3, snr=80.0, seed=0):
     true_w = np.array([0.6, 0.4])
 
     sig = 100.0
-    # penalty_order=2 pinned deliberately (2026-07, Stage 22): this fixed
-    # lam=2.0 is calibrated for the order-2 penalty specifically -- under the
-    # new order-3 default the same lam is essentially unregularized (per
-    # FitConfig's own warning), which changes NNLS weight recovery enough to
-    # break this test's "decoys get dropped" premise. Template-reduction
-    # logic itself doesn't depend on penalty order; pin the regime these
-    # tests were validated against.
-    cfg = FitConfig(vmin=-7 * sig, vmax=7 * sig, lam_selection="fixed", lam=2.0, penalty_order=2)
+    cfg = FitConfig(vmin=-7 * sig, vmax=7 * sig, lam_rule="fixed", continuum_knots=None)
     v_grid = cfg.build_velocity_grid()
     b_truth, _ = build_spline_truth(v_grid, vel=0.0, sigma=sig, wiggle_scale=0.0, seed=0)
 

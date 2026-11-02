@@ -177,7 +177,7 @@ def plot_bin_map(ax, bin_table, bins, values_by_bin_id, center_pix, pa_deg, pixe
     figure.
 
     A bin whose value is NaN (a failed fit -- see `cleaning._failed_fit_result`)
-    renders as plain grey (`set_bad`), not a color implying a real
+    renders as plain gray (`set_bad`), not a color implying a real
     measurement. Angular grid spokes and the kinematic-major-axis marker
     line are only drawn when there's more than one angular bin
     (`bins.n_angular > 1`) -- a single full-circle bin per annulus has no
@@ -213,7 +213,7 @@ def plot_bin_map(ax, bin_table, bins, values_by_bin_id, center_pix, pa_deg, pixe
         vmax = np.nanmax(np.abs(vals_present)) if cmap == "RdBu_r" else np.nanmax(vals_present)
     norm = plt.Normalize(vmin=vmin, vmax=vmax)
     cmap_obj = plt.get_cmap(cmap)
-    cmap_obj.set_bad("grey")
+    cmap_obj.set_bad("gray")
 
     for row in bin_table:
         bid = row["bin_id"]

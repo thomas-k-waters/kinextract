@@ -1,11 +1,7 @@
 """Tests for kinextract.robust_fit.fit_losvd_robust -- see that module's
-own docstring for what each `cleaning_method` mode does and its real-data
-validation record. Consolidates what were previously separate
-`test_cleaning.py` (`fit_losvd_clean`) and `test_variance_inflation.py`
-(`fit_losvd_inflate`) test files, now that both are one function with a
-`cleaning_method` parameter -- parametrized over `cleaning_method` wherever the two
-modes make the same underlying claim, kept as separate mode-specific
-tests where they don't.
+own docstring for the inflate cleaning and its real-data validation
+record. Parametrized over `cleaning_method` (`"inflate"`, the default, and
+`None`, a plain fit) wherever the two make the same claim.
 """
 from __future__ import annotations
 
@@ -63,7 +59,7 @@ def _mock_case(vel=0.0, sig=140.0, snr=100.0, seed=0, n_templates=1, continuum_k
     return A_stack, flux, errors, wave_fit, cfg, v_grid, sig
 
 
-@pytest.mark.parametrize("cleaning_method", ["clip", "inflate"])
+@pytest.mark.parametrize("cleaning_method", [None, "inflate"])
 def test_runs_and_produces_sane_output_with_the_expected_extra_fields(cleaning_method):
     A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(seed=0)
     result = fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit, cleaning_method=cleaning_method)
@@ -71,25 +67,49 @@ def test_runs_and_produces_sane_output_with_the_expected_extra_fields(cleaning_m
     assert "clipped_mask" in result and result["clipped_mask"].shape == wave_fit.shape
     assert result["clipped_mask"].dtype == bool
     assert result["n_clipped"] == int(result["clipped_mask"].sum())
-    if cleaning_method == "inflate":
-        assert "inflation_factor" in result and result["inflation_factor"].shape == wave_fit.shape
-        assert "errors_inflated" in result and result["errors_inflated"].shape == errors.shape
+    assert result["inflation_factor"].shape == wave_fit.shape
+    assert result["errors_inflated"].shape == errors.shape
+    if cleaning_method is None:
+        assert result["n_iterations"] == 0
+
+
+@pytest.mark.parametrize("max_iter", [1, 2, 3])
+def test_clipped_mask_is_exactly_the_pixel_set_the_returned_fit_excluded(max_iter):
+    """Regression (2026-10-15): when the last allowed iteration still flagged new
+    outliers, they used to be added to `clipped_mask` without a refit, so the
+    returned `b` had been fit WITH pixels its own mask called clipped. Refitting on
+    `~clipped_mask` must now reproduce the returned fit exactly, at any max_iter."""
+    from kinextract.cleaning import _fit_losvd_clip
+    A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(seed=4)
+    flux = flux.copy()
+    flux[[20, 120, 220]] += 40.0 * errors[0]   # obvious outliers, flagged on iteration 1
+    A_stack_w, y_w, _ = whiten(A_stack, flux, errors, rho=0.0)
+    res = _fit_losvd_clip(A_stack_w, y_w, cfg, clip_sigma=3.0, max_iter=max_iter, wave_fit=wave_fit)
+    keep = ~res["clipped_mask"]
+    refit = fit_losvd(A_stack_w[:, keep, :], y_w[keep], cfg, wave_fit=wave_fit[keep])
+    np.testing.assert_allclose(refit["b"], res["b"], rtol=1e-8, atol=1e-12)
+    assert res["n_clipped"] == int(res["clipped_mask"].sum())
+    assert res["clip_converged"] == (res["n_flagged_not_refit"] == 0)
+    if max_iter == 1:
+        # one fit, no refit: nothing was actually excluded, the spikes are only flagged
+        assert res["n_clipped"] == 0 and res["n_flagged_not_refit"] >= 3
+        assert not res["clip_converged"]
     else:
-        assert 1 <= result["n_iterations"] <= 3
+        assert np.all(res["clipped_mask"][[20, 120, 220]])
 
 
-def test_plain_fit_has_no_clip_inflate_fields_but_the_same_common_ones():
+def test_plain_fit_clips_and_inflates_nothing():
     A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(seed=0)
     result = fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit, cleaning_method=None)
     assert result["n_clipped"] == 0 and result["n_iterations"] == 0
     assert not np.any(result["clipped_mask"])
-    assert "inflation_factor" not in result
+    assert np.all(result["inflation_factor"] == 1.0) and np.array_equal(result["errors_inflated"], errors)
 
 
 def test_invalid_cleaning_method_raises_a_clear_error():
     A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(seed=0)
     with pytest.raises(ValueError, match="cleaning_method"):
-        fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit, cleaning_method="bogus")
+        fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit, cleaning_method="clip")
 
 
 def test_inflate_without_wave_fit_raises_a_clear_error():
@@ -98,29 +118,12 @@ def test_inflate_without_wave_fit_raises_a_clear_error():
         fit_losvd_robust(A_stack, flux, errors, cfg, cleaning_method="inflate")
 
 
-def test_clean_data_gets_barely_clipped_and_matches_a_plain_fit():
-    """On genuinely clean (Gaussian-noise-only) data, sigma-clipping at
-    the conventional 3-sigma threshold should clip a tiny, statistically
-    expected fraction of pixels and barely change the result."""
-    A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(seed=1)
-    A_stack_w, y_w, _ = whiten(A_stack, flux, errors, rho=cfg.rho)
-    plain = fit_losvd(A_stack_w, y_w, cfg)
-    cleaned = fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit, cleaning_method="clip")
-
-    assert cleaned["n_clipped"] <= max(3, int(0.02 * len(wave_fit))), (
-        f"expected only a handful of pixels clipped on clean data, got {cleaned['n_clipped']}"
-    )
-    m_plain = compute_losvd_moments(v_grid, plain["b"])
-    m_cleaned = compute_losvd_moments(v_grid, cleaned["b"])
-    assert abs(m_plain["sherm"] - m_cleaned["sherm"]) < 3.0
-
-
 def test_clean_data_is_barely_inflated_and_matches_a_plain_clean_fit():
     """On genuinely clean data, the whitened residual is already ~N(0,1)
     almost everywhere, so the local inflation factor should sit near its
-    1.0 floor and the result should be close to a plain clip-mode fit."""
+    1.0 floor and the result should be close to a plain fit."""
     A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(seed=2)
-    plain = fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit, cleaning_method="clip", robust_scale=True)
+    plain = fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit, cleaning_method=None)
     inflated = fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit, cleaning_method="inflate")
 
     assert np.median(inflated["inflation_factor"]) < 1.5, (
@@ -130,46 +133,6 @@ def test_clean_data_is_barely_inflated_and_matches_a_plain_clean_fit():
     m_plain = compute_losvd_moments(v_grid, plain["b"])
     m_inflated = compute_losvd_moments(v_grid, inflated["b"])
     assert abs(m_plain["sherm"] - m_inflated["sherm"]) < 5.0
-
-
-@pytest.mark.parametrize("n_templates", [1, 3])
-def test_localized_contaminant_is_identified_and_clipped(n_templates):
-    """The actual motivating scenario: a cluster of severely deviant
-    pixels (mimicking an unmodeled sky-subtraction residual or cosmic
-    ray) get correctly flagged and excluded, and the cleaned fit is
-    dramatically closer to truth than the uncleaned one on average.
-
-    Uses S/N=30 (not the module default 100) and a 10-pixel-wide
-    contaminant: a heavily curvature-regularized fit is already fairly
-    robust to a tiny contaminant at high S/N, so this uses a scenario
-    that actually threatens fit accuracy.
-    """
-    _, _, _, wave_fit0, cfg, v_grid, true_sig = _mock_case(sig=140.0, snr=30.0, seed=0, n_templates=n_templates)
-    contaminated_idx = np.zeros(len(wave_fit0), dtype=bool)
-    contaminated_idx[50:60] = True  # 10 pixels, arbitrary location
-
-    uncleaned_errs, cleaned_errs, all_clipped = [], [], True
-    for seed in range(8 if n_templates == 1 else 5):
-        A_stack, flux, errors, wave_fit, _, _, _ = _mock_case(sig=140.0, snr=30.0, seed=seed, n_templates=n_templates)
-        flux_contaminated = flux.copy()
-        flux_contaminated[contaminated_idx] += 50.0 * errors[contaminated_idx]
-
-        A_stack_w, y_w, _ = whiten(A_stack, flux_contaminated, errors, rho=cfg.rho)
-        uncleaned = fit_losvd(A_stack_w, y_w, cfg)
-        cleaned = fit_losvd_robust(A_stack, flux_contaminated, errors, cfg, wave_fit=wave_fit,
-                                    cleaning_method="clip", clip_sigma=3.0)
-        all_clipped &= bool(np.all(cleaned["clipped_mask"][contaminated_idx]))
-
-        uncleaned_errs.append(abs(compute_losvd_moments(v_grid, uncleaned["b"])["sherm"] - true_sig))
-        cleaned_errs.append(abs(compute_losvd_moments(v_grid, cleaned["b"])["sherm"] - true_sig))
-
-    assert all_clipped, "the injected outlier pixels should be clipped in every seed"
-    mean_uncleaned, mean_cleaned = np.mean(uncleaned_errs), np.mean(cleaned_errs)
-    threshold = mean_uncleaned / 2 if n_templates == 1 else mean_uncleaned
-    assert mean_cleaned < threshold, (
-        f"cleaning should substantially improve mean accuracy on this contaminated case "
-        f"(n_templates={n_templates}), got uncleaned={mean_uncleaned:.2f} cleaned={mean_cleaned:.2f}"
-    )
 
 
 def test_localized_contaminant_produces_localized_capped_inflation():
@@ -234,30 +197,6 @@ def test_a_severe_localized_contaminant_is_far_better_calibrated_than_an_unclipp
     assert rms_inflated < 2.0
 
 
-def test_excluded_wavelength_windows_protect_a_contaminant_inside_them_clip():
-    """A severe outlier landing inside a protected window must survive
-    every iteration regardless of `clip_sigma`, while an equally severe
-    outlier outside any protected window is clipped normally."""
-    A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(sig=140.0, snr=30.0, seed=0)
-    protected_idx = np.argmin(np.abs(wave_fit - CAII_TRIPLET_CENTERS_A[0]))
-    unprotected_idx = np.argmin(np.abs(wave_fit - 8600.0))  # between the 2nd/3rd CaII lines
-
-    flux_contaminated = flux.copy()
-    flux_contaminated[protected_idx] += 50.0 * errors[protected_idx]
-    flux_contaminated[unprotected_idx] += 50.0 * errors[unprotected_idx]
-
-    windows = tuple((c - 8.0, c + 8.0) for c in CAII_TRIPLET_CENTERS_A)
-    result = fit_losvd_robust(A_stack, flux_contaminated, errors, cfg, wave_fit=wave_fit,
-                               cleaning_method="clip", clip_sigma=3.0, excluded_wavelength_windows=windows)
-
-    assert not result["clipped_mask"][protected_idx], (
-        "a contaminant inside an excluded window must never be clipped"
-    )
-    assert result["clipped_mask"][unprotected_idx], (
-        "a contaminant outside any excluded window should still be clipped normally"
-    )
-
-
 def test_excluded_wavelength_windows_protects_a_narrow_line_core_from_the_cleanup_clip_inflate():
     """The motivating real-data bug (dev_notes/real_data_sigma/FINDINGS.md):
     `compute_local_inflation`'s own median-filtered local scale is
@@ -267,13 +206,14 @@ def test_excluded_wavelength_windows_protects_a_narrow_line_core_from_the_cleanu
     preliminary nor the final cleanup clip can tell that apart from a
     cosmic ray, and removes it. Confirm directly: an injected single-pixel
     deficit at a CaII center is clipped without `excluded_wavelength_windows`,
-    and survives with it."""
+    and survives with it -- and with the default (`CAII_PROTECTED_WINDOWS`)."""
     A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(sig=140.0, snr=60.0, seed=3)
     ca_idx = int(np.argmin(np.abs(wave_fit - CA_CENTERS[0])))
     flux_deficit = flux.copy()
     flux_deficit[ca_idx] -= 20.0 * errors[ca_idx]  # a narrow, severe single-pixel deviation
 
-    unprotected = fit_losvd_robust(A_stack, flux_deficit, errors, cfg, wave_fit=wave_fit, cleaning_method="inflate")
+    unprotected = fit_losvd_robust(A_stack, flux_deficit, errors, cfg, wave_fit=wave_fit, cleaning_method="inflate",
+                                   excluded_wavelength_windows=None)
     assert unprotected["clipped_mask"][ca_idx], (
         "sanity check: an unprotected 20-sigma single-pixel deficit at a CaII center "
         "should be clipped by the loose cleanup pass"
@@ -286,87 +226,11 @@ def test_excluded_wavelength_windows_protects_a_narrow_line_core_from_the_cleanu
         "excluded_wavelength_windows should keep the CaII-center pixel in the fit "
         "regardless of its residual size"
     )
+    default = fit_losvd_robust(A_stack, flux_deficit, errors, cfg, wave_fit=wave_fit)
+    assert not default["clipped_mask"][ca_idx]
 
 
-def test_excluded_wavelength_windows_without_wave_fit_raises_a_clear_error():
-    A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(seed=0)
-    with pytest.raises(ValueError, match="wave_fit"):
-        fit_losvd_robust(A_stack, flux, errors, cfg, cleaning_method="clip",
-                          excluded_wavelength_windows=((8490.0, 8506.0),))
-
-
-def test_max_clip_fraction_warns_on_a_large_systematic_mismatch():
-    """A wildly wrong velocity grid (mimicking a large redshift error or
-    similar systematic mismatch) should clip a large fraction of pixels
-    and trigger the sanity warning -- distinguishing "a few bad pixels"
-    from "something fundamental is wrong," which iterative clipping alone
-    cannot fix and shouldn't be allowed to quietly paper over.
-    """
-    A_stack, flux, errors, wave_fit, cfg, v_grid, true_sig = _mock_case(seed=3)
-    rng = np.random.default_rng(4)
-    flux_bad = flux.copy()
-    bad_idx = rng.choice(len(flux), size=int(0.5 * len(flux)), replace=False)
-    flux_bad[bad_idx] += rng.normal(0.0, 20.0, len(bad_idx)) * errors[bad_idx]
-
-    with warnings.catch_warnings(record=True) as w:
-        warnings.simplefilter("always")
-        result = fit_losvd_robust(A_stack, flux_bad, errors, cfg, wave_fit=wave_fit,
-                                   cleaning_method="clip", max_clip_fraction=0.1)
-        assert any("above the" in str(x.message) and "sanity threshold" in str(x.message) for x in w)
-    assert result["n_clipped"] / len(wave_fit) > 0.1
-
-
-class TestRobustScale:
-    """`robust_scale=True` (`"clip"` mode only) -- found necessary on real
-    MUSE data where the default (raw whitened residual, assuming a
-    correctly-calibrated noise vector) clipped 90%+ of pixels and
-    collapsed to a biased, unconstrained baseline, because real chi2_red
-    there runs 11-28: a nominal 3-sigma cut was actually well under 1
-    true sigma almost everywhere, not just at the genuine contamination.
-    """
-
-    def test_matches_plain_on_well_calibrated_noise(self):
-        A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(seed=2)
-        plain = fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit,
-                                  cleaning_method="clip", robust_scale=False)
-        robust = fit_losvd_robust(A_stack, flux, errors, cfg, wave_fit=wave_fit,
-                                   cleaning_method="clip", robust_scale=True)
-        assert abs(plain["n_clipped"] - robust["n_clipped"]) <= 3
-
-    def test_avoids_runaway_under_global_noise_miscalibration(self):
-        """The actual motivating failure mode: the whole spectrum's noise
-        is under-estimated (not a few localized bad pixels), mimicking
-        real chi2_red >> 1."""
-        A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(seed=3, snr=100.0)
-        rng = np.random.default_rng(3)
-        flux_mismatched = flux + rng.normal(0.0, 4.0, len(flux)) * errors  # uniform excess noise
-
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            # robust_scale=False explicitly -- reproduces the naive behavior this test
-            # exists to contrast against, now that robust_scale=True is the default.
-            plain = fit_losvd_robust(A_stack, flux_mismatched, errors, cfg, wave_fit=wave_fit,
-                                      cleaning_method="clip", robust_scale=False)  # default max_clip_fraction=0.1
-            assert any("sanity threshold" in str(x.message) for x in w)
-        robust = fit_losvd_robust(A_stack, flux_mismatched, errors, cfg, wave_fit=wave_fit,
-                                   cleaning_method="clip", robust_scale=True, max_clip_fraction=0.9)
-
-        assert plain["n_clipped"] > 0.3 * len(wave_fit)
-        assert robust["n_clipped"] < 0.05 * len(wave_fit)
-
-    def test_still_catches_a_real_localized_contaminant_when_robust(self):
-        A_stack, flux, errors, wave_fit, cfg, v_grid, true_sig = _mock_case(sig=140.0, snr=30.0, seed=0)
-        contaminated_idx = np.zeros(len(wave_fit), dtype=bool)
-        contaminated_idx[50:60] = True
-        flux_contaminated = flux.copy()
-        flux_contaminated[contaminated_idx] += 50.0 * errors[contaminated_idx]
-
-        robust = fit_losvd_robust(A_stack, flux_contaminated, errors, cfg, wave_fit=wave_fit,
-                                   cleaning_method="clip", robust_scale=True)
-        assert np.all(robust["clipped_mask"][contaminated_idx])
-
-
-@pytest.mark.parametrize("cleaning_method", ["clip", "inflate"])
+@pytest.mark.parametrize("cleaning_method", [None, "inflate"])
 def test_continuum_knots_can_be_combined_with_cleaning_method(cleaning_method):
     """Confirms continuum-cofitting runs end to end under both cleaning_method
     modes and returns a sane, near-flat continuum for this mock's true
@@ -383,7 +247,7 @@ def test_continuum_knots_can_be_combined_with_cleaning_method(cleaning_method):
 def test_continuum_knots_without_wave_fit_raises_a_clear_error():
     A_stack, flux, errors, wave_fit, cfg, v_grid, sig = _mock_case(seed=0, continuum_knots=4)
     with pytest.raises(ValueError, match="wave_fit"):
-        fit_losvd_robust(A_stack, flux, errors, cfg, cleaning_method="clip")
+        fit_losvd_robust(A_stack, flux, errors, cfg, cleaning_method=None)
 
 
 def test_reconstruct_continuum_returns_scalar_one_without_continuum_knots():
@@ -428,14 +292,13 @@ class TestFitLosvdRobustParallel:
     """`fit_losvd_robust_parallel`'s own core promise: fitting bins across
     worker processes must be bit-identical to fitting them one at a time
     in a serial loop -- pure wall-clock orchestration, zero accuracy cost.
-    Parametrized over `cleaning_method`, mirroring the two previously-separate
-    parallel test classes."""
+    Parametrized over `cleaning_method`."""
 
     @staticmethod
     def _bins():
         return [_mock_case(sig=s, seed=seed) for s, seed in [(80.0, 0), (140.0, 1), (60.0, 2)]]
 
-    @pytest.mark.parametrize("cleaning_method", ["clip", "inflate"])
+    @pytest.mark.parametrize("cleaning_method", [None, "inflate"])
     def test_n_jobs_1_matches_a_serial_loop(self, cleaning_method):
         bins = self._bins()
         A_stack_list = [b[0] for b in bins]
@@ -444,7 +307,7 @@ class TestFitLosvdRobustParallel:
         wave_fit_list = [b[3] for b in bins]
         cfg_list = [b[4] for b in bins]
 
-        kwargs = dict(cleaning_method=cleaning_method, robust_scale=True) if cleaning_method == "clip" else dict(cleaning_method=cleaning_method)
+        kwargs = dict(cleaning_method=cleaning_method)
         serial = [fit_losvd_robust(A, f, e, cfg, wave_fit=w, **kwargs)
                   for A, f, e, w, cfg in zip(A_stack_list, flux_list, errors_list, wave_fit_list, cfg_list)]
         parallel = fit_losvd_robust_parallel(A_stack_list, flux_list, errors_list, cfg_list,
@@ -456,7 +319,7 @@ class TestFitLosvdRobustParallel:
             np.testing.assert_array_equal(s["clipped_mask"], p["clipped_mask"])
             assert s["n_clipped"] == p["n_clipped"]
 
-    @pytest.mark.parametrize("cleaning_method", ["clip", "inflate"])
+    @pytest.mark.parametrize("cleaning_method", [None, "inflate"])
     def test_a_real_process_pool_is_bit_identical_to_serial(self, cleaning_method):
         """The "serial" reference is run through a single-worker
         `ProcessPoolExecutor` (`conftest.run_jobs_in_one_worker_process`),
@@ -464,7 +327,7 @@ class TestFitLosvdRobustParallel:
         against a different JAX/XLA process state (already-initialized,
         multi-threaded) than what a real `n_jobs=2` worker sees (freshly
         spawned, single-threaded) -- a real few-ULP difference that this
-        iterative clip/inflate fit can occasionally amplify, through a
+        iterative inflate fit can occasionally amplify, through a
         sigma-clip threshold crossing, into a large, run-dependent
         mismatch unrelated to what this test exists to catch (dispatch/
         ordering bugs). With both sides run through matching fresh worker
@@ -476,7 +339,7 @@ class TestFitLosvdRobustParallel:
         wave_fit_list = [b[3] for b in bins]
         cfg_list = [b[4] for b in bins]
 
-        kwargs = dict(cleaning_method=cleaning_method, robust_scale=True) if cleaning_method == "clip" else dict(cleaning_method=cleaning_method)
+        kwargs = dict(cleaning_method=cleaning_method)
         jobs = [(A, f, e, cfg, w, kwargs)
                 for A, f, e, w, cfg in zip(A_stack_list, flux_list, errors_list, wave_fit_list, cfg_list)]
         serial = run_jobs_in_one_worker_process(_fit_losvd_robust_worker, jobs)
@@ -509,11 +372,10 @@ def test_fit_losvd_robust_raises_a_clear_error_when_too_few_pixels_survive():
     tiny = max(1, n_coef - 5)
     with pytest.raises(RuntimeError, match="pixels survived clipping"):
         fit_losvd_robust(A_stack[:, :tiny, :], flux[:tiny], errors[:tiny], cfg,
-                          wave_fit=wave_fit[:tiny], cleaning_method="clip")
+                          wave_fit=wave_fit[:tiny], cleaning_method="inflate")
 
 
-@pytest.mark.parametrize("cleaning_method", ["clip", "inflate"])
-def test_fit_losvd_robust_parallel_returns_a_failed_result_instead_of_crashing_the_batch(cleaning_method):
+def test_fit_losvd_robust_parallel_returns_a_failed_result_instead_of_crashing_the_batch():
     """A per-bin failure (here: too few pixels, matching the guard above)
     must produce a NaN-filled, success=False result for that one bin, not
     crash the entire parallel batch -- confirms fit_losvd_robust_parallel's
@@ -531,7 +393,7 @@ def test_fit_losvd_robust_parallel_returns_a_failed_result_instead_of_crashing_t
     with pytest.warns(UserWarning, match="returning a NaN-filled"):
         results = fit_losvd_robust_parallel(
             [A_stack_good, A_stack_bad], [flux_good, flux_bad], [errors_good, errors_bad], cfg,
-            wave_fit_list=[wave_fit_good, wave_fit_bad], n_jobs=1, cleaning_method=cleaning_method)
+            wave_fit_list=[wave_fit_good, wave_fit_bad], n_jobs=1)
 
     assert results[0]["success"] is True
     assert np.all(np.isfinite(results[0]["b"]))

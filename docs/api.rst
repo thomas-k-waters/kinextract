@@ -15,6 +15,13 @@ Configuration
    :nosignatures:
 
    kinextract.FitConfig
+   kinextract.sigma_scaled_lam
+   kinextract.PENALTY_ORDER
+
+The defaults are the recipe validated on NGC 4751 MUSE data: ``lam = 4096`` on the order-3 (third-difference)
+penalty, a co-fitted continuum (4 knots), and ``lam_rule='sigma_scaled'``, which refits LOSVDs broader than
+350 km/s at ``sigma_scaled_lam(sigma) = 4096 (sigma / 350)^6`` (capped at 131072) and retries fits still at the
+velocity-grid edge at a larger ``lam``.
 
 Core LOSVD fitter
 -----------------
@@ -28,8 +35,7 @@ Core LOSVD fitter
    kinextract.difference_matrix
    kinextract.default_initial_coeffs
    kinextract.fit_log_spline_map
-   kinextract.tapered_lam_vector
-   kinextract.penalty_row_velocities
+   kinextract.edge_amplitude_frac
 
 Forward model
 -------------
@@ -55,7 +61,6 @@ Gauss-Hermite moments
    kinextract.compute_direct_moments
    kinextract.fit_h3_h4
    kinextract.compute_losvd_moments
-   kinextract.shape_aware_taper_correction
 
 Multi-template fitting (main entry point)
 ------------------------------------------
@@ -67,57 +72,49 @@ Multi-template fitting (main entry point)
    kinextract.fit_losvd
    kinextract.fit_losvd_basis
    kinextract.fit_losvd_parallel
+   kinextract.with_lam_rule
 
-Uncertainty (Laplace/curvature approximation)
-------------------------------------------------
+Uncertainty
+-----------
 
-The default uncertainty engine, as of a production-scale coverage
-validation across sigma 90-600 km/s: matches or beats bootstrap's own
-coverage in every tested regime (dramatically so for h4) at a real speed
-advantage. ``quick_laplace_uncertainty`` is a cheaper single-lam mode;
-the ``_parallel`` variant fits many bins at once, matching
-``bootstrap_losvd_parallel``'s own convention.
+The Laplace (curvature) approximation to the posterior at the fit's own ``lam``, jointly over the LOSVD and continuum
+coefficients. ``losvd_error_bands`` is the recipe for real IFU data: the sky-line + template-mismatch noise model
+(below), Laplace with those errors at the fit's ``lam`` and ``rho`` without its clipped pixels, and the draws moved
+onto the fit with ``recenter_samples``; ``losvd_error_bands_parallel`` runs it over many bins.
 
 .. autosummary::
    :toctree: generated
    :nosignatures:
 
+   kinextract.losvd_error_bands
+   kinextract.losvd_error_bands_parallel
    kinextract.laplace_losvd_uncertainty
    kinextract.laplace_losvd_uncertainty_parallel
-   kinextract.quick_laplace_uncertainty
    kinextract.laplace_covariance_at_lam
    kinextract.laplace_covariance_at_lam_with_continuum
-   kinextract.laplace_continuum_uncertainty
+   kinextract.recenter_samples
 
 A NUTS/NumPyro reference mode also exists
 (:mod:`kinextract.nuts_uncertainty`, ``nuts_losvd_uncertainty`` -- install
-the optional ``nuts`` extra) for simulation-based-calibration spot-checks
-against the Laplace approximation, not everyday use -- deliberately kept
-out of the top-level ``kinextract`` namespace so the ``numpyro`` dependency
-stays genuinely optional; import it directly from its own submodule.
+the optional ``nuts`` extra): it samples the exact posterior instead of its
+Gaussian approximation, much more slowly, for spot-checks of the Laplace
+bands. It is kept out of the top-level ``kinextract`` namespace so the
+``numpyro`` dependency stays optional; import it from its own submodule.
 
-Uncertainty (parametric bootstrap)
-------------------------------------
-
-Available as a cross-check for real ensemble properties (empirical skew,
-multimodality) the Laplace approximation can't give.
+Robust fitting, cleaning and emission-line masking
+-----------------------------------------------------
 
 .. autosummary::
    :toctree: generated
    :nosignatures:
 
-   kinextract.bootstrap_losvd
-   kinextract.bootstrap_losvd_parallel
-   kinextract.calibrate_noise_scale
-
-Cleaning and emission-line masking
--------------------------------------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.fit_losvd_clean
+   kinextract.fit_losvd_robust
+   kinextract.fit_losvd_robust_parallel
+   kinextract.compute_local_inflation
+   kinextract.full_pixel_model
+   kinextract.reconstruct_continuum
+   kinextract.compute_fit_rms
+   kinextract.CAII_PROTECTED_WINDOWS
    kinextract.detect_emission_lines
    kinextract.DEFAULT_CAT_EMISSION_LINES
    kinextract.detect_emission_from_residual
@@ -130,44 +127,9 @@ Continuum-cofitting
    :nosignatures:
 
    kinextract.fit_continuum_block
-   kinextract.fit_losvd_with_continuum
 
-Regularization-bias correction
----------------------------------
-
-Synthetic-calibrated (Pinkney et al. 2003-style) correction for
-regularization/shrinkage bias in recovered sigma/h4 -- opt-in, not the
-default (see :mod:`kinextract.bias_correction`'s own module docstring for
-current trust status).
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.BiasCalibration
-   kinextract.PerLamCalibration
-   kinextract.load_calibration_table
-   kinextract.load_per_lam_calibration_table
-   kinextract.estimate_snr_whitened
-   kinextract.correct_moments
-   kinextract.correct_losvd
-   kinextract.calibration_has_lam_axis
-   kinextract.get_default_lam_axis_calibration
-   kinextract.run_calibration_sweep
-   kinextract.save_calibration_table
-
-Ablation / diagnostic sweeps
--------------------------------
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.AblationConfig
-   kinextract.fit_one
-   kinextract.run_ablation_sweep
-   kinextract.save_ablation_table
-   kinextract.load_ablation_table
+Continuum co-fitting is switched on with ``FitConfig.continuum_knots``; every fitting entry point
+(``fit_losvd``, ``fit_losvd_robust``, the Laplace engines) then fits the shared multiplicative continuum jointly.
 
 Line-spread-function (LSF) matching
 --------------------------------------
@@ -181,22 +143,6 @@ Line-spread-function (LSF) matching
    kinextract.variable_gaussian_convolve
    kinextract.match_gaussian_lsf
 
-Adaptive regularization-strength selection
----------------------------------------------
-
-Lipka & Thomas (2021)/Thomas & Lipka (2022)-style bootstrap-estimated
-generalized AIC, as an alternative to a fixed ``cfg.lam``.
-
-.. autosummary::
-   :toctree: generated
-   :nosignatures:
-
-   kinextract.AICSelectionResult
-   kinextract.estimate_m_eff
-   kinextract.select_lambda_aic
-   kinextract.estimate_m_eff_local
-   kinextract.select_lambda_aic_local
-
 Correlated-noise (AR(1)) whitening
 ------------------------------------
 
@@ -207,6 +153,24 @@ Correlated-noise (AR(1)) whitening
    kinextract.build_ar1_covariance
    kinextract.whiten
    kinextract.estimate_correlation_length
+   kinextract.measure_and_whiten
+
+Systematic residuals: sky lines and template mismatch
+--------------------------------------------------------
+
+A per-pixel variance model ``err^2 + (kappa * s)^2 + (f * model)^2`` for the residual systematics of real IFU
+spectra (``s`` = the LSF-blended sky-line spectrum), fitted to the residuals of a preliminary fit. Use it for the
+uncertainty bands, not the fit -- :func:`kinextract.losvd_error_bands` does this. See ``05_noise_correlation.ipynb``,
+Section 8.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.sky_line_profile
+   kinextract.load_muse_sky_lines
+   kinextract.fit_noise_model
+   kinextract.noise_model_errors
 
 E-MILES SSP templates
 ------------------------
@@ -231,6 +195,10 @@ IFU cube I/O
    kinextract.extract_aperture_spectrum
    kinextract.load_muse_cube
    kinextract.save_muse_cube_fits
+   kinextract.trim_cube_wavelength_fits
+   kinextract.combine_bin_spectrum_robust
+   kinextract.spatial_correlation_inflation
+   kinextract.BACON2017_VARIANCE_CORRECTION_FACTOR
    kinextract.build_mock_cube
 
 Spatial binning
@@ -250,6 +218,7 @@ toolchain rather than just a resembling scheme.
    kinextract.DartboardBins
    kinextract.log_radial_edges
    kinextract.linear_radial_edges
+   kinextract.pixel_aware_radial_edges
    kinextract.uniform_theta_edges
    kinextract.build_reflected_sin_theta_edges
    kinextract.assign_spaxels_to_bins
@@ -284,3 +253,25 @@ produces, for handing kinextract's output to that downstream toolchain
    :nosignatures:
 
    kinextract.write_fit_outputs
+
+``spmc_in`` files for the SCO Schwarzschild models (``model.x``), written directly from Laplace or NUTS
+percentiles. With ``b_samples=`` and ``model_bins=`` the errors in each dynamical-model velocity bin are widened to at
+least the binned posterior scatter: ``model.x`` sums per-point errors linearly over a bin, which understates it.
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.legacy_io.write_spmc_in_laplace
+   kinextract.legacy_io.transvd_bounds_laplace
+   kinextract.legacy_io.spmc_side_inverts
+
+Plotting
+--------
+
+.. autosummary::
+   :toctree: generated
+   :nosignatures:
+
+   kinextract.plot_bin_map
+   kinextract.plot_moment_maps

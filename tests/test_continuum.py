@@ -19,16 +19,13 @@ from __future__ import annotations
 import numpy as np
 
 from kinextract import (
-    FitConfig, build_template_stack, build_spline_truth, compute_losvd_moments,
+    PENALTY_ORDER, FitConfig, build_template_stack, build_spline_truth, compute_losvd_moments,
     build_bspline_basis, difference_matrix, fit_losvd_basis,
 )
 from kinextract.continuum import fit_continuum_block
 
-# fit_losvd_with_continuum was folded into fit_losvd_basis directly (its own
-# continuum_basis/D2_c parameters) -- this reproduces exactly what that removed
-# wrapper did internally, so these tests exercise the same basis/D2/max_iter as
-# before, not fit_losvd(cfg)'s own bare defaults (which would use cfg.penalty_order,
-# not the order=2 D2 these tests build by hand below via _setup).
+# The continuum block driven through fit_losvd_basis directly (its own continuum_basis/D2_c parameters), with the
+# package's order-3 LOSVD penalty built by hand in _setup, at a fixed lam (cfg.lam, 4096).
 def _fit_with_continuum(A_stack_w, y_w, wave_fit, basis, D2, lam, n_continuum_knots=4,
                          lam_c=2.0, ridge_c=0.1):
     basis_c, n_coef_c = build_bspline_basis(wave_fit, n_interior_knots=n_continuum_knots, degree=3)
@@ -45,7 +42,7 @@ def _setup(templates, true_w, vel=0.0, sig=140.0, snr=100.0, true_C=None, seed=0
     mask = (wavelength >= wavefitmin) & (wavelength <= wavefitmax)
     wave_fit = wavelength[mask]
 
-    cfg = FitConfig(vmin=vel - 7 * sig, vmax=vel + 7 * sig)
+    cfg = FitConfig(vmin=vel - 7 * sig, vmax=vel + 7 * sig, continuum_knots=None)
     v_grid = cfg.build_velocity_grid()
     b_truth, _ = build_spline_truth(v_grid, vel=vel, sigma=sig, wiggle_scale=0.0, seed=seed)
     A_stack = build_template_stack(wave_fit, wavelength, templates, v_grid)
@@ -64,7 +61,7 @@ def _setup(templates, true_w, vel=0.0, sig=140.0, snr=100.0, true_C=None, seed=0
     n_knots = cfg.resolved_n_interior_knots()
     basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_knots, degree=cfg.degree)
     dv = (cfg.vmax - cfg.vmin) / (n_knots + 1)
-    D2 = difference_matrix(n_coef, order=2, dv=dv, dv_ref=cfg.knot_spacing_kms)
+    D2 = difference_matrix(n_coef, order=PENALTY_ORDER, dv=dv, dv_ref=cfg.knot_spacing_kms)
     return A_stack_w, y_w, wave_fit, basis, D2, cfg, v_grid, true_C
 
 

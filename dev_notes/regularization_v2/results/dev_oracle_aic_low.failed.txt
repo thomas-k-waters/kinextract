@@ -1,0 +1,1 @@
+wings|250.0|120.0|xsl|clean|3	ValueError('zero error width at the LOSVD peak (degenerate posterior?)')

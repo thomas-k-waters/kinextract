@@ -4,11 +4,10 @@ fixed `lam`. Two purposes (`dev_notes/V1_HARDENING_ROADMAP.md` Phase 1c):
 
 1. **Cross-checking the Laplace approximation.** The Laplace engine's own
    coverage sweep (`dev_notes/uncertainty/FINDINGS.md`, 2026-08-01) found
-   real, substantial h4-coverage gains over bootstrap (39% vs 4%
-   pooled) but still short of the 68% target, especially at low sigma
+   h4 coverage still short of the 68% target, especially at low sigma
    (12-25%). NUTS samples the *actual* posterior (no Gaussian
    linearization), so comparing its `sherm_std`/`h4_std` against
-   `quick_laplace_uncertainty`'s on the same case, same `lam`, is a
+   `laplace_losvd_uncertainty`'s on the same case, same `lam`, is a
    direct way to see whether the residual gap is the Laplace
    approximation's own limit (Gaussian curvature is a poor local
    description of a skewed/heavy-tailed posterior) or something upstream
@@ -20,7 +19,8 @@ fixed `lam`. Two purposes (`dev_notes/V1_HARDENING_ROADMAP.md` Phase 1c):
 own "Honest scope" section).** Template weights `w` are held fixed at
 their converged (MAP) value, not sampled -- NNLS-constrained, non-Gaussian,
 not addressed by either uncertainty engine yet. `cfg.continuum_knots`
-must be `None`. This module validates the Laplace engine's
+must be `None` (pass `dataclasses.replace(cfg, continuum_knots=None)` and
+inputs that need no continuum). This module validates the Laplace engine's
 *coefficient-space* approximation specifically; it is not meant to
 leapfrog it into modeling everything neither engine addresses yet.
 
@@ -54,10 +54,10 @@ import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS, init_to_value
 
-from .aic_regularization import estimate_m_eff_local, select_lambda_aic_local
-from .config import FitConfig
+import dataclasses
+
+from .config import PENALTY_ORDER, FitConfig
 from .gh_moments import compute_losvd_moments
-from .laplace_uncertainty import _check_no_continuum
 from .losvd import _neg_log_post, build_bspline_basis, difference_matrix
 
 
@@ -73,43 +73,33 @@ def nuts_losvd_uncertainty(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfi
                             seed: int = 0, fit_h3h4: bool = True,
                             target_accept_prob: float = 0.9) -> dict:
     """Full NUTS sampling of the LOSVD spline coefficients at a single
-    fixed `lam` -- the reference-mode counterpart to
-    `quick_laplace_uncertainty`'s single-lam mode, not
-    `laplace_losvd_uncertainty`'s AIC-weighted-across-lam mode (jointly
-    sampling over `lam` itself, e.g. via reversible-jump or discrete
-    model-averaging MCMC, is a bigger, separate lift not attempted here).
+    fixed `lam` -- the slow reference counterpart to
+    `laplace_losvd_uncertainty`.
 
-    `lam` : if `None` (default) and `cfg.lam_selection == 'aic_local'`,
-        runs adaptive selection once to find the point estimate's own
-        winning `lam` (matching what `quick_laplace_uncertainty` does)
-        and samples at that value. Pass an explicit `lam` to sample at a
-        specific grid point instead (e.g. to compare against one of
-        `laplace_losvd_uncertainty`'s own per-lam terms directly).
+    `lam` : `None` (default) samples at `cfg.lam`; pass the point
+        estimate's `lam_used`.
 
     **Slow: budget minutes, not seconds**, even for a modest `n_samples`
     -- this is the opt-in "gold standard", not a per-bin-loop default.
 
-    Returns a dict shaped like `quick_laplace_uncertainty`'s (`result0`,
+    Returns a dict shaped like `laplace_losvd_uncertainty`'s (`result0`,
     `point0`, `lam_used`, `b_samples`, `b_median`, `b_std`, `b_p16`,
     `b_p84`, `vherm_samples`/`sherm_samples`/`h3_samples`/`h4_samples` and
     their `_std` summaries) for direct side-by-side comparison, plus
     `n_divergences` (NUTS-specific -- see module docstring).
     """
-    _check_no_continuum(cfg, "nuts_losvd_uncertainty")
+    if cfg.continuum_knots is not None:
+        raise ValueError("nuts_losvd_uncertainty: cfg.continuum_knots must be None -- NUTS samples the LOSVD "
+                         "coefficients only (module docstring).")
+    from .multi_template import fit_losvd
 
-    if lam is None:
-        if cfg.lam_selection == "aic_local":
-            sel = select_lambda_aic_local(A_stack_w, y_w, cfg, np.asarray(cfg.resolved_lam_grid()))
-            lam = sel.best_lam
-        else:
-            lam = cfg.lam
-
-    m_eff, chi2, result0 = estimate_m_eff_local(A_stack_w, y_w, cfg, lam)
+    lam = float(cfg.lam if lam is None else lam)
+    result0 = fit_losvd(A_stack_w, y_w, dataclasses.replace(cfg, lam_rule="fixed", lam=lam))
     v_grid = cfg.build_velocity_grid()
     n_knots = cfg.resolved_n_interior_knots()
     basis, n_coef = build_bspline_basis(v_grid, n_interior_knots=n_knots, degree=cfg.degree)
     dv = (cfg.vmax - cfg.vmin) / (n_knots + 1)
-    D = difference_matrix(n_coef, order=cfg.penalty_order, dv=dv, dv_ref=cfg.knot_spacing_kms)
+    D = difference_matrix(n_coef, order=PENALTY_ORDER, dv=dv, dv_ref=cfg.knot_spacing_kms)
     lam_vec = np.full(D.shape[0], lam)  # uniform lam across every penalty row
     A_eff_w = np.tensordot(result0["w"], A_stack_w, axes=([0], [0]))
     coeffs_map = np.asarray(result0["coeffs"])
@@ -140,7 +130,7 @@ def nuts_losvd_uncertainty(A_stack_w: np.ndarray, y_w: np.ndarray, cfg: FitConfi
 
     return dict(
         method="nuts", result0=result0, point0=point0, lam_used=float(lam),
-        m_eff=float(m_eff), chi2=float(chi2), n_divergences=n_divergences,
+        n_divergences=n_divergences,
         b_samples=b_samples,
         b_median=np.median(b_samples, axis=0),
         b_std=b_samples.std(axis=0, ddof=1),

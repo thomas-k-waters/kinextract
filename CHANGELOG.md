@@ -2,6 +2,152 @@
 
 ## Unreleased
 
+Nothing yet.
+
+## 2.0.0 -- 2026-11-02 -- The NGC 4751 recipe as the defaults; inferior methods removed
+
+The defaults are now the recipe validated on 480 NGC 4751-like MUSE mocks and the real NGC 4751 bins
+(`dev_notes/regularization_v2/FINDINGS.md`): a bare `FitConfig()` with `fit_losvd_robust` reproduces that extraction
+bit for bit, and `losvd_error_bands` its errors. Methods the validation found inferior -- slower and no more accurate,
+or simply worse -- are removed. Kept as cheaper checks: `cleaning_method=None`, `laplace_losvd_uncertainty` with the
+pipeline errors, `fit_gauss_hermite`, `extract_aperture_spectrum`, `detect_emission_from_residual` and
+`compute_direct_moments`; kept as the slower, exact reference: `nuts_uncertainty`.
+
+**Breaking: new defaults.** Fitted values change for anyone relying on the old defaults.
+- `FitConfig.lam` 2.0 -> **4096**, with the new **`lam_rule="sigma_scaled"`** (replaces `lam_selection`): every fit is
+  made at `lam`, refitted at `sigma_scaled_lam(sigma) = lam (sigma/350)^6` (capped at 131072) if that is larger, and
+  refitted at `lam` x `edge_retry_factors` (2, then a further 4) while its LOSVD still holds more than
+  `max_edge_amplitude_frac` (0.01) of its peak at the grid edge. `lam_rule="fixed"` fits at exactly `lam`. Results
+  report `lam_used` and `lam_tried`. Implemented once, in `multi_template.with_lam_rule`, and applied by `fit_losvd`
+  and `fit_losvd_robust` (the robust fit runs its whole cleaning procedure at each `lam`, re-measuring `rho` with
+  `measure_rho=True`).
+- `FitConfig.continuum_knots` None -> **4**: the multiplicative continuum is co-fitted by default, so fits need
+  `wave_fit` (`continuum_knots=None` switches it off).
+- `fit_losvd_robust`: `smooth_window_A` 8 -> **3** A, `inflation_cap` 8 -> **100**, `min_inflation_to_apply`
+  None -> **1.1**, `excluded_wavelength_windows` None -> **`CAII_PROTECTED_WINDOWS`**.
+- The roughness penalty is always third-difference (`kinextract.PENALTY_ORDER = 3`).
+- Exact-Hessian trust-region Newton is the only solver (it became the default in development: 20-90x faster than
+  L-BFGS-B on CaII-triplet mocks, 10-15x on real NGC 4751 bins, and a lower final objective -- L-BFGS-B's stopping
+  rule ended short of the minimum in the stiff order-3 regime, biasing sigma by up to ~10 % at low S/N).
+- `assign_legacy_dartboard_bins` folds the correct way (`-pa_deg`, as `plotbin3.f`); the previous fold was mirrored
+  in x, so legacy-dartboard bins change.
+
+**Removed** (with what replaces each):
+- **Adaptive `lam` selection** -- `select_lambda_aic`, `select_lambda_aic_local`, `estimate_m_eff`,
+  `estimate_m_eff_local`, `AICSelectionResult`, the `aic_regularization` module, and `FitConfig.lam_selection`,
+  `lam_grid`, `self_normalize_lam_grid`. On real NGC 4751 spectra it failed in both directions (Gaussian LOSVDs at
+  low S/N, broad pedestals at high S/N: one bin at sigma 648 km/s against 230 for its mirror); on the mocks it
+  recovered shapes no better than the fixed rule, with slightly worse errors, at a multiple of the cost. Use the
+  default `lam_rule`. `edge_amplitude_frac` moved to `kinextract.losvd` (still exported).
+- **The `lam`-marginalized (AIC-weighted) Laplace bands** -- marginalizing over `lam` barely changed the errors
+  (FINDINGS 14). `laplace_losvd_uncertainty` now evaluates the posterior at one `lam` (`cfg.lam`, or `lam=`), with
+  the continuum included when `cfg.continuum_knots` is set; it absorbs `quick_laplace_uncertainty` and
+  `laplace_continuum_uncertainty`, which are removed. `laplace_losvd_uncertainty_parallel` takes `wave_fit`, `lam`
+  and `clipped_mask` and reads the continuum settings from the config (`w_m`, `min_weight_to_sample`,
+  `n_continuum_knots`, `lam_c`, `ridge_c` are gone).
+- **Bootstrap uncertainty** -- `bootstrap_losvd`, `bootstrap_losvd_parallel`, `calibrate_noise_scale`, the
+  `uncertainty` module, and `FitConfig.losvd_single_start`. About 20x slower than Laplace, with worse coverage in
+  every cell of the production sweep (h4: 0-53 % against Laplace's 50-83 % for a 68 % target). Use
+  `laplace_losvd_uncertainty`, or `losvd_error_bands` on real data.
+- **Regularization-bias correction** -- `correct_moments`, `correct_losvd`, `BiasCalibration`, `PerLamCalibration`,
+  `load_calibration_table`, `load_per_lam_calibration_table`, `get_default_lam_axis_calibration`,
+  `calibration_has_lam_axis`, `estimate_snr_whitened`, the `bias_correction` module and its calibration tables, and
+  `compute_losvd_moments(..., regularization_bias_correction=, snr=, bias_calibration=, lam=)`. It never passed its own
+  acceptance gates, its h4 correction was untrustworthy, and its tables were built from adaptive-`lam` fits.
+- **`shape_aware_taper_correction`** and `compute_losvd_moments(..., shape_aware_correction=)` -- it made sigma worse
+  at sigma >~ 300 km/s.
+- **`FitConfig.optimizer`** and the L-BFGS-B path (`fit_log_spline_map`, `fit_losvd_basis`, `fit_continuum_block`
+  lose `optimizer=`).
+- **`FitConfig.penalty_order`** -- the second-difference penalty inflated wing mass and sigma at low S/N and gave
+  3-4x larger h4 bias with the continuum.
+- **`fit_losvd_robust(cleaning_method="clip")`** and its `clip_sigma`, `max_iter`, `max_clip_fraction`,
+  `robust_scale` -- the inflate cleaning is better calibrated on real data (113 NGC 4751 bins: whitened RMS 1.41 ->
+  0.96, bins with more than 10 % of pixels clipped 22 -> 0). Its loose cleanup clip remains inside the inflate passes.
+- `fit_losvd_basis(..., losvd_warm_start=)`: the cold restart on every alternating iteration was ~3x slower for the
+  same answer.
+
+**New:**
+- **`losvd_error_bands` / `losvd_error_bands_parallel`** -- the error-band recipe for real IFU data in one call:
+  the sky-line + template-mismatch noise model on a preliminary fit's residuals, Laplace with those errors (times the
+  robust fit's inflation) at the fit's `lam` and `rho` without its clipped pixels, the draws moved onto the fit, and
+  moment errors as half the 16-84 % range of the draws' moments.
+- **The systematics noise model**: `noise_model_errors`, `fit_noise_model`, `sky_line_profile`,
+  `load_muse_sky_lines`, `recenter_samples`. Per-pixel variance `err^2 + (kappa*s)^2 + (f*model)^2`, with `s` the
+  LSF-blended sky-line spectrum, fitted by maximum likelihood. For the bands only: fitting with these errors at a
+  fixed `lam` over-smooths. On 480 NGC 4751-like mocks with real sky residuals: shapes unchanged (paired ratio
+  1.001); coverage of the model-binned LOSVD 0.48 -> 0.78. On the real NGC 4751 bins: the bin/mirror pair chi2 per
+  model bin 11.7 -> 0.74 (NFM) and 11.3 -> 0.59 (WFM).
+- **`sigma_scaled_lam`**, **`with_lam_rule`**, **`PENALTY_ORDER`**, **`FitConfig.lam_rule`**,
+  **`FitConfig.edge_retry_factors`**.
+- **`transvd_bounds_laplace`/`write_spmc_in_laplace(..., b_samples=, model_bins=)`**: widen the per-velocity widths
+  in each dynamical-model bin so that the error `model.x` builds for the bin (a linear sum, `velmtod.f`) is at least
+  the posterior scatter of the binned LOSVD; the linear sum of correlated per-point widths understated it by about
+  2x. Only ever widened, so the noise floor survives in faint wing bins. Also new: `legacy_io.write_spmc_in_laplace`,
+  `transvd_bounds_laplace`, `spmc_side_inverts`, and `muse_cube.trim_cube_wavelength_fits`.
+
+**Fixed:**
+- **Parallel workers now really run single-threaded** (`multi_template.single_threaded_worker_env`, used by every
+  `*_parallel` function): unpickling the pool initializer already imported numpy and JAX with the parent's unpinned
+  thread settings, and nothing limited XLA's own thread pool -- 4 workers ran ~50 threads each. 16 real NGC 4751
+  bins, 4 workers: 27.4 s -> 17.1 s, identical results.
+- **`laplace_losvd_uncertainty_parallel(..., clipped_mask=)`** drops each bin's robust-fit clipped pixels before the
+  Laplace fit, so the posterior is centered on the robust fit's solution (without it, NGC 4751 WFM bins refit their
+  outliers and reported std=0 or moved by hundreds of km/s). `cleaning._fit_losvd_clip`'s `clipped_mask` is now
+  exactly the pixel set the returned fit excluded (new `n_flagged_not_refit`, `clip_converged`).
+- **A Gaussian start in the LOSVD multi-start pool** (`losvd.gaussian_initial_coeffs`): fixes fits that converged
+  into an edge basin from the ridge and flat starts.
+- The narrow-grid "effective lam" warning is measured against the top of the `lam` rule's range (3 x 131072).
+
+**Documentation and examples:**
+- `docs/api.rst` lists exactly the public API; the quickstart, configuration page, README and `PARAMETER_GUIDE.md`
+  describe the new defaults and drop the removed methods.
+- Every example notebook uses the defaults and contains no comparisons with removed methods:
+  - `01`-`03`: fits pass `wave_fit` (continuum on); `02` loses its penalty-order section, gains Section 5b on the
+    `lam` rule, and its uncertainty section is Laplace only.
+  - `04`: fits with the defaults; explains why half of the NGC 4751 cube (the dusty side of the major axis) is
+    masked; its binning figure shows the masked white-light image beside the bins.
+  - `05`: Section 6-7 uncertainties from Laplace; Section 8 ends with `losvd_error_bands`.
+  - `06`: Laplace only; its stale comparison with an NGC 5102 MUSE fit is gone.
+  - `07` is rewritten as a complete extraction of a real cube (NGC 4751 MUSE NFM) with the defaults: the dust mask
+    (explained) and 25 defective spaxels, a legacy dartboard (shipped as `examples/data/muse/ngc4751_bin_{r,v}.out`),
+    `losvd_error_bands_parallel`, flags and hand tuning, V_sys, moment maps (cmasher iceburn/sunburst via the new
+    optional `.[examples]` extra), radial profiles and a mirror-symmetry check of the errors. Its shipped results are
+    regenerated.
+  - Examples 04, 05 and 07 use the NGC 4751 MUSE NFM cube instead of NGC 5102.
+- `compute_direct_moments` vs `fit_gauss_hermite`: on fits at the new defaults the two agree to about 0.5 km/s on the
+  validation grid (the direct moment's clear win was measured on adaptive-`lam` fits); noted in `gh_moments`.
+
+## 1.0.1 -- Consolidate robust-fit API; fix real error-budget and template-selection bugs; add continuum support to adaptive lambda
+Breaking:
+
+    fit_losvd_clean/_inflate/_with_continuum consolidated into
+    fit_losvd_robust(cleaning_method=None|clip|inflate),
+    continuum-cofitting now orthogonal (cfg.continuum_knots).
+    robustness param renamed cleaning_method; robust_scale now
+    defaults True for clip (False was biased on real MUSE data).
+    cleaning_method=inflate now the recommended default over clip
+    (validated on 113 NGC4751 bins: residual RMS 1.41->0.96).
+    Dead/unvalidated code removed: lam_wing/taper_* mechanism,
+    ablation.py, calibrate_bias.py.
+
+Fixed:
+
+    combine_bin_spectrum_robust no longer adds a spurious empirical
+    error term that was the dominant driver of implausible error bars
+    on real data (chi2/dof as low as 0.01).
+    reduce_templates_iteratively was silently whitening as rho=0
+    regardless of cfg.rho, and couldn't do continuum-cofitting.
+    estimate_m_eff/select_lambda_aic didn't work under continuum
+    (never reachable via FitConfig, so no real fit was affected).
+    07_full_galaxy_analysis.ipynb's shipped-results fast path
+    (FORCE_RECOMPUTE=False) was broken in 3 places.
+
+New: lam_selection=aic_local now supports continuum-cofitting;
+fit_losvd_robust gained measure_rho and min_inflation_to_apply
+(opt-in, fixes an over-generous error budget found on NGC5102).
+
+Detailed notes (written under "Unreleased" before the 1.0.1 tag):
+
 - **`07_full_galaxy_analysis.ipynb`'s shipped-results fast path
   (`FORCE_RECOMPUTE=False`, the notebook's own advertised default) was
   broken in three separate places** -- found by a user hitting a
@@ -318,32 +464,3 @@ topic index):
 
 See `README.md` for current package scope/status and
 `dev_notes/HISTORY.md` for the full index of closed/open investigations.
-
-## 1.0.1 -- Consolidate robust-fit API; fix real error-budget and template-selection bugs; add continuum support to adaptive lambda
-Breaking:
-
-    fit_losvd_clean/_inflate/_with_continuum consolidated into
-    fit_losvd_robust(cleaning_method=None|clip|inflate),
-    continuum-cofitting now orthogonal (cfg.continuum_knots).
-    robustness param renamed cleaning_method; robust_scale now
-    defaults True for clip (False was biased on real MUSE data).
-    cleaning_method=inflate now the recommended default over clip
-    (validated on 113 NGC4751 bins: residual RMS 1.41->0.96).
-    Dead/unvalidated code removed: lam_wing/taper_* mechanism,
-    ablation.py, calibrate_bias.py.
-
-Fixed:
-
-    combine_bin_spectrum_robust no longer adds a spurious empirical
-    error term that was the dominant driver of implausible error bars
-    on real data (chi2/dof as low as 0.01).
-    reduce_templates_iteratively was silently whitening as rho=0
-    regardless of cfg.rho, and couldn't do continuum-cofitting.
-    estimate_m_eff/select_lambda_aic didn't work under continuum
-    (never reachable via FitConfig, so no real fit was affected).
-    07_full_galaxy_analysis.ipynb's shipped-results fast path
-    (FORCE_RECOMPUTE=False) was broken in 3 places.
-
-New: lam_selection=aic_local now supports continuum-cofitting;
-fit_losvd_robust gained measure_rho and min_inflation_to_apply
-(opt-in, fixes an over-generous error budget found on NGC5102).

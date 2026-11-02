@@ -21,7 +21,7 @@ def _gaussian(v, vel, sig):
 
 
 def test_recovers_clean_gaussian():
-    cfg = FitConfig(vmin=-300.0, vmax=300.0)
+    cfg = FitConfig(vmin=-300.0, vmax=300.0, continuum_knots=None)
     v_grid = cfg.build_velocity_grid()
     true_v, true_sig = 10.0, 60.0
     true_b = _gaussian(v_grid, vel=true_v, sig=true_sig)
@@ -62,14 +62,14 @@ def test_knot_count_scales_with_grid_width():
     velocity grid is widened for a broader target. The default
     (n_interior_knots=None) must auto-scale with vmin/vmax, not stay fixed.
     """
-    narrow = FitConfig(vmin=-300.0, vmax=300.0)
-    wide = FitConfig(vmin=-1600.0, vmax=1600.0)
+    narrow = FitConfig(vmin=-300.0, vmax=300.0, continuum_knots=None)
+    wide = FitConfig(vmin=-1600.0, vmax=1600.0, continuum_knots=None)
 
     assert wide.resolved_n_interior_knots() > narrow.resolved_n_interior_knots()
     assert narrow.resolved_n_interior_knots() == narrow.min_interior_knots
 
     # An explicit override must still be honored, not silently replaced.
-    overridden = FitConfig(vmin=-1600.0, vmax=1600.0, n_interior_knots=5)
+    overridden = FitConfig(vmin=-1600.0, vmax=1600.0, n_interior_knots=5, continuum_knots=None)
     assert overridden.resolved_n_interior_knots() == 5
 
 
@@ -78,9 +78,9 @@ def test_n_bins_is_not_a_user_facing_field():
     field, and should scale with grid width the same way
     `resolved_n_interior_knots()` does.
     """
-    assert not hasattr(FitConfig(), "n_bins")
-    narrow = FitConfig(vmin=-300.0, vmax=300.0)
-    wide = FitConfig(vmin=-1600.0, vmax=1600.0)
+    assert not hasattr(FitConfig(continuum_knots=None), "n_bins")
+    narrow = FitConfig(vmin=-300.0, vmax=300.0, continuum_knots=None)
+    wide = FitConfig(vmin=-1600.0, vmax=1600.0, continuum_knots=None)
     assert wide.resolved_n_bins() > narrow.resolved_n_bins()
     assert narrow.resolved_n_bins() == narrow.min_bins
     assert len(narrow.build_velocity_grid()) == narrow.resolved_n_bins()
@@ -110,7 +110,7 @@ def test_multi_start_escapes_a_known_bad_local_minimum():
 
     true_v, true_sig = 80.0, 240.0
     v_half = abs(true_v) + 5 * true_sig + 50.0
-    cfg = FitConfig(vmin=-v_half, vmax=v_half, lam=10.0)
+    cfg = FitConfig(vmin=-v_half, vmax=v_half, lam=10.0, continuum_knots=None)
     v_grid = cfg.build_velocity_grid()
     b_truth, _ = build_spline_truth(v_grid, vel=true_v, sigma=true_sig, wiggle_scale=0.0, seed=0)
 
@@ -147,7 +147,7 @@ def test_curvature_penalty_scaled_by_velocity_spacing_removes_sigma_bias():
 
     true_v, true_sig = 0.0, 140.0
     nsig = 7
-    cfg = FitConfig(vmin=true_v - nsig * true_sig, vmax=true_v + nsig * true_sig)
+    cfg = FitConfig(vmin=true_v - nsig * true_sig, vmax=true_v + nsig * true_sig, continuum_knots=None)
     v_grid = cfg.build_velocity_grid()
     b_truth, _ = build_spline_truth(v_grid, vel=true_v, sigma=true_sig, wiggle_scale=0.0, seed=0)
 
@@ -179,7 +179,7 @@ def test_non_finite_input_raises_instead_of_propagating_silently():
     """
     import pytest
 
-    cfg = FitConfig(vmin=-980.0, vmax=980.0)
+    cfg = FitConfig(vmin=-980.0, vmax=980.0, continuum_knots=None)
     v_grid = cfg.build_velocity_grid()
     true_b, _ = build_spline_truth(v_grid, vel=0.0, sigma=140.0, wiggle_scale=0.0, seed=0)
     n_pix = 200
@@ -234,32 +234,25 @@ def test_narrow_grid_with_floored_knots_warns_about_effective_lam():
     # sub-case below so each is independently observable, the same way a
     # fresh process would see the first occurrence of each.
 
-    # order 2: lam=10 is ~5x its own grid top (16) once amplified -> warns
+    # an ordinary lam on the narrow grid must not warn...
     _reset_knot_spacing_warning_dedup()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        FitConfig(penalty_order=2, lam=10.0, lam_selection="fixed", **narrow)
-    assert any("effective lam" in str(w.message) for w in caught)
-
-    # order 3: the SAME lam is an ordinary, well-regularized value on its
-    # own scale, and must not warn...
-    _reset_knot_spacing_warning_dedup()
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        FitConfig(penalty_order=3, lam=10.0, lam_selection="fixed", **narrow)
+        FitConfig(lam=4096.0, lam_rule="fixed", **narrow, continuum_knots=None)
     assert not any("effective lam" in str(w.message) for w in caught)
 
-    # ...but the check must still fire for a genuinely extreme order-3 value.
+    # ...but the check must still fire for a genuinely extreme value.
     _reset_knot_spacing_warning_dedup()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        FitConfig(penalty_order=3, lam=1e6, lam_selection="fixed", **narrow)
+        FitConfig(lam=1e6, lam_rule="fixed", **narrow, continuum_knots=None)
     assert any("effective lam" in str(w.message) for w in caught)
 
-    # The validated NSIG=7 convention stays clean at either order.
-    for order in (2, 3):
+    # The validated NSIG=7 convention stays clean: at the default lam on a narrow grid, and at the lam rule's cap on
+    # the broad grid it is reached on (sigma > ~630 km/s).
+    for lam, grid in ((4096.0, safe), (131072.0, dict(vmin=-7 * 700, vmax=7 * 700))):
         _reset_knot_spacing_warning_dedup()
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            FitConfig(penalty_order=order, **safe)
+            FitConfig(lam=lam, **grid, continuum_knots=None)
         assert not any("effective lam" in str(w.message) for w in caught)

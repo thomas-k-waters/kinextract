@@ -149,7 +149,7 @@ def test_pack_builds_ready_to_use_template_stack(tmp_path):
     templates, wavelength, names, ages, metals = load_emiles_templates(out)
 
     wave_fit = np.linspace(8400.0, 8800.0, 200)
-    cfg = FitConfig(vmin=-700.0, vmax=700.0)
+    cfg = FitConfig(vmin=-700.0, vmax=700.0, continuum_knots=None)
     v_grid = cfg.build_velocity_grid()
     A_stack = build_template_stack(wave_fit, wavelength, templates, v_grid)
     assert A_stack.shape == (2, 200, len(v_grid))

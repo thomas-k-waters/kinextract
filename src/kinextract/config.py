@@ -34,6 +34,13 @@ import numpy as np
 from .forward_model import build_velocity_grid
 
 
+# Difference order of the LOSVD roughness penalty. Third differences: the penalty's null space is any Gaussian, so
+# heavy smoothing shrinks toward the best-fitting Gaussian instead of the exponential tails of the second-difference
+# penalty, which inflated wing mass and sigma at low S/N and gave 3-4x larger h4 bias with continuum-cofitting
+# (dev_notes/REGULARIZATION_INVESTIGATION_LOG.md; dev_notes/continuum/FINDINGS.md).
+PENALTY_ORDER = 3
+
+
 def _f(default, group: str, help: str):
     return field(default=default, metadata={"group": group, "help": help})
 
@@ -42,8 +49,8 @@ def _f(default, group: str, help: str):
 # knot_spacing_kms" warning below, independent of Python's own warnings-module
 # "once" action. That action's dedup key is the *exact* formatted message text
 # (message, category, module, lineno) -- but this warning embeds per-call values
-# (vmin, vmax, dv, effective_lam), so on a real multi-bin run, every bin (often
-# every AIC-candidate lam per bin) produces a distinct message text and "once"
+# (vmin, vmax, dv, effective_lam), so on a real multi-bin run, every bin (and
+# every lam the lam rule tries) produces a distinct message text and "once"
 # barely deduplicates anything, flooding the notebook exactly the way it's meant
 # to prevent. A plain module-level flag, checked before ever calling
 # `warnings.warn`, dedupes correctly regardless of what the message says.
@@ -59,9 +66,6 @@ def _reset_knot_spacing_warning_dedup() -> None:
     already triggered it in this same process."""
     global _KNOT_SPACING_WARNING_SHOWN
     _KNOT_SPACING_WARNING_SHOWN = False
-
-
-_WING_LAM_UNSAFE_SIGMA = 100.0
 
 
 @dataclass
@@ -160,29 +164,25 @@ class FitConfig:
                       "changing it as unverified territory rather than a supported tuning knob.")
 
     # -- Continuum --------------------------------------------------------
-    continuum_knots: int | None = _f(None, "Continuum",
+    continuum_knots: int | None = _f(4, "Continuum",
                                       "Interior knot count for the shared multiplicative continuum "
-                                      "spline (see `kinextract.continuum`). Default None -- "
-                                      "continuum-cofitting off. Set an int (4 is a reasonable "
-                                      "starting point) to turn continuum-cofitting on for "
-                                      "`fit_losvd`/`bootstrap_losvd`, which then require `wave_fit` "
-                                      "(the observed wavelength grid) to be passed explicitly, since "
-                                      "the continuum spline is built on wavelength, not velocity. "
-                                      "Requires templates already at a consistent continuum-trust "
-                                      "level (e.g. already continuum-normalized) -- see "
-                                      "`continuum.py`'s own module docstring. `result['success']` is "
-                                      "frequently False with this on but carries no real accuracy "
-                                      "information -- see `continuum.fit_continuum_block`'s own "
-                                      "docstring before treating it as a hard failure filter. Pairs "
-                                      "with `lam_c` and `ridge_c` (see their own help text) -- both "
-                                      "regularization terms are needed to keep the recovered "
-                                      "continuum well-constrained. Still maturing: see "
-                                      "`dev_notes/VALIDATION_CAMPAIGN.md` Stage 15 for its validation status.")
+                                      "spline (see `kinextract.continuum`), co-fitted with the LOSVD. "
+                                      "Default 4, the setting validated on the NGC 4751 MUSE data "
+                                      "(dev_notes/regularization_v2/FINDINGS.md). Fits then need `wave_fit` "
+                                      "(the observed wavelength grid), since the continuum spline is built "
+                                      "on wavelength, not velocity. Set None to switch continuum-cofitting "
+                                      "off (for spectra that are already exactly continuum-normalized, e.g. "
+                                      "mocks built from the fit's own templates). Requires templates at a "
+                                      "consistent continuum level (e.g. continuum-normalized) -- see "
+                                      "`continuum.py`'s module docstring. `result['success']` is often False "
+                                      "with this on but carries no accuracy information -- see "
+                                      "`continuum.fit_continuum_block`. Pairs with `lam_c` and `ridge_c`: "
+                                      "both regularization terms are needed to keep the continuum "
+                                      "well-constrained.")
     lam_c: float = _f(2.0, "Continuum",
-                       "Curvature penalty weight for the continuum spline. Default 2.0, "
-                       "inherited from `lam`'s own default as a starting point -- not "
-                       "independently calibrated (see `tests/test_continuum.py` for what has "
-                       "and hasn't been checked). Only relevant if `continuum_knots` is set.")
+                       "Curvature penalty weight for the continuum spline. Default 2.0 (the "
+                       "NGC 4751 setting; recovery is insensitive to it -- see "
+                       "`tests/test_continuum.py`). Only relevant if `continuum_knots` is set.")
     ridge_c: float = _f(0.1, "Continuum",
                         "Direct L2 penalty on the continuum spline coefficients themselves, "
                         "in addition to `lam_c`'s curvature penalty -- a second-order curvature "
@@ -194,26 +194,43 @@ class FitConfig:
                         "precisely tuned. Only relevant if `continuum_knots` is set.")
 
     # -- Regularization ---------------------------------------------------
-    lam: float = _f(2.0, "Regularization",
-                     "P-spline roughness penalty weight on the spline coefficients' "
-                     "`penalty_order`-th differences (only used when lam_selection='fixed'; "
-                     "the default adaptive selection ignores it). NOTE: this default (2.0) and "
-                     "everything below in this help text are calibrated for penalty_order=2 -- "
-                     "an order-3 penalty is far weaker per unit lam (useful values sit orders "
-                     "of magnitude higher, see `lam_grid`), and FitConfig warns if you combine "
-                     "penalty_order=3 with fixed lam=2.0. Original order-2 guidance: penalty on "
-                     "second differences, scaled by real velocity spacing (see "
-                     "`kinextract.losvd.difference_matrix`) so this represents an actual "
-                     "physical smoothing strength, not one that silently changes meaning with "
-                     "grid width. Default 2.0 -- the best worst-case point across a broad (V, "
-                     "sigma, h3, h4) validation grid (~12% worst-case shape residual). Values "
-                     "below ~1.0 degrade quickly (worst-case shape residual 18% at lam=0.5, 43% "
-                     "at lam=0.1) from noise overfitting; values above ~10 degrade more "
-                     "gradually from oversmoothing. Larger = smoother; smaller = more flexible, "
-                     "more sensitive to noise. This value is calibrated against the "
-                     "velocity-spacing-scaled penalty specifically -- it is not portable to an "
-                     "unscaled curvature penalty, where the same nominal value represents a "
-                     "different physical smoothing strength depending on grid width.")
+    lam: float = _f(4096.0, "Regularization",
+                     "Base weight of the P-spline roughness penalty on the third differences of the "
+                     "log-LOSVD spline coefficients (scaled by the real knot spacing, see "
+                     "`kinextract.losvd.difference_matrix`, so it means the same physical smoothing "
+                     "on any grid). The third-difference penalty's null space is any Gaussian, so "
+                     "heavy smoothing shrinks toward the best-fitting Gaussian, never toward fat "
+                     "tails. Default 4096, validated on 480 NGC 4751-like MUSE mocks and the real "
+                     "NGC 4751 bins (dev_notes/regularization_v2/FINDINGS.md): no adaptive "
+                     "selector beat it by more than a few per cent on mocks, and adaptive "
+                     "selection failed on the real spectra. With `lam_rule='sigma_scaled'` (the "
+                     "default) this is the starting value, raised for broad LOSVDs. Larger = "
+                     "smoother; smaller = more flexible and more prone to a broad pedestal at the "
+                     "grid edges.")
+    lam_rule: str = _f("sigma_scaled", "Regularization",
+                        "How `fit_losvd`/`fit_losvd_robust` set the `lam` of a fit. 'sigma_scaled' "
+                        "(default): fit at `lam`, then refit at `config.sigma_scaled_lam(sigma, "
+                        "lam0=lam)` = lam * (sigma/350)^6 (capped at 131072) if that is larger -- "
+                        "broad LOSVDs need more smoothing for the same relative shape -- and, while "
+                        "the LOSVD still holds more than `max_edge_amplitude_frac` of its peak at the "
+                        "grid edge, refit at `lam` times each of `edge_retry_factors` in turn. "
+                        "'fixed': one fit at exactly `lam` (for reproducing a given `lam`, and for "
+                        "the package's internal sub-fits). The `lam` used is returned as "
+                        "`result['lam_used']`.")
+    max_edge_amplitude_frac: float = _f(0.01, "Regularization",
+                            "Largest LOSVD amplitude within 5 grid points of either velocity-grid "
+                            "edge, as a fraction of its peak (`losvd.edge_amplitude_frac`), that "
+                            "counts as contained by the grid. Default 0.01. Above it the fit has a "
+                            "divergent edge pedestal: the moment integrals then run over a range the "
+                            "data never constrained (it inflated sigma about 2x on real NGC 5102 "
+                            "MUSE spectra). `lam_rule='sigma_scaled'` refits such fits at a larger "
+                            "`lam` (`edge_retry_factors`), and the Laplace sampler rejects posterior "
+                            "draws above it. 0.0 disables both.")
+    edge_retry_factors: tuple = _f((2.0, 4.0), "Regularization",
+                            "With `lam_rule='sigma_scaled'`: factors applied in turn to the fit's "
+                            "`lam` while its LOSVD is still at the grid edge (see "
+                            "`max_edge_amplitude_frac`) -- by default 2x, then a further 4x. Empty "
+                            "disables the retry.")
     ridge_lam: float = _f(1.0, "Regularization",
                            "Ridge strength used only for the optimizer's own starting point "
                            "(see `kinextract.losvd.default_initial_coeffs`) -- not part "
@@ -221,152 +238,6 @@ class FitConfig:
                            "`lam` the way it might look like it should. Rarely needs changing; "
                            "its only job is landing the optimizer in a reasonable basin before "
                            "the real (lam-regularized) optimization takes over.")
-    lam_selection: str = _f("aic_local", "Regularization",
-                             "'aic_local' (default) or 'fixed'. 'aic_local' picks `lam` per fit "
-                             "from `lam_grid` via `kinextract.aic_regularization."
-                             "select_lambda_aic_local` (minimizing chi2 + 2*m_eff, Lipka & Thomas "
-                             "2021/Thomas & Lipka 2022), instead of always using the fixed `lam` "
-                             "value above -- measurably reduces sigma bias relative to a fixed "
-                             "`lam=2.0` across a broad (sigma, h4) validation grid (see "
-                             "`dev_notes/VALIDATION_CAMPAIGN.md` Stage 12); h4 bias is a genuine mixed "
-                             "result (better in some regimes, worse in others). 'aic_local' "
-                             "supports `continuum_knots` too (`aic_regularization.estimate_m_eff_"
-                             "local`'s own joint LOSVD+continuum linearization), at that path's "
-                             "own higher per-candidate cost (each scanned `lam` now costs a full "
-                             "3-block alternation, not 2-block). Set 'fixed' to get the old, "
-                             "always-`lam` behavior exactly, useful for "
-                             "reproducing a specific `lam` deliberately (e.g. a validation sweep that "
-                             "always forces 'fixed' internally regardless of this "
-                             "field). `fit_losvd`'s result dict reports whatever `lam` was "
-                             "actually used as `lam_used`. `bootstrap_losvd` runs the selection "
-                             "once (at the point estimate) and holds that `lam` fixed for every "
-                             "bootstrap replicate, rather than re-selecting per replicate -- "
-                             "cheaper, at the cost of not propagating lam-selection uncertainty "
-                             "into the reported band. Also affects `bootstrap_losvd`'s default "
-                             "bias-correction table when no `bias_calibration` was passed "
-                             "explicitly: it switches to the `m_eff`-axis table "
-                             "(`regularization_bias_emiles_multitemplate_meff.txt`) whenever the "
-                             "fit's own `lam` (however it got there) is more than 25% away from "
-                             "the plain table's own fixed `lam=2.0` -- see `bootstrap_losvd`'s own "
-                             "docstring/body comment for why the check is against the actual "
-                             "`lam` value, not against whether selection ran.")
-    lam_grid: tuple | None = _f(None, "Regularization",
-                          "Candidate `lam` values `select_lambda_aic_local` scans over when "
-                          "`lam_selection='aic_local'`. Only used in that mode. Default None "
-                          "auto-selects per `penalty_order` via `resolved_lam_grid()`: "
-                          "(0.5, 1, 2, 4, 8, 16) for the order-2 penalty (the grid this "
-                          "package's original validation sweep used) and (1, 8, 64, 512, 4096, "
-                          "32768) for order 3 (a third-difference penalty is much weaker per "
-                          "unit lam, so its useful range sits orders of magnitude higher -- "
-                          "measured directly in `dev_notes/shape_residual/`, scripts 02-06). "
-                          "Set an explicit tuple to override either. Widen it if a target's own "
-                          "true sigma is well outside the 20-400 km/s validated range.")
-
-    penalty_order: int = _f(3, "Regularization",
-                          "Difference order of the P-spline roughness penalty on the log-LOSVD "
-                          "spline coefficients. Default 3 (as of the 2026-07 shape-residual "
-                          "investigation -- promoted on a 480-case paired validation: better "
-                          "mean shape residual in 23/32 (sigma, S/N, shape, recipe) cells, "
-                          "|sigma bias| 5.6 vs 15.5 km/s overall, wing-mass inflation "
-                          "eliminated; see dev_notes/REGULARIZATION_INVESTIGATION_LOG.md). "
-                          "2 penalizes second differences -- its "
-                          "null space is *linear* log-b, so heavy smoothing pushes the recovered "
-                          "shape toward exponential (slowly-decaying) tails; this is the root "
-                          "mechanism of the documented low-S/N wing-mass/sigma inflation AND of "
-                          "the core shape residual (the two failure modes squeeze `lam` from "
-                          "both sides -- see dev_notes/REGULARIZATION_SHAPE_RESIDUAL_HANDOFF.md, "
-                          "2026-07-26 status update); order 2 remains the right choice ONLY "
-                          "when reproducing pre-2026-07 validated behavior exactly, and keeps a "
-                          "modest edge on shape residual for genuinely non-Gaussian LOSVDs "
-                          "(|h3|/h4 ~ 0.06+) at sigma 50-140 and S/N ~ 100, at the cost of its "
-                          "wing/sigma inflation everywhere else. 3 penalizes third differences -- null "
-                          "space is *quadratic* log-b, i.e. any Gaussian (any V, sigma, "
-                          "amplitude) is penalty-free, so heavy smoothing shrinks toward the "
-                          "best-fitting Gaussian instead of fat tails: wing inflation is "
-                          "eliminated by construction and shape residual improves nearly "
-                          "everywhere on Gaussian-truth validation; the tradeoff is stronger "
-                          "attenuation of real h3/h4 structure at low S/N (where that structure "
-                          "is near the information limit anyway). Interacts with `lam`/"
-                          "`lam_grid`: order-3 penalties need lam values ~2-3 orders of "
-                          "magnitude larger (see `lam_grid`); the fixed-`lam` default (2.0) is "
-                          "calibrated for order 2 ONLY -- with penalty_order=3 use "
-                          "lam_selection='aic_local' (the default) or retune lam explicitly. "
-                          "IMPORTANT: order 3 drives fits into a heavy-penalty regime where "
-                          "JAX's float32 objective can stall L-BFGS-B on wide grids "
-                          "(sigma >~ 200; measured: 35% vs 6% shape residual at sigma=300, "
-                          "S/N=30, lam=65536, float32 vs float64) -- the package therefore "
-                          "enables JAX float64 at import time (see `kinextract/__init__.py`; "
-                          "opt out with KINEXTRACT_NO_X64=1, but never combine that "
-                          "opt-out with penalty_order=3 on broad targets). Order-3 selection "
-                          "also activates two selection safeguards in `fit_losvd` "
-                          "(delta-AIC parsimony tiebreak + sub-knot-scale sigma candidate "
-                          "guard) -- see `aic_regularization.select_lambda_aic_local`.")
-
-    max_edge_amplitude_frac: float = _f(0.01, "Regularization",
-                            "A candidate `lam` is rejected during adaptive selection if its "
-                            "fitted LOSVD still exceeds this fraction of its own peak at "
-                            "either end of the velocity grid. Default 0.01 (1%). This is a "
-                            "validity condition rather than a smoothness preference: the "
-                            "moment integrals only mean something if the velocity grid "
-                            "actually contains the LOSVD, so a fit that is still at tens of "
-                            "percent of peak at the edge is being integrated over a range "
-                            "where it was never constrained. That divergent edge pedestal is "
-                            "what inflated recovered sigma ~2x on real NGC 5102 MUSE spectra "
-                            "(84.5 and 100.7 km/s against independent reference measurements of 54.3 and "
-                            "40-45); with this constraint the same data give 49.1 and 40.3. "
-                            "Neither the AIC criterion nor a unimodality/jaggedness rule can "
-                            "detect it -- the pedestal solutions are smooth and single-peaked, "
-                            "and on systematics-dominated residuals the extra flexibility "
-                            "genuinely does lower chi2. The constraint is inert on data with "
-                            "no pedestal (it excludes nothing on the mock grids), unlike an "
-                            "earlier wing-taper approach to the same pedestal that needed "
-                            "per-target retuning and was removed once this constraint "
-                            "superseded it (see dev_notes/PORT_STATUS.md). "
-                            "0.0 disables it. See dev_notes/real_data_sigma/FINDINGS.md.")
-    self_normalize_lam_grid: bool = _f(False, "Regularization",
-                            "If True, `lam_selection='aic_local'` rescales its candidate "
-                            "`lam_grid` by `(dv/knot_spacing_kms)^2` (`dv` = this fit's actual "
-                            "knot spacing) before scanning, so the *effective* penalty strength "
-                            "explored is invariant to knot spacing -- cancels exactly the "
-                            "`(knot_spacing_kms/dv)^2` factor `kinextract.losvd.difference_matrix` "
-                            "applies to the penalty operator itself (see `difference_matrix`'s own "
-                            "docstring). Default False, deliberately: this fixes the mechanism "
-                            "behind a real, confirmed bug -- on a narrow grid (small vmax-vmin "
-                            "relative to `min_interior_knots`, e.g. sigma 25-55 under the "
-                            "validated NSIG=7 convention), the fixed absolute lam_grid is "
-                            "uniformly inflated in effective strength, and AIC selection lands at "
-                            "the grid boundary (severe oversmoothing, +33% to +178% sigma bias "
-                            "measured) -- but turning this on changes what numeric value "
-                            "`result['lam_used']` reports for exactly those narrow-grid fits, and "
-                            "`bias_correction.PerLamCalibration`'s tables were built assuming "
-                            "today's (unscaled) lam_used values. Enabling this without rebuilding "
-                            "those tables would silently feed the wrong canonical-lam bracket to "
-                            "bias correction for narrow-grid fits. Opt in only for direct "
-                            "characterization of the oversmoothing bug itself, or once the "
-                            "calibration tables have been rebuilt to match -- see "
-                            "dev_notes/regularization/FINDINGS.md.")
-    losvd_single_start: bool = _f(False, "Regularization",
-                                   "If True, the FIRST alternating iteration's LOSVD sub-fit uses "
-                                   "a single, deterministic starting point instead of "
-                                   "`fit_log_spline_map`'s own default multi-start pool -- later "
-                                   "iterations still warm-start from the previous iteration's own "
-                                   "converged coefficients exactly as they do when this is False "
-                                   "(only the iteration-0 multi-start *search* is ablated, not the "
-                                   "separate warm-start mechanism). Exists for isolating the "
-                                   "multi-start search's own marginal effect (ablation testing); "
-                                   "not recommended for a single point-estimate fit -- multi-start "
-                                   "exists to catch a real, otherwise-invisible failure mode "
-                                   "(~1-in-150 fits landing in a meaningfully-worse local minimum). "
-                                   "`bootstrap_losvd`'s own `replicate_single_start=True` default "
-                                   "sets this True for every bootstrap replicate deliberately, "
-                                   "though: an occasional bad replicate there is just an outlier in "
-                                   "an n_boot-sized distribution, not the reported point estimate, "
-                                   "so the risk profile differs from a single fit. Default False "
-                                   "(multi-start). Bug fixed 2026-07-30: this used to force the "
-                                   "deterministic start on EVERY iteration, not just the first, "
-                                   "which disabled warm-starting entirely and made True fits ~3-5x "
-                                   "*slower* than multi-start on some real cases -- the opposite of "
-                                   "its own intent.")
 
     # -- Noise --------------------------------------------------------------
     rho: float = _f(0.0, "Noise",
@@ -385,10 +256,9 @@ class FitConfig:
                      "engines only ever consume already-whitened inputs, so correcting for "
                      "correlated noise is entirely a matter of how those inputs are built, "
                      "not a change to the fit itself -- see "
-                     "`examples/notebooks/`'s noise-correlation notebook for the full "
-                     "worked pattern, including why `bootstrap_losvd` needs no changes at "
-                     "all once whitening is done correctly (GLS pre-whitening makes "
-                     "residuals i.i.d. by construction, regardless of `rho`).")
+                     "`examples/notebooks/05_noise_correlation.ipynb` for the worked pattern "
+                     "(GLS pre-whitening makes residuals i.i.d. by construction, regardless "
+                     "of `rho`). `fit_losvd_robust(..., measure_rho=True)` measures it per bin.")
 
     # -- Reporting ----------------------------------------------------------
     fit_h3h4: bool = _f(True, "Reporting",
@@ -401,25 +271,10 @@ class FitConfig:
     def __post_init__(self) -> None:
         if self.vmin >= self.vmax:
             raise ValueError(f"vmin ({self.vmin}) must be < vmax ({self.vmax}).")
-        if self.lam_selection not in ("aic_local", "fixed"):
-            raise ValueError(
-                f"lam_selection must be 'aic_local' or 'fixed', got {self.lam_selection!r}."
-            )
-        if self.penalty_order not in (2, 3):
-            raise ValueError(
-                f"penalty_order must be 2 or 3, got {self.penalty_order!r} -- see its help text "
-                "(FitConfig.describe('penalty_order'))."
-            )
-        if self.penalty_order == 3 and self.lam_selection == "fixed" and self.lam == 2.0:
-            warnings.warn(
-                "FitConfig: penalty_order=3 with lam_selection='fixed' and the order-2-"
-                "calibrated default lam=2.0 -- a third-difference penalty is far weaker per "
-                "unit lam, so lam=2.0 will barely regularize at all. Use "
-                "lam_selection='aic_local' (recommended) or set lam explicitly for order 3 "
-                "(useful values sit orders of magnitude higher; see FitConfig.lam_grid's "
-                "help text).",
-                UserWarning, stacklevel=2,
-            )
+        if self.lam_rule not in ("sigma_scaled", "fixed"):
+            raise ValueError(f"lam_rule must be 'sigma_scaled' or 'fixed', got {self.lam_rule!r}.")
+        if any(f <= 1.0 for f in self.edge_retry_factors):
+            raise ValueError(f"edge_retry_factors must all be > 1, got {self.edge_retry_factors!r}.")
         if self.lam < 1.0:
             warnings.warn(
                 f"FitConfig.lam={self.lam} is below 1.0, the observed sweet spot under the "
@@ -451,22 +306,12 @@ class FitConfig:
             )
         n_knots = self.resolved_n_interior_knots()
         dv = (self.vmax - self.vmin) / (n_knots + 1)
+        # The penalty is scaled by (knot_spacing_kms / dv) (see `difference_matrix`), so a grid narrow enough that
+        # `min_interior_knots` sets the knot count makes every `lam` act stronger than its nominal value. Warn once
+        # the effective lam passes 3x the top of the lam rule's range (131072), where validation testing saw severe
+        # oversmoothing.
         effective_lam = self.lam * (self.knot_spacing_kms / dv)
-        # The threshold has to be expressed on THIS penalty order's own lam
-        # scale. The original constant (50) was calibrated when order 2 was
-        # the only option, where the sweet spot is lam~2 and the candidate
-        # grid tops out at 16 -- so "effective lam > 50" meant roughly 3x
-        # past the top of the useful range. An order-3 penalty is far weaker
-        # per unit lam and its own validated grid tops out at 32768, so the
-        # same constant fires on every ordinary order-3 fit and says
-        # "severe oversmoothing" about values that are simply correct --
-        # observed directly in every notebook after the order-3 default
-        # landed. Anchoring to `3 * max(default grid for this order)` keeps
-        # the order-2 threshold at 48 (i.e. the validated behaviour, within
-        # rounding) and makes it meaningful rather than constant-spam for
-        # order 3.
-        effective_lam_limit = 3.0 * max(self._default_lam_grid())
-        if effective_lam > effective_lam_limit:
+        if effective_lam > 3.0 * 131072.0:
             global _KNOT_SPACING_WARNING_SHOWN
             if not _KNOT_SPACING_WARNING_SHOWN:
                 _KNOT_SPACING_WARNING_SHOWN = True
@@ -502,27 +347,6 @@ class FitConfig:
         """
         auto = round((self.vmax - self.vmin) / self.bin_spacing_kms)
         return max(self.min_bins, auto)
-
-    def _default_lam_grid(self) -> tuple:
-        """The built-in candidate grid for this `penalty_order`, ignoring
-        any explicit `lam_grid` override. Separate from
-        `resolved_lam_grid()` because it also defines this order's own
-        *lam scale*, which `__post_init__`'s effective-lam check needs
-        even when the user has overridden the grid itself.
-        """
-        if self.penalty_order == 3:
-            return (1.0, 8.0, 64.0, 512.0, 4096.0, 32768.0)
-        return (0.5, 1.0, 2.0, 4.0, 8.0, 16.0)
-
-    def resolved_lam_grid(self) -> tuple:
-        """`lam_grid` if explicitly set, otherwise the default grid for
-        this `penalty_order` -- see `lam_grid`'s help text. Always use
-        this (not the raw field) when the actual candidate grid is
-        needed.
-        """
-        if self.lam_grid is not None:
-            return tuple(self.lam_grid)
-        return self._default_lam_grid()
 
     def resolved_n_interior_knots(self) -> int:
         """`n_interior_knots` if explicitly set, otherwise auto-derived from
@@ -565,3 +389,18 @@ class FitConfig:
         print("\nCall FitConfig(...).resolved_n_interior_knots() to see the actual knot "
               "count that would be used (auto-derived from vmin/vmax unless overridden), "
               "and .resolved_n_bins() for the auto-derived velocity-grid point count.")
+
+
+def sigma_scaled_lam(sigma: float, lam0: float = 4096.0, sigma0: float = 350.0, power: float = 6.0,
+                     lam_max: float = 131072.0) -> float:
+    """Fixed-lam rule for the order-3 penalty: `lam0 * max(1, (sigma/sigma0)**power)`, capped at `lam_max`.
+
+    The order-3 penalty on log b scales as sigma**-6 for a given relative shape, so broad LOSVDs need a larger lam
+    for the same smoothing. Only ever raises lam above `lam0`. Calibrated on NGC 4751-like MUSE mocks (sigma 250-550,
+    S/N 40-300) and checked on the real NGC 4751 bins (dev_notes/regularization_v2/FINDINGS.md, findings 21 and 25):
+    never worse than fixed `lam0` in any mock cell, 4-6 % better shapes at sigma 550, and it repairs real broad bins
+    that fixed `lam0` leaves with a broad pedestal. `sigma` is the fit's own (e.g. `compute_losvd_moments` 'sherm'
+    of a `lam0` fit). `FitConfig(lam_rule='sigma_scaled')`, the default, applies it inside every fit."""
+    if not (np.isfinite(sigma) and sigma > 0):
+        return float(lam0)
+    return float(min(lam_max, lam0 * max(1.0, (sigma / sigma0) ** power)))

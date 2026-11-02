@@ -6,26 +6,28 @@ authors:
   - family-names: Waters
     given-names: Thomas, K.
     affiliation: University of Michigan
-version: 1.0.1
-date-released: "2026-09-17"
+version: 2.0.0
+date-released: "2026-11-02"
 url: "https://github.com/thomas-k-waters/kinextract"
 abstract: >
   kinextract fits galaxy spectra using a non-parametric line-of-sight velocity
   distribution (LOSVD) represented directly on a velocity grid, for any
-  number of template spectra in a single fitting engine. Regularization
-  strength is selected automatically via a bootstrap-estimated generalized
-  AIC criterion. An optional shared multiplicative continuum can be
-  co-fitted alongside the LOSVD and template weights. Uncertainty is
-  quantified via a Laplace/curvature-approximation engine (validated across
-  a broad sigma range via a production-scale coverage sweep) or parametric
-  bootstrap, with an optional NUTS/NumPyro reference mode for
-  simulation-based-calibration checks. The package targets
+  number of template spectra in a single fitting engine. The defaults are
+  the recipe validated on NGC 4751 MUSE data: a third-difference roughness
+  penalty at a fixed strength, raised for broad LOSVDs and for fits at the
+  edge of the velocity grid; a shared multiplicative continuum co-fitted
+  with the LOSVD and template weights; and residual-based error inflation
+  against sky-line residuals and bad pixels. Uncertainty bands come from
+  the Laplace approximation to the posterior with a sky-line and
+  template-mismatch variance model, re-centered on the fit, with an
+  optional NUTS/NumPyro reference mode. Schwarzschild-model inputs carry
+  each velocity bin's posterior scatter. The package targets
   integral-field-spectroscopy data (MUSE, STIS) for black-hole mass
-  measurements through Schwarzschild orbit modelling.
+  measurements through Schwarzschild orbit modeling.
 keywords:
   - astronomy
   - spectroscopy
   - galaxy kinematics
   - LOSVD
-  - Schwarzschild orbit library modelling
+  - Schwarzschild orbit library modeling
 license: MIT

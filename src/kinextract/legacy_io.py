@@ -29,6 +29,7 @@ this module writes 5, matching what the actively-used reader expects.
 from __future__ import annotations
 
 import os
+import re
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
@@ -52,7 +53,7 @@ def write_fit_outputs(bin_name: str, result: dict, v_grid: np.ndarray,
         `f"{outdir}/{bin_name}sp.fit"` etc, matching the legacy
         `<bin>sp.<ext>` naming convention exactly.
     result : a `fit_losvd`/`fit_losvd_robust` result dict (`b`, `w`,
-        `clipped_mask` if `cleaning_method` was `"clip"`/`"inflate"`).
+        `clipped_mask` for a `fit_losvd_robust` result).
     v_grid : the velocity grid `result["b"]` is defined on
         (`cfg.build_velocity_grid()`).
     wave_fit, flux_fit : the observed wavelength/flux this bin's fit
@@ -110,7 +111,7 @@ def write_fit_outputs(bin_name: str, result: dict, v_grid: np.ndarray,
     # spec, not the real Fortran source; pspecfit is never auto-invoked by
     # finalizeextraction, so this mismatch never surfaced as a real run-time failure,
     # but reading the source directly leaves no ambiguity). clipped_mask
-    # (fit_losvd_robust with cleaning_method="clip"/"inflate" only) marks a pixel bad (1)
+    # (fit_losvd_robust results) marks a pixel bad (1)
     # instead of good (0); a plain fit_losvd result has no clipping, so every pixel
     # is flagged good.
     clipped_mask = result.get("clipped_mask")
@@ -162,7 +163,7 @@ def legacy_transvd_curve(v_grid: np.ndarray, b_median: np.ndarray, b_p16: np.nda
     data-vs-model velocity bin width, normalize the LOSVD to unit area, optionally
     mirror the curve about v=0 (`invert`), resample onto a dense fixed 1000-point
     grid spanning `[v_grid[0], -v_grid[0]]`, then apply `fix_losvd_errs.py`'s own
-    floor/clip/smooth/wing-zeroing cleanup. Lets `kinextract`'s own Laplace/bootstrap/
+    floor/clip/smooth/wing-zeroing cleanup. Lets `kinextract`'s own Laplace/
     NUTS uncertainty (`b_median`/`b_p16`/`b_p84`, the same curve `run_losvd_errors.py`
     already writes to `<bin>spmc.bestlosvd`) produce a `<bin>spmc_in` file directly,
     without needing `pallmc.f`'s `.mcfit2` bridge output or the legacy `rtransvd`/
@@ -311,4 +312,160 @@ def write_spmc_in(bin_name: str, v_grid: np.ndarray, b_median: np.ndarray, b_p16
     path = os.path.join(outdir, f"{bin_name}spmc_in")
     np.savetxt(path, np.column_stack([vel, losvd, lower_err, upper_err]),
                fmt="%.6f %.8f %.8f %.8f")
+    return path
+
+
+_STEM_RE = re.compile(r"(bin|bnn)(\d{4})$")
+
+
+def spmc_side_inverts(bin_name: str) -> bool:
+    """Whether a bin's LOSVD is mirrored about v=0 for the model: `True` for the `bin` side, `False` for `bnn`,
+    as `finalizeextraction`'s `rtransvd <bin> 1` / `rtransvd <bin> -1`. The side is read from the trailing
+    `bin####`/`bnn####` stem, so a source prefix (`mw`, `mn`, ...) does not change it -- testing
+    `bin_name.startswith("bnn")` mirrored every prefixed `mwbnn` file as well."""
+    m = _STEM_RE.search(bin_name)
+    if m is None:
+        raise ValueError(f"{bin_name!r} does not end in a bin####/bnn#### stem")
+    return m.group(1) == "bin"
+
+
+def transvd_bounds_laplace(v_grid: np.ndarray, b_median: np.ndarray, b_p16: np.ndarray, b_p84: np.ndarray,
+                            *, invert: bool, model_bin_kms: float = 133.3, voff: float = 0.0,
+                            vmax_out: float = 3000.0, ntot: int = 1000, noise_floor: str | None = "peak",
+                            b_samples: np.ndarray | None = None, model_bins: tuple | None = None
+                            ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """`transvd.f` without `fix_losvd_errs.py`, for Laplace (or NUTS) percentiles, on a fixed
+    `[-vmax_out, vmax_out]` grid shared by every bin. Returns `(velocity, losvd, lower_bound, upper_bound)`, the
+    last two absolute bounds (not widths), i.e. the four `spmc_in` columns.
+
+    b_samples, model_bins
+        Optional (default None: unchanged behavior). `b_samples` are posterior draws of the LOSVD on `v_grid`
+        (e.g. Laplace `b_samples`); `model_bins = (centers, half_width)` are the dynamical model's velocity bins
+        in the output frame (NGC 4751: `(np.linspace(-1800, 1800, 13), 150.0)`). The widths in each model bin
+        are then widened, where needed, so that the error model.x computes for that bin is at least the posterior
+        scatter of the binned LOSVD (`_match_model_bin_errors`).
+
+    The rescaling (sqrt(model_bin_kms / data bin)), unit-area normalization and mirroring are `transvd.f`'s; the
+    fixed 0.005 floor, clipping, smoothing and wing-zeroing of `fix_losvd_errs.py` are not applied.
+
+    noise_floor
+        "peak" (default): neither error width is allowed below the larger of the two at the LOSVD's peak. The
+        Laplace posterior of a positive LOSVD gives errors that scale with its amplitude, so in the wings they
+        fall to 1e-14 of the peak or less (NGC 4751 WFM: down to 1e-60) although the spectral noise is not
+        smaller there. The model's 13 velocity bins span the whole [vmin, vmax] range, so any model light in such
+        a bin gives (model/error)^2 > 1e38: single precision overflows and chi2 becomes NaN. The width at the
+        peak is the bin's own measured uncertainty level, so the floor keeps the weights tied to the noise.
+        None: only a width that is exactly zero is replaced (by the median positive upper width inside the
+        fitted range) -- the behavior of the N4751 notebooks' writer before 2026-10-16.
+    """
+    v = np.asarray(v_grid, dtype=float)
+    y = np.asarray(b_median, dtype=float)
+    y16 = np.asarray(b_p16, dtype=float)
+    y84 = np.asarray(b_p84, dtype=float)
+    if not (v.ndim == y.ndim == y16.ndim == y84.ndim == 1) or not (len(v) == len(y) == len(y16) == len(y84)):
+        raise ValueError("LOSVD inputs must be one-dimensional arrays of equal length")
+    if not all(np.all(np.isfinite(a)) for a in (v, y, y16, y84)):
+        raise ValueError("LOSVD inputs contain NaN or infinite values")
+    if len(v) < 3 or np.any(np.diff(v) <= 0):
+        raise ValueError("v_grid must have at least three strictly increasing samples")
+    data_bin_kms = v[2] - v[1]  # rtransvd's convention
+    if not np.allclose(np.diff(v), data_bin_kms, rtol=1e-6, atol=1e-8):
+        raise ValueError("v_grid must be uniformly spaced")
+    if noise_floor not in ("peak", None):
+        raise ValueError(f"noise_floor must be 'peak' or None, got {noise_floor!r}")
+
+    fac = np.sqrt(model_bin_kms / data_bin_kms)
+    v_in = v + voff
+    lower_width_in = (y - y16) / fac
+    upper_width_in = (y84 - y) / fac
+    total = np.sum(y)
+    if not np.isfinite(total) or total <= 0:
+        raise ValueError(f"Invalid LOSVD normalization: sum={total}")
+    y_in, lower_width_in, upper_width_in = y / total, lower_width_in / total, upper_width_in / total
+    if invert:
+        y_in = np.interp(-v_in, v_in, y_in, left=0.0, right=0.0)
+        lower_width_in = np.interp(-v_in, v_in, lower_width_in, left=0.0, right=0.0)
+        upper_width_in = np.interp(-v_in, v_in, upper_width_in, left=0.0, right=0.0)
+
+    vel = np.linspace(-vmax_out, vmax_out, ntot)
+    in_range = (vel >= v_in[0]) & (vel <= v_in[-1])
+    losvd = np.maximum(np.where(in_range, np.interp(vel, v_in, y_in), 0.0), 0.0)
+    lower_width = np.where(in_range, np.abs(np.interp(vel, v_in, lower_width_in)), 0.0)
+    upper_width = np.where(in_range, np.abs(np.interp(vel, v_in, upper_width_in)), 0.0)
+
+    if noise_floor == "peak":
+        ip = int(np.argmax(losvd))
+        floor = max(lower_width[ip], upper_width[ip])
+        if not (np.isfinite(floor) and floor > 0):
+            raise ValueError("zero error width at the LOSVD peak (degenerate posterior?)")
+        lower_width = np.maximum(lower_width, floor)
+        upper_width = np.maximum(upper_width, floor)
+    else:
+        pos = np.abs(upper_width_in)[np.abs(upper_width_in) > 0]
+        if pos.size == 0:
+            raise ValueError("upper error width is zero everywhere (degenerate posterior?)")
+        upper_width = np.where(upper_width > 0, upper_width, float(np.median(pos)))
+
+    if model_bins is not None:
+        if b_samples is None:
+            raise ValueError("model_bins needs b_samples (the posterior draws the bands came from)")
+        lower_width, upper_width = _match_model_bin_errors(
+            v_in, np.asarray(b_samples, dtype=float), invert, vel, losvd, lower_width, upper_width, model_bins)
+
+    lower_bound = np.maximum(losvd - lower_width, 0.0)
+    upper_bound = losvd + upper_width
+    return vel, losvd, lower_bound, upper_bound
+
+
+def _match_model_bin_errors(v_in, b_samples, invert, vel, losvd, lower_width, upper_width, model_bins):
+    """Rescale the error widths inside each model bin so that the error the model computes for that bin --
+    model.x (velmtod.f) sums the per-point errors linearly over the bin and uses max(upper - median,
+    (upper - lower) / 2), normalized like the LOSVD -- equals the posterior scatter of the LOSVD integrated over
+    the bin. Per-point widths are correlated along the LOSVD, so their linear sum is not that scatter (on
+    NGC 4751-like mocks it was about half of it). Bins with less than 0.1 % of the light keep the scale factor
+    of the nearest bin that has light, so the noise floor in empty bins is scaled consistently rather than
+    replaced by a near-zero posterior scatter. The widths are only ever widened (scale factor >= 1): the
+    posterior of a log-parametrized LOSVD has almost no scatter wherever its median has almost no light, so in
+    faint wing bins a smaller target would undo the noise floor rather than correct the sum."""
+    centers, half = np.asarray(model_bins[0], float), float(model_bins[1])
+    in_bin = [(vel >= c - half) & (vel < c + half) for c in centers]
+    S = []
+    for s in b_samples:
+        s = np.maximum(s, 0.0) / max(np.sum(np.maximum(s, 0.0)), 1e-300)
+        if invert:
+            s = np.interp(-v_in, v_in, s, left=0.0, right=0.0)
+        r = np.maximum(np.where((vel >= v_in[0]) & (vel <= v_in[-1]), np.interp(vel, v_in, s), 0.0), 0.0)
+        S.append([r[m].sum() / r.sum() for m in in_bin])
+    target = np.std(np.asarray(S), axis=0, ddof=1)
+    tot = losvd.sum()
+    light = np.array([losvd[m].sum() / tot for m in in_bin])
+    cur = np.array([np.maximum(upper_width[m], 0.5 * (upper_width[m] + lower_width[m])).sum() / tot for m in in_bin])
+    k = np.where((light > 1e-3) & (cur > 0), np.maximum(target / np.where(cur > 0, cur, 1.0), 1.0), np.nan)
+    ok = np.flatnonzero(np.isfinite(k))
+    if ok.size == 0:
+        return lower_width, upper_width
+    for j in np.flatnonzero(~np.isfinite(k)):
+        k[j] = k[ok[np.argmin(np.abs(ok - j))]]
+    fac = np.ones_like(vel)
+    for kj, m in zip(k, in_bin):
+        fac[m] = kj
+    return lower_width * fac, upper_width * fac
+
+
+def write_spmc_in_laplace(bin_name: str, v_grid: np.ndarray, b_median: np.ndarray, b_p16: np.ndarray,
+                           b_p84: np.ndarray, outdir: str, *, model_bin_kms: float = 133.3,
+                           vmax_out: float = 3000.0, ntot: int = 1000, noise_floor: str | None = "peak",
+                           b_samples: np.ndarray | None = None, model_bins: tuple | None = None) -> str:
+    """Write `<bin_name>spmc_in` from Laplace/NUTS percentiles with `transvd_bounds_laplace` (no
+    `fix_losvd_errs.py`). `bin_name` may carry a source prefix (`"mwbnn0704"`); the side, and so the mirroring,
+    comes from its `bin####`/`bnn####` stem (`spmc_side_inverts`). `v_grid` is in the systemic frame.
+    `b_samples`/`model_bins`: see `transvd_bounds_laplace`."""
+    os.makedirs(outdir, exist_ok=True)
+    vel, losvd, lower, upper = transvd_bounds_laplace(
+        v_grid, b_median, b_p16, b_p84, invert=spmc_side_inverts(bin_name), model_bin_kms=model_bin_kms,
+        vmax_out=vmax_out, ntot=ntot, noise_floor=noise_floor, b_samples=b_samples, model_bins=model_bins)
+    if np.any(lower > losvd + 1e-12) or np.any(upper <= losvd):
+        raise ValueError(f"{bin_name}: invalid error bounds")
+    path = os.path.join(outdir, f"{bin_name}spmc_in")
+    np.savetxt(path, np.column_stack([vel, losvd, lower, upper]), fmt="%.6f %.8e %.8e %.8e")
     return path

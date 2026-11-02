@@ -275,3 +275,86 @@ def test_write_spmc_in_creates_outdir_if_missing(tmp_path):
     path = write_spmc_in("bin0105", v, y, y16, y84, str(outdir))
     assert outdir.exists()
     assert os.path.exists(path)
+
+
+# --- write_spmc_in_laplace / transvd_bounds_laplace ------------------------------------------------
+
+from kinextract.legacy_io import spmc_side_inverts, transvd_bounds_laplace  # noqa: E402
+
+
+def test_spmc_side_from_stem_ignores_source_prefix():
+    assert spmc_side_inverts("bin0105") and spmc_side_inverts("mwbin0901") and spmc_side_inverts("mnbin1203")
+    assert not spmc_side_inverts("bnn0704") and not spmc_side_inverts("mwbnn0704")
+    with pytest.raises(ValueError):
+        spmc_side_inverts("bin07")
+
+
+def _laplace_like(sigma=150.0, rel=0.02):
+    """A Gaussian LOSVD whose percentiles scale with its amplitude, as a log-parameterized Laplace posterior does."""
+    v = np.arange(-1500.0, 1500.0 + 1e-9, 25.0)
+    y = np.exp(-0.5 * (v / sigma) ** 2)
+    return v, y, y * (1 - rel), y * (1 + rel)
+
+
+def test_noise_floor_peak_bounds_the_wing_errors():
+    v, y, y16, y84 = _laplace_like()
+    vel, L, lo, hi = transvd_bounds_laplace(v, y, y16, y84, invert=False)
+    ip = np.argmax(L)
+    w_peak = hi[ip] - L[ip]
+    assert np.all(hi - L >= w_peak * (1 - 1e-12))          # no width below the peak's
+    assert np.all(lo >= 0) and np.all(lo <= L)
+    assert np.isclose(w_peak, (y84 - y).max() / y.sum() / np.sqrt(133.3 / 25.0), rtol=0.05)
+    vel0, L0, lo0, hi0 = transvd_bounds_laplace(v, y, y16, y84, invert=False, noise_floor=None)
+    assert np.array_equal(L, L0)                            # the floor changes only the errors
+    assert (hi0 - L0).min() < 1e-10 * w_peak               # without it the wing errors all but vanish
+
+
+def test_invert_mirrors_about_zero():
+    v, y, y16, y84 = _laplace_like()
+    y = y * (1 + 0.3 * np.tanh(v / 300.0)); y84 = y * 1.02; y16 = y * 0.98
+    _, Lf, _, _ = transvd_bounds_laplace(v, y, y16, y84, invert=False)
+    _, Li, _, _ = transvd_bounds_laplace(v, y, y16, y84, invert=True)
+    assert np.allclose(Li, Lf[::-1], atol=1e-12)
+
+
+def _posterior_draws(n=400, sigma=250.0, seed=1):
+    """Correlated posterior draws of a Gaussian LOSVD: random width and center per draw, as a smooth posterior has."""
+    rng = np.random.default_rng(seed)
+    v = np.arange(-2000.0, 2000.0 + 1e-9, 8.0)
+    draws = np.array([np.exp(-0.5 * ((v - rng.normal(0, 15)) / (sigma * (1 + rng.normal(0, 0.04)))) ** 2)
+                      for _ in range(n)])
+    draws /= np.trapezoid(draws, v, axis=1)[:, None]
+    return v, draws
+
+
+def _model_binned(vel, L, lo, hi, centers, half):
+    err = np.maximum(hi - L, (hi - lo) / 2)
+    return (np.array([L[(vel >= c - half) & (vel < c + half)].sum() for c in centers]) / L.sum(),
+            np.array([err[(vel >= c - half) & (vel < c + half)].sum() for c in centers]) / L.sum())
+
+
+def test_model_bins_match_the_posterior_scatter_of_the_binned_losvd():
+    v, draws = _posterior_draws()
+    med, p16, p84 = np.median(draws, 0), np.percentile(draws, 16, 0), np.percentile(draws, 84, 0)
+    centers, half = np.linspace(-1800, 1800, 13), 150.0
+    vel, L, lo, hi = transvd_bounds_laplace(v, med, p16, p84, invert=False, vmax_out=1950.0,
+                                            b_samples=draws, model_bins=(centers, half))
+    S, E = _model_binned(vel, L, lo, hi, centers, half)
+    resampled = np.array([np.interp(vel, v, d) for d in draws])
+    target = np.array([resampled[:, (vel >= c - half) & (vel < c + half)].sum(1) / resampled.sum(1)
+                       for c in centers]).std(axis=1, ddof=1)
+    light = S > 0.01
+    E0 = _model_binned(*transvd_bounds_laplace(v, med, p16, p84, invert=False, vmax_out=1950.0), centers, half)[1]
+    assert np.allclose(E[light], np.maximum(target, E0)[light], rtol=0.15)
+    assert np.all(E >= E0 * (1 - 1e-9))  # only ever widened, so the noise floor survives in faint bins
+    # the default call is unchanged
+    a = transvd_bounds_laplace(v, med, p16, p84, invert=False, vmax_out=1950.0)
+    b = transvd_bounds_laplace(v, med, p16, p84, invert=False, vmax_out=1950.0, b_samples=draws, model_bins=None)
+    assert all(np.array_equal(x, y) for x, y in zip(a, b))
+
+
+def test_model_bins_require_samples():
+    v, draws = _posterior_draws(n=20)
+    med = np.median(draws, 0)
+    with pytest.raises(ValueError):
+        transvd_bounds_laplace(v, med, med * 0.98, med * 1.02, invert=False, model_bins=(np.zeros(1), 150.0))

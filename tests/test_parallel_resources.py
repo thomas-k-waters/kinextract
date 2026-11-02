@@ -8,7 +8,8 @@ import os
 
 import pytest
 
-from kinextract.multi_template import _available_cpu_count, _limit_worker_threads, resolve_n_jobs
+from kinextract.multi_template import (_available_cpu_count, _limit_worker_threads, resolve_n_jobs,
+                                       single_threaded_worker_env)
 
 
 def test_available_cpu_count_prefers_sched_affinity_over_cpu_count(monkeypatch):
@@ -93,3 +94,29 @@ def test_limit_worker_threads_does_not_override_explicit_jax_platforms(monkeypat
     monkeypatch.setenv("JAX_PLATFORMS", "gpu")
     _limit_worker_threads()
     assert os.environ["JAX_PLATFORMS"] == "gpu"
+
+
+def test_single_threaded_worker_env_pins_threads_for_spawned_workers_and_restores_parent(monkeypatch):
+    monkeypatch.setenv("OMP_NUM_THREADS", "8")
+    monkeypatch.delenv("VECLIB_MAXIMUM_THREADS", raising=False)
+    monkeypatch.setenv("XLA_FLAGS", "--xla_force_host_platform_device_count=2")
+    with single_threaded_worker_env():
+        for var in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                    "VECLIB_MAXIMUM_THREADS"):
+            assert os.environ[var] == "1"
+        # existing XLA flags are kept, the single-thread ones appended
+        assert os.environ["XLA_FLAGS"].startswith("--xla_force_host_platform_device_count=2")
+        assert "--xla_cpu_multi_thread_eigen=false" in os.environ["XLA_FLAGS"]
+    assert os.environ["OMP_NUM_THREADS"] == "8"
+    assert "VECLIB_MAXIMUM_THREADS" not in os.environ
+    assert os.environ["XLA_FLAGS"] == "--xla_force_host_platform_device_count=2"
+
+
+def test_single_threaded_worker_env_reaches_a_spawned_worker_before_numpy_loads():
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+    with single_threaded_worker_env(), ProcessPoolExecutor(max_workers=1, mp_context=get_context("spawn")) as pool:
+        env = dict(zip(("OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "XLA_FLAGS"),
+                       pool.map(os.getenv, ("OPENBLAS_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "XLA_FLAGS"))))
+    assert env["OPENBLAS_NUM_THREADS"] == "1" and env["VECLIB_MAXIMUM_THREADS"] == "1"
+    assert "--xla_cpu_multi_thread_eigen=false" in env["XLA_FLAGS"]

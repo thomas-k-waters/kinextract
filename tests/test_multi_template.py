@@ -40,7 +40,7 @@ def _mock_multi_template_case(templates, true_w, vel=0.0, sig=140.0, nsig=7, snr
     wave_fit = wavelength[mask]
 
     vmin, vmax = vel - nsig * sig, vel + nsig * sig
-    cfg = FitConfig(vmin=vmin, vmax=vmax)
+    cfg = FitConfig(vmin=vmin, vmax=vmax, continuum_knots=None)
     v_grid = cfg.build_velocity_grid()
     b_truth, _ = build_spline_truth(v_grid, vel=vel, sigma=sig, wiggle_scale=0.0, seed=seed)
 
@@ -237,7 +237,7 @@ def test_degenerate_nnls_on_first_iteration_fails_gracefully_instead_of_crashing
     from kinextract.multi_template import fit_losvd
 
     rng = np.random.default_rng(0)
-    cfg = FitConfig(vmin=-500.0, vmax=500.0)
+    cfg = FitConfig(vmin=-500.0, vmax=500.0, continuum_knots=None)
     v_grid = cfg.build_velocity_grid()
     n_templates, n_pix = 2, 50
     A_stack = np.abs(rng.normal(size=(n_templates, n_pix, len(v_grid))))

@@ -10,7 +10,7 @@ import pytest
 numpyro = pytest.importorskip("numpyro")
 
 from kinextract import FitConfig, build_template_stack, gauss_hermite_model, load_emiles_templates
-from kinextract.laplace_uncertainty import quick_laplace_uncertainty
+from kinextract.laplace_uncertainty import laplace_losvd_uncertainty
 from kinextract.nuts_uncertainty import nuts_losvd_uncertainty
 
 EMILES_GRID = "src/kinextract/template_data/emiles_muse_grid.npz"
@@ -22,7 +22,7 @@ def _mock_case(seed=0, true_v=20.0, true_sigma=90.0, snr=60.0):
         EMILES_GRID, select=[(1.0, -0.66), (5.0, 0.06), (14.0, 0.40)])
     mask = (template_wave >= WAVEFITMIN) & (template_wave <= WAVEFITMAX)
     wave_fit = template_wave[mask]
-    cfg = FitConfig(vmin=true_v - 7 * true_sigma, vmax=true_v + 7 * true_sigma)
+    cfg = FitConfig(vmin=true_v - 7 * true_sigma, vmax=true_v + 7 * true_sigma, continuum_knots=None)
     v_grid = cfg.build_velocity_grid()
     b_truth = np.maximum(gauss_hermite_model(v_grid, 1.0, true_v, true_sigma, 0.02, 0.03), 0.0)
     b_truth /= b_truth.sum()
@@ -50,7 +50,7 @@ def test_nuts_losvd_uncertainty_runs_and_is_sane():
     assert nuts["n_divergences"] < 0.05 * 150
 
 
-def test_nuts_losvd_uncertainty_agrees_roughly_with_quick_laplace_at_the_same_lam():
+def test_nuts_losvd_uncertainty_agrees_roughly_with_laplace_at_the_same_lam():
     """Not a tight numerical match (Gaussian approximation vs. the true
     posterior), but should be the same order of magnitude on a
     well-behaved mock -- a basic cross-check that both engines are
@@ -58,7 +58,7 @@ def test_nuts_losvd_uncertainty_agrees_roughly_with_quick_laplace_at_the_same_la
     verify-before-trusting culture.
     """
     A_stack_w, y_w, cfg, v_grid = _mock_case(seed=2)
-    quick = quick_laplace_uncertainty(A_stack_w, y_w, cfg, n_samples=200, seed=0)
+    quick = laplace_losvd_uncertainty(A_stack_w, y_w, cfg, n_samples=200, seed=0)
     nuts = nuts_losvd_uncertainty(A_stack_w, y_w, cfg, lam=quick["lam_used"],
                                    n_samples=300, n_warmup=200, seed=0)
     assert 0.2 * quick["sherm_std"] < nuts["sherm_std"] < 5.0 * quick["sherm_std"]
